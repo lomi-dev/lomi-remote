@@ -2,7 +2,7 @@
 //! Workspace event, terminal, watch, input and resize sequences are distinct types.
 //! Chunk bytes are opaque serialized experimental grid state, never a client-side
 //! parser replay of raw PTY output. Binary transport carries bytes without base64;
-//! JSON arrays here provide schema/fixture representation. Reassembly is capped at
+//! JSON arrays here provide schema representation. Reassembly is capped at
 //! 8 MiB, chunks at 16 KiB. A transport must enforce its assembly deadline and RAM
 //! budget before allocation and delay live events until complete validation/apply.
 use crate::rpc::dto;

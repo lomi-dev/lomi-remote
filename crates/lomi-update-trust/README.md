@@ -1,7 +1,6 @@
 # Durable TUF caller trust state
 
-This crate resolves the three raw Tough persistence failures demonstrated by
-`lomi-release-spike`. It uses pinned `tough=0.24.0` for TUF signatures, metadata
+This crate owns durable caller trust state and signed release verification. It uses pinned `tough=0.24.0` for TUF signatures, metadata
 verification, expiration and target hashing. It provides bounded local mirrors,
 HTTPS release transport, Unix/Windows activation adapters, and an opt-in release
 CLI and its installer lifecycle whose bootstrap root is embedded during a
@@ -54,40 +53,18 @@ implemented. Release HTTPS uses a fixed credential-free origin, disables
 redirects and proxies, and only fetches from the origin's `metadata/` and
 `targets/` paths.
 
-Validation from the repository root:
+Trust updates fail closed on invalid signatures, expired metadata, rollback,
+malformed state, oversized targets, and unsupported delegated roles. A successful
+metadata transaction is durable before verified target bytes are returned. The
+activation journal remains a startup deny marker until stable executable paths
+and pointers agree. Product installers use the release updater for recovery and
+never infer an older profile schema from missing or unreadable state.
 
-```sh
-cargo test -p lomi-update-trust --all-features
-cargo clippy -p lomi-update-trust --all-targets --all-features -- -D warnings
-cargo check -p lomi-update-trust --no-default-features
-```
-
-The `fault-injection` feature is disabled by default. It enables test CLI hooks
-that call `_exit` immediately before or after transaction commit, and a lock
-holder controlled through stdin. Ten integration tests use real child
-processes and bundled SQLite to verify corruption rejection, exclusive owner
-serialization, crashes on each side of commit, persisted root rotation without
-re-fetching `2.root.json`, rollback after restart, expiration, bad signatures,
-payload tampering, allocation limits, FIFO mirror rejection with child-process
-deadlines, and exact verified byte delivery. Nonblocking file opens precede
-regular-file checks, so a FIFO cannot indefinitely hold the update lock.
-
-Test code alone references the already vendored published Tough RSA test key,
-root and rotated-root fixtures in `tests/release/fixtures`. Their immutable
-source URLs, SHA-256 digests and upstream licenses are recorded there. No test
-key or fixture path is present in the library or normal CLI. The rotated fixture
-expires on 2029-07-27; tests must be reviewed and refreshed when it expires,
-without disabling Safe expiration enforcement.
-
-The crash tests exercise abrupt process death, not power cuts or filesystem
-corruption during device cache loss. SQLite durability assumes a correct local
-filesystem and storage device. Same-UID malicious writers, restoring a complete
-older database/marker backup, hardware clock compromise, and operator bootstrap
-trust are outside these filesystem checks. Orphaned staging directories after
-crashes are not reused as trust state; automatic cleanup and disk quotas remain
-future lifecycle work. Delegations, automatic network retries, platform
-qualification, bootstrap key ceremony, and production release signing remain
-unimplemented or unqualified. The original negative spike remains unchanged.
+Crash recovery covers process interruption under the documented filesystem and
+SQLite assumptions; it does not guarantee recovery from storage-device failure or
+power loss. Production bootstrap-root provisioning, signing ceremonies, and
+release publication remain operator responsibilities documented in
+[`release/README.md`](../../release/README.md).
 
 ## Stable executable activation
 

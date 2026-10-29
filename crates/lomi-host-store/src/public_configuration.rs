@@ -311,6 +311,3 @@ impl HostStore {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests;

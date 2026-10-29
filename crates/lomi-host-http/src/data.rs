@@ -162,19 +162,7 @@ impl DataTransport {
     pub fn new(origin: RemoteApiOrigin) -> Result<Self> {
         Self::with_tls(origin, tls_config())
     }
-    /// Build a transport that trusts one fixture CA. Available only in tests and
-    /// explicitly opted-in fixture binaries; production callers retain WebPKI.
-    #[cfg(any(test, feature = "test-fixtures"))]
-    pub fn with_test_root(origin: RemoteApiOrigin, root_der: Vec<u8>) -> Result<Self> {
-        let tls = ureq::tls::TlsConfig::builder()
-            .provider(ureq::tls::TlsProvider::Rustls)
-            .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .root_certs(ureq::tls::RootCerts::new_with_certs(&[
-                ureq::tls::Certificate::from_der(&root_der).to_owned(),
-            ]))
-            .build();
-        Self::with_tls(origin, tls)
-    }
+
     pub(super) fn with_tls(origin: RemoteApiOrigin, tls: ureq::tls::TlsConfig) -> Result<Self> {
         Ok(Self {
             budget: None,

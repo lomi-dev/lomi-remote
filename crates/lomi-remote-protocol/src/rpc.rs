@@ -1136,7 +1136,7 @@ impl RpcCall {
 }
 
 /// Correlate an untrusted response with the original request before dispatch/apply.
-/// The context-free decoder is useful for fixtures; transports use this entrypoint.
+/// The context-free decoder accepts wire shape without method-specific context.
 pub fn decode_response_for(bytes: &[u8], request: &RpcRequest) -> Result<RpcResponse, String> {
     let response = decode_response(bytes)?;
     response.validate_for(request).map_err(str::to_owned)?;

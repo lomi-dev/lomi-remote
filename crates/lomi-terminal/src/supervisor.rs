@@ -13,9 +13,7 @@ use std::{
 const STARTUP: Duration = Duration::from_secs(3);
 const PROFILE_LIMIT: usize = 64 * 1024;
 
-#[cfg_attr(all(unix, feature = "owned-host-fixture"), allow(dead_code))]
 static WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg_attr(all(unix, feature = "owned-host-fixture"), allow(dead_code))]
 struct Slot;
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -25,10 +23,8 @@ impl Drop for Slot {
 pub(super) enum Worker {
     #[cfg(target_os = "macos")]
     Privileged(Box<macos_privileged::Worker>),
-    #[cfg_attr(all(unix, feature = "owned-host-fixture"), allow(dead_code))]
     Child(ChildWorker),
-    #[cfg(feature = "owned-host-fixture")]
-    External(owned_fixture::ExternalWorker),
+
     #[cfg(all(target_os = "macos", feature = "experimental-macos-coalition-cleanup"))]
     Coalition(Box<macos_coalition::Worker>),
 }
@@ -38,8 +34,6 @@ impl Worker {
             #[cfg(target_os = "macos")]
             Self::Privileged(worker) => worker.finished(),
             Self::Child(worker) => worker.finished(),
-            #[cfg(feature = "owned-host-fixture")]
-            Self::External(worker) => worker.finished(),
             #[cfg(all(target_os = "macos", feature = "experimental-macos-coalition-cleanup"))]
             Self::Coalition(worker) => worker.finished(),
         }
@@ -49,8 +43,6 @@ impl Worker {
             #[cfg(target_os = "macos")]
             Self::Privileged(worker) => worker.stop(),
             Self::Child(worker) => worker.stop(),
-            #[cfg(feature = "owned-host-fixture")]
-            Self::External(worker) => worker.stop(),
             #[cfg(all(target_os = "macos", feature = "experimental-macos-coalition-cleanup"))]
             Self::Coalition(worker) => worker.stop(),
         }
@@ -167,7 +159,6 @@ fn profile_bytes(profile: &SpawnProfile) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-#[cfg_attr(all(unix, feature = "owned-host-fixture"), allow(dead_code))]
 pub(super) fn spawn(
     executable: &Path,
     profile: &SpawnProfile,
@@ -250,27 +241,6 @@ fn decode(bytes: &[u8]) -> Option<SpawnProfile> {
     })
 }
 pub(super) fn run() -> i32 {
-    run_with_attestation(None)
-}
-struct StartupAttestation {
-    socket: Option<UnixStream>,
-    committed: bool,
-}
-impl Drop for StartupAttestation {
-    fn drop(&mut self) {
-        // N proves this real worker never accepted G, including startup EOF.
-        if !self.committed
-            && let Some(observer) = &mut self.socket
-        {
-            let _ = observer.write_all(b"N");
-        }
-    }
-}
-fn run_with_attestation(attestation: Option<UnixStream>) -> i32 {
-    let mut attestation = StartupAttestation {
-        socket: attestation,
-        committed: false,
-    };
     // The worker is a fresh, single-threaded executable. Reject accidental
     // inheritance from concurrent host FD acquisition before creating any PTY.
     portable_pty::unix::close_random_fds();
@@ -319,32 +289,13 @@ fn run_with_attestation(attestation: Option<UnixStream>) -> i32 {
     let Some(profile) = decode(&bytes) else {
         return 1;
     };
-    // Test-only root gate: transferred lifetime descriptors cannot start a
-    // shell until root authenticates the registration ACK. Production has None.
-    if let Some(observer) = &mut attestation.socket {
-        let mut registered = [0];
-        if observer.read_exact(&mut registered).is_err() || registered != *b"K" {
-            return 1;
-        }
-    }
-    #[cfg(feature = "owned-host-fixture")]
-    let fixture_worker = attestation.socket.is_some();
     let before_exec = || {
         if socket.write_all(b"R").is_err() {
             return false;
         }
         let mut go = [0];
-        let accepted = socket.read_exact(&mut go).is_ok() && go == *b"G";
-        attestation.committed = accepted;
-        accepted
+        socket.read_exact(&mut go).is_ok() && go == *b"G"
     };
-    #[cfg(feature = "owned-host-fixture")]
-    let (acquired, known_exec_failure) = if fixture_worker {
-        unix::Pty::acquire_owned_fixture(&profile, before_exec)
-    } else {
-        (unix::Pty::acquire(&profile, before_exec, true), false)
-    };
-    #[cfg(not(feature = "owned-host-fixture"))]
     let acquired = unix::Pty::acquire(&profile, before_exec, true);
     let mut pty = match acquired {
         Ok(pty) => pty,
@@ -354,23 +305,6 @@ fn run_with_attestation(attestation: Option<UnixStream>) -> i32 {
             } else {
                 b"U"
             });
-            #[cfg(feature = "owned-host-fixture")]
-            if attestation.socket.is_some() && attestation.committed {
-                // SpawnFailed after accepted G is the spawn_command error path.
-                // std::process has reaped exec-failure children; independently
-                // demand ECHILD before attesting no surviving child.
-                if known_exec_failure && error == Error::SpawnFailed && owned_fixture::no_children()
-                {
-                    if let Some(observer) = &mut attestation.socket {
-                        let _ = observer.write_all(b"B");
-                    }
-                    return owned_fixture::NO_CHILD_EXIT;
-                }
-                // Unknown acquisition never drops the root-owned watchdog.
-                loop {
-                    thread::park_timeout(Duration::from_secs(60));
-                }
-            }
             return 1;
         }
     };
@@ -402,24 +336,12 @@ fn run_with_attestation(attestation: Option<UnixStream>) -> i32 {
     // Observe neither wait/try_wait nor any other reaper during this grace:
     // the original leader must pin the group until stop's final SIGKILL.
     thread::sleep(Duration::from_millis(300));
-    #[cfg(feature = "owned-host-fixture")]
-    let mut group_quiet = false;
+
     loop {
         let cleaned = pty.final_worker_signal();
         #[cfg(all(target_os = "macos", feature = "experimental-macos-session-cleanup"))]
         let cleaned = cleaned.and_then(|_| macos::cleanup_session(pty.worker_group()));
-        #[cfg(feature = "owned-host-fixture")]
-        let cleaned = if attestation.socket.is_some() {
-            cleaned.and_then(|_| {
-                if !group_quiet {
-                    pty.original_group_quiet()?;
-                    group_quiet = true;
-                }
-                Ok(())
-            })
-        } else {
-            cleaned
-        };
+
         let cleaned = cleaned.and_then(|_| pty.reap_worker_leader());
         #[cfg(target_os = "linux")]
         let cleaned = cleaned.and_then(|_| linux::reap_descendants());
@@ -434,29 +356,9 @@ fn run_with_attestation(attestation: Option<UnixStream>) -> i32 {
         ))]
         let _ = graceful; // Platform result supersedes graceful HUP; macOS feature is experimental.
         if cleaned.is_ok() {
-            // Default macOS A covers only the owned original group/PTY/leader.
-            // Experimental macOS convergence is not complete-session proof;
-            // Linux additionally requires kernel ECHILD for all descendants.
-            #[cfg(feature = "owned-host-fixture")]
-            if let Some(observer) = &mut attestation.socket {
-                // Typed code is reachable only AFTER quiet while pinned, leader
-                // reap, and platform cleanup. It permits physical recovery if
-                // transport proof is missing/corrupt, never a qualification pass.
-                match std::env::var("LOMI_OWNED_TEST_ATTEST").as_deref() {
-                    Ok("drop") => {}
-                    Ok("AA") => {
-                        let _ = observer.write_all(b"AA");
-                    }
-                    Ok("AX") => {
-                        let _ = observer.write_all(b"AX");
-                    }
-                    _ => {
-                        let _ = observer.write_all(b"A");
-                    }
-                }
-                let _ = socket.write_all(b"A");
-                return owned_fixture::CLEAN_EXIT;
-            }
+            // Default macOS cleanup covers only the owned original group,
+            // PTY, and leader. Linux additionally requires kernel ECHILD for
+            // all descendants.
             let _ = socket.write_all(b"A");
             return 0;
         }
@@ -581,80 +483,3 @@ mod macos;
 pub(super) mod macos_coalition;
 #[cfg(target_os = "macos")]
 pub(super) mod macos_privileged;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rejected_rights_transfer_closes_every_installed_descriptor() {
-        for (status, count) in [(b'S', 2), (b'F', 1), (b'X', 1), (b'S', 20)] {
-            let (owner, peer) = UnixStream::pair().unwrap();
-            let mut probes = Vec::new();
-            let mut endpoints = Vec::new();
-            for _ in 0..count {
-                let (probe, endpoint) = UnixStream::pair().unwrap();
-                probe
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                probes.push(probe);
-                endpoints.push(endpoint);
-            }
-            let mut byte = [status];
-            let mut iov = libc::iovec {
-                iov_base: byte.as_mut_ptr().cast(),
-                iov_len: 1,
-            };
-            let mut control = [0usize; 16];
-            let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-            message.msg_iov = &mut iov;
-            message.msg_iovlen = 1;
-            message.msg_control = control.as_mut_ptr().cast();
-            message.msg_controllen =
-                unsafe { libc::CMSG_SPACE((count * std::mem::size_of::<RawFd>()) as _) } as _;
-            unsafe {
-                let header = libc::CMSG_FIRSTHDR(&message);
-                (*header).cmsg_level = libc::SOL_SOCKET;
-                (*header).cmsg_type = libc::SCM_RIGHTS;
-                (*header).cmsg_len =
-                    libc::CMSG_LEN((count * std::mem::size_of::<RawFd>()) as _) as _;
-                for (index, endpoint) in endpoints.iter().enumerate() {
-                    std::ptr::write_unaligned(
-                        libc::CMSG_DATA(header).cast::<RawFd>().add(index),
-                        endpoint.as_raw_fd(),
-                    );
-                }
-                assert_eq!(libc::sendmsg(peer.as_raw_fd(), &message, 0), 1);
-            }
-            assert!(receive_fd(&owner).is_err());
-            drop(endpoints);
-            // EOF proves neither returned nor ancillary-truncated copies remain
-            // installed, without racy process-wide descriptor-count assertions.
-            for (index, mut probe) in probes.into_iter().enumerate() {
-                assert_eq!(
-                    probe.read(&mut [0]).unwrap_or_else(|e| panic!(
-                        "synthetic status={status} count={count} index={index}: {e}"
-                    )),
-                    0
-                );
-            }
-        }
-    }
-    #[test]
-    fn cleanup_probe_never_consumes_ack_and_rejects_eof_or_invalid_bytes() {
-        let (mut owner, mut worker) = UnixStream::pair().unwrap();
-        assert_eq!(peek_cleanup(&owner), Ok(false));
-        worker.write_all(b"A").unwrap();
-        assert_eq!(peek_cleanup(&owner), Ok(true));
-        let mut ack = [0];
-        owner.read_exact(&mut ack).unwrap();
-        assert_eq!(ack, *b"A");
-        worker.write_all(b"X").unwrap();
-        assert_eq!(peek_cleanup(&owner), Err(Error::CleanupFailed));
-        owner.read_exact(&mut ack).unwrap();
-        drop(worker);
-        assert_eq!(peek_cleanup(&owner), Err(Error::CleanupFailed));
-    }
-}
-
-#[cfg(feature = "owned-host-fixture")]
-pub(crate) mod owned_fixture;

@@ -75,8 +75,6 @@ impl Pty {
             .begin_shutdown()
             .inspect_err(|_| {
                 self.cleanup = Cleanup::Failed;
-                #[cfg(feature = "windows-pty-proof-hooks")]
-                lomi_windows_pty::proof_hooks::record_service_failure(8);
             })
             .map_err(|_| Error::CleanupFailed)
     }
@@ -89,15 +87,12 @@ impl Pty {
             Ok(false) => Ok(false),
             Err(_) => {
                 self.cleanup = Cleanup::Failed;
-                #[cfg(feature = "windows-pty-proof-hooks")]
-                lomi_windows_pty::proof_hooks::record_service_failure(9);
+
                 Err(Error::CleanupFailed)
             }
         }
     }
     fn final_output_unknown(&mut self, _reason: u32) {
-        #[cfg(feature = "windows-pty-proof-hooks")]
-        lomi_windows_pty::proof_hooks::record_service_failure(_reason);
         self.uncertain_output = true;
         self.cleanup = Cleanup::Failed;
     }

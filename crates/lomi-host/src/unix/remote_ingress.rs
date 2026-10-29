@@ -8,9 +8,7 @@ use super::remote_connection::{PendingRemoteConnection, RemoteConnectionState};
 use super::{
     HostAuth, Runtime, RuntimeWithOperation, SecretStorage, channel, cloud::PeerEligibility, peer,
 };
-use lomi_host_http::{BudgetStop, RelayConnection, RelayTransport};
-#[cfg(any(not(test), all(test, feature = "cloud-fixture")))]
-use lomi_host_http::{DataTransport, RemoteApiOrigin};
+use lomi_host_http::{BudgetStop, DataTransport, RelayConnection, RelayTransport, RemoteApiOrigin};
 use lomi_remote_protocol::{ChannelId, http::*};
 use lomi_remote_protocol::{
     DecimalU64, OperationReceipt, WorkspaceContext,
@@ -51,257 +49,28 @@ const PEER_REFRESH_MARGIN: Duration = Duration::from_secs(3);
 const MAX_STARTED_GIT_OUTPUT_MESSAGES: usize = 8;
 const MAX_STARTED_GIT_OUTPUT_BYTES: usize = 2 * MAX_MESSAGE_LEN + MAX_FRAGMENT_PAYLOAD_LEN;
 
-// Test-only originating failure metadata. Never format an error or payload.
-#[cfg(test)]
-pub(super) type IngressOrigin = (&'static str, Option<&'static str>, &'static str, u32, u32);
-#[cfg(test)]
-pub(super) type IngressFailure = (
-    &'static str,
-    &'static str,
-    Option<IngressOrigin>,
-    u64,
-    &'static str,
-    bool,
-    bool,
-);
-#[cfg(test)]
-pub(super) type IngressFailureSnapshot = (Option<IngressFailure>, u64, u64);
-#[cfg(all(test, feature = "cloud-fixture"))]
-const INGRESS_DIAGNOSTIC_PREFIX: &[u8] = b"LOMI_INGRESS_DIAGNOSTIC=";
-#[cfg(all(test, feature = "cloud-fixture"))]
-const INGRESS_DIAGNOSTIC_MAX_BYTES: usize = 2048;
-#[cfg(all(test, feature = "cloud-fixture"))]
-const INGRESS_DIAGNOSTIC_MAX_EVENTS: usize = 64;
-#[cfg(all(test, feature = "cloud-fixture"))]
-static INGRESS_DIAGNOSTIC_EVENTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-std::thread_local! {
-    static INGRESS_ORIGIN: std::cell::Cell<Option<IngressOrigin>> = const { std::cell::Cell::new(None) };
-}
-#[cfg(test)]
-pub(in super::super) fn record_origin_for_test(
-    error_type: &'static str,
-    variant: Option<&'static str>,
-    file: &'static str,
-    line: u32,
-    column: u32,
-) {
-    INGRESS_ORIGIN.with(|origin| {
-        if origin.get().is_none() {
-            origin.set(Some((error_type, variant, file, line, column)));
-        }
-    });
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-fn diagnostic_phase_for_fixture(phase: &'static str) -> &'static str {
-    match phase {
-        "connect" => "CONNECT",
-        "ticket-request" => "TICKET_REQUEST",
-        "discard" => "DISCARD",
-        "connection-turn/vacant" => "CONNECTION_TURN_VACANT",
-        "connection-turn/read-first" => "CONNECTION_TURN_READ_FIRST",
-        "connection-turn/write-second" => "CONNECTION_TURN_WRITE_SECOND",
-        "connection-turn/read-third" => "CONNECTION_TURN_READ_THIRD",
-        "connection-turn/established" => "CONNECTION_TURN_ESTABLISHED",
-        _ => "OTHER",
-    }
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-fn diagnostic_error_for_fixture(error: &'static str) -> &'static str {
-    match error {
-        "None" => "NONE",
-        "Invalid" => "INVALID",
-        "Fatal::Auth" => "FATAL_AUTH",
-        "Fatal::Http" => "FATAL_HTTP",
-        "Fatal::Rejected" => "FATAL_REJECTED",
-        "Fatal::Stale" => "FATAL_STALE",
-        _ => "OTHER",
-    }
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-fn diagnostic_origin_for_fixture(file: &'static str) -> &'static str {
-    if file.ends_with("/remote_ingress.rs") || file == "remote_ingress.rs" {
-        "REMOTE_INGRESS"
-    } else if file.ends_with("/remote_connection.rs") || file == "remote_connection.rs" {
-        "REMOTE_CONNECTION"
-    } else if file.contains("/remote_terminal") || file == "remote_terminal.rs" {
-        "REMOTE_TERMINAL"
-    } else if file.ends_with("/remote_files_watch.rs") || file == "remote_files_watch.rs" {
-        "REMOTE_FILES_WATCH"
-    } else if file.ends_with("/shared_owner.rs") || file == "shared_owner.rs" {
-        "SHARED_OWNER"
-    } else if file.ends_with("/owner_domain.rs") || file == "owner_domain.rs" {
-        "OWNER_DOMAIN"
-    } else {
-        "OTHER"
-    }
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-fn diagnostic_call_for_fixture(call: &'static str) -> &'static str {
-    match call {
-        "none" => "NONE",
-        "workspace.get" => "WORKSPACE_GET",
-        "workspace.capabilities" => "WORKSPACE_CAPABILITIES",
-        "terminal.rename" => "TERMINAL_RENAME",
-        "terminal.move" => "TERMINAL_MOVE",
-        "terminal.create" => "TERMINAL_CREATE",
-        "terminal.split" => "TERMINAL_SPLIT",
-        "terminal.close" => "TERMINAL_CLOSE",
-        "terminal.restart" => "TERMINAL_RESTART",
-        "terminal.attach" => "TERMINAL_ATTACH",
-        "terminal.snapshot" => "TERMINAL_SNAPSHOT",
-        "terminal.ack" => "TERMINAL_ACK",
-        "terminal.claim" => "TERMINAL_CLAIM",
-        "terminal.renew" => "TERMINAL_RENEW",
-        "terminal.release" => "TERMINAL_RELEASE",
-        "terminal.input" => "TERMINAL_INPUT",
-        "terminal.resize" => "TERMINAL_RESIZE",
-        _ => "OTHER",
-    }
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-fn emit_ingress_diagnostic_for_fixture(failure: IngressFailure, elapsed_ms: u64) {
-    use std::io::Write as _;
-    use std::sync::atomic::Ordering as AtomicOrdering;
-
-    if INGRESS_DIAGNOSTIC_EVENTS
-        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |events| {
-            (events < INGRESS_DIAGNOSTIC_MAX_EVENTS).then_some(events + 1)
-        })
-        .is_err()
-    {
-        return;
-    }
-    let (phase, error, origin, request_count, call, pending_response, pending_stream) = failure;
-    let (origin_category, line, column) = match origin {
-        Some((_, _, file, line, column)) => (
-            diagnostic_origin_for_fixture(file),
-            line.min(100_000),
-            column.min(100_000),
-        ),
-        None => ("OTHER", 0, 0),
-    };
-    let record = serde_json::json!({
-        "formatVersion": 1,
-        "phase": diagnostic_phase_for_fixture(phase),
-        "error": diagnostic_error_for_fixture(error),
-        "origin": origin_category,
-        "line": line,
-        "column": column,
-        "requestCount": request_count.min(1_000_000),
-        "call": diagnostic_call_for_fixture(call),
-        "elapsedMs": elapsed_ms.min(600_000),
-        "pendingResponse": pending_response,
-        "pendingStream": pending_stream,
-    });
-    let Ok(payload) = serde_json::to_vec(&record) else {
-        return;
-    };
-    if INGRESS_DIAGNOSTIC_PREFIX.len() + payload.len() + 1 > INGRESS_DIAGNOSTIC_MAX_BYTES {
-        return;
-    }
-    let mut line = Vec::with_capacity(INGRESS_DIAGNOSTIC_PREFIX.len() + payload.len() + 1);
-    line.extend_from_slice(INGRESS_DIAGNOSTIC_PREFIX);
-    line.extend_from_slice(&payload);
-    line.push(b'\n');
-    let _ = std::io::stderr().lock().write_all(&line);
-}
-// Non-test expansions are the exact preexisting mapper function items.
-#[cfg(not(test))]
 macro_rules! invalid_at {
     () => {
         invalid
     };
 }
-#[cfg(test)]
-macro_rules! invalid_at {
-    () => {
-        |error| {
-            record_origin_for_test(
-                std::any::type_name_of_val(&error),
-                None,
-                file!(),
-                line!(),
-                column!(),
-            );
-            invalid(error)
-        }
-    };
-}
-#[cfg(not(test))]
+
 macro_rules! owner_error_at {
     () => {
         peer::owner_error
     };
 }
-#[cfg(test)]
-macro_rules! owner_error_at {
-    () => {
-        |error| {
-            let variant = match &error {
-                super::super::shared_owner::Error::Store(_) => "Store",
-                super::super::shared_owner::Error::UncertainStore(_) => "UncertainStore",
-                super::super::shared_owner::Error::Domain(_) => "Domain",
-            };
-            record_origin_for_test(
-                std::any::type_name_of_val(&error),
-                Some(variant),
-                file!(),
-                line!(),
-                column!(),
-            );
-            peer::owner_error(error)
-        }
-    };
-}
-// Non-test boundary macros expand to the exact original expression.
-#[cfg(not(test))]
+
 macro_rules! peer_boundary_at {
     ($label:literal, $result:expr) => {
         $result
     };
 }
-#[cfg(test)]
-macro_rules! peer_boundary_at {
-    ($label:literal, $result:expr) => {
-        $result.inspect_err(|error| {
-            record_origin_for_test(
-                $label,
-                Some(peer_error_variant_for_test(error)),
-                file!(),
-                line!(),
-                column!(),
-            );
-        })
-    };
-}
-#[cfg(not(test))]
+
 macro_rules! invalid_none_at {
     ($label:literal, $option:expr) => {
         $option.ok_or(peer::PeerError::Invalid)
     };
-}
-#[cfg(test)]
-macro_rules! invalid_none_at {
-    ($label:literal, $option:expr) => {
-        $option.ok_or_else(|| {
-            record_origin_for_test($label, Some("None"), file!(), line!(), column!());
-            peer::PeerError::Invalid
-        })
-    };
-}
-#[cfg(test)]
-fn peer_error_variant_for_test(error: &peer::PeerError) -> &'static str {
-    match error {
-        peer::PeerError::Invalid => "Invalid",
-        peer::PeerError::Fatal(super::StepError::Auth(_)) => "Fatal::Auth",
-        peer::PeerError::Fatal(super::StepError::Http(_)) => "Fatal::Http",
-        peer::PeerError::Fatal(super::StepError::ExpiredEnrollment) => "Fatal::Auth",
-        peer::PeerError::Fatal(super::StepError::ExpiredRotation) => "Fatal::Auth",
-        peer::PeerError::Fatal(super::StepError::Rejected) => "Fatal::Rejected",
-        peer::PeerError::Fatal(super::StepError::Stale) => "Fatal::Stale",
-    }
 }
 
 type WatchCheck<'a> = dyn Fn() -> Result<(), BudgetStop> + Sync + 'a;
@@ -363,25 +132,7 @@ impl TicketedAdmission {
         current.is_ok() && Instant::now() < self.expires_at
     }
 }
-#[cfg(test)]
-pub(super) type TicketTestHook =
-    Box<dyn FnOnce(ChannelId, &ChannelTicketParams, &super::OwnerOperation<'_>, &WatchCheck<'_>)>;
-#[cfg(test)]
-struct TicketScript {
-    response: Result<ChannelTicketResult, lomi_host_http::Error>,
-    hook: Option<TicketTestHook>,
-    calls: std::rc::Rc<std::cell::Cell<usize>>,
-    // Attenuation-only future receipt fault: never changes original budgets.
-    minimum_elapsed: Duration,
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-#[derive(Clone)]
-struct CloudFixtureTransportRoots {
-    remote_api: Vec<u8>,
-    relay: Vec<u8>,
-}
-#[cfg(all(test, feature = "cloud-fixture"))]
-const CLOUD_FIXTURE_ROOT_DER_MAX_BYTES: usize = 16 * 1024;
+
 #[derive(Default)]
 pub(super) struct Driver<'cancel> {
     coordinator: Weak<Coordinator>,
@@ -390,23 +141,7 @@ pub(super) struct Driver<'cancel> {
     connection: Option<Connection<'cancel>>,
     candidate: Option<channel::AdmittedChannelHandoff>,
     ticketed: Option<TicketedAdmission>,
-    #[cfg(test)]
-    script: Option<TicketScript>,
-    #[cfg(test)]
-    relay_script: Option<RelayTransport>,
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    cloud_fixture_transport_roots: Option<CloudFixtureTransportRoots>,
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    cloud_fixture_ticket_error: Option<lomi_host_http::Error>,
     // Static diagnostic only; retained across discard so failure remains visible.
-    #[cfg(test)]
-    channel_step_observation: (&'static str, Option<&'static str>),
-    #[cfg(test)]
-    failure_observation: Option<IngressFailure>,
-    #[cfg(test)]
-    diagnostic_connects: u64,
-    #[cfg(test)]
-    diagnostic_turns: u64,
 }
 struct PendingResponse<'cancel> {
     operation: super::OwnerOperation<'cancel>,
@@ -417,8 +152,6 @@ struct PendingResponse<'cancel> {
     operation_disclosure: Option<super::super::remote_operations::RemoteOperationDisclosure>,
     git_receipt_disclosure: Option<super::super::shared_owner::GitReceiptDisclosure>,
     remaining: usize,
-    #[cfg(test)]
-    sent_fragments: usize,
 }
 struct PendingGitRead<'cancel> {
     operation: super::OwnerOperation<'cancel>,
@@ -693,10 +426,7 @@ struct Connection<'cancel> {
     peer_cutoff: Instant,
     applied_observation: Instant,
     started_git_peer: Option<peer::StartedGitPeerObservation>,
-    #[cfg(test)]
-    diagnostic_requests: u64,
-    #[cfg(test)]
-    diagnostic_call: &'static str,
+
     response: Option<PendingResponse<'cancel>>,
     git_read: Option<PendingGitRead<'cancel>>,
     git_mutation: Option<PendingGitMutation<'cancel>>,
@@ -727,10 +457,6 @@ impl<'cancel> Driver<'cancel> {
         ))
     }
 
-    #[cfg(test)]
-    pub(super) fn new(cancelled: &'cancel AtomicBool) -> Self {
-        Self::with_coordinator(cancelled, Weak::new())
-    }
     pub(super) fn with_coordinator(
         cancelled: &'cancel AtomicBool,
         coordinator: Weak<Coordinator>,
@@ -887,22 +613,7 @@ impl<'cancel> Driver<'cancel> {
             mutation.cancellation.cancel();
         }
     }
-    #[cfg(test)]
-    pub(super) fn pending_git_cancellation_for_test(&self) -> Option<lomi_git::CancellationToken> {
-        self.connection
-            .as_ref()?
-            .git_read
-            .as_ref()
-            .map(|read| read.read.cancellation_for_test())
-    }
-    #[cfg(test)]
-    pub(super) fn sent_git_diff_fragments_for_test(&self) -> usize {
-        self.connection
-            .as_ref()
-            .and_then(|c| c.response.as_ref())
-            .filter(|response| matches!(&response.request.call, RpcCall::GitDiff(_)))
-            .map_or(0, |response| response.sent_fragments)
-    }
+
     pub(super) fn peer_refresh_deadline(&self, now: Instant) -> Option<Instant> {
         self.connection
             .as_ref()
@@ -919,33 +630,9 @@ impl<'cancel> Driver<'cancel> {
         self.candidate.is_none() && self.ticketed.is_none() && self.connection.is_none()
     }
     pub(super) fn discard(&mut self) {
-        #[cfg(all(test, feature = "cloud-fixture"))]
-        if let Some(connection) = self.connection.as_ref() {
-            emit_ingress_diagnostic_for_fixture(
-                (
-                    "discard",
-                    "None",
-                    None,
-                    connection.diagnostic_requests,
-                    connection.diagnostic_call,
-                    connection.response.is_some(),
-                    connection.stream.is_some(),
-                ),
-                connection
-                    .origin
-                    .elapsed()
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64,
-            );
-        }
         self.candidate = None;
         self.ticketed = None;
         self.connection = None;
-        #[cfg(test)]
-        {
-            self.script = None;
-            self.relay_script = None;
-        }
     }
     pub(super) fn accept(
         &mut self,
@@ -963,56 +650,7 @@ impl<'cancel> Driver<'cancel> {
         self.candidate = Some(handoff);
         true
     }
-    #[cfg(test)]
-    pub(super) fn channel_step_observation_for_test(&self) -> (&'static str, Option<&'static str>) {
-        self.channel_step_observation
-    }
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    pub(super) fn cloud_fixture_ticket_error_for_test(&self) -> Option<lomi_host_http::Error> {
-        self.cloud_fixture_ticket_error
-    }
-    #[cfg(test)]
-    pub(super) fn after_channel_step(
-        &mut self,
-        worker: &mut channel::Worker,
-        auth: &HostAuth<'_, dyn SecretStorage + '_>,
-        runtime: RuntimeWithOperation<'cancel, '_>,
-        eligibility: &PeerEligibility,
-    ) -> bool {
-        self.after_channel_handoff(worker.take_admitted(), auth, runtime, eligibility)
-    }
-    #[cfg(test)]
-    pub(super) fn after_channel_handoff(
-        &mut self,
-        handoff: Option<channel::AdmittedChannelHandoff>,
-        auth: &HostAuth<'_, dyn SecretStorage + '_>,
-        runtime: RuntimeWithOperation<'cancel, '_>,
-        eligibility: &PeerEligibility,
-    ) -> bool {
-        #[cfg(test)]
-        {
-            self.channel_step_observation = ("take-admitted", None);
-        }
-        if let Some(handoff) = handoff {
-            #[cfg(test)]
-            {
-                self.channel_step_observation.0 = "accept-handoff";
-            }
-            let _accepted = self.accept(handoff, auth, runtime, eligibility);
-            #[cfg(test)]
-            if !_accepted {
-                self.channel_step_observation.1 = Some("not-accepted");
-            }
-        }
-        let _current = self.poll(auth, runtime, Some(eligibility));
-        #[cfg(test)]
-        if !_current && self.channel_step_observation.1.is_none() {
-            self.channel_step_observation = ("poll-handoff", Some("not-current"));
-        }
-        // At most one network stage in this scheduler pass. Resource-local
-        // failures (including 401) never become host credential rejection.
-        self.request_ticket_stage(auth, runtime, eligibility)
-    }
+
     /// Runs the ticket POST as the one selected registry stage. A successful
     /// POST sets `defer_network`; consuming that flag here preserves the
     /// standalone Driver's separate actor-pass behavior without allowing a
@@ -1050,28 +688,8 @@ impl<'cancel> Driver<'cancel> {
         if self.candidate.is_none() {
             return false;
         }
-        #[cfg(test)]
-        INGRESS_ORIGIN.with(|origin| origin.set(None));
-        #[cfg(all(test, feature = "cloud-fixture"))]
-        let request_started = Instant::now();
-        if let Err(_error) = self.request_ticket(auth, runtime, eligibility) {
-            #[cfg(test)]
-            {
-                self.channel_step_observation.1 = Some(peer_error_variant_for_test(&_error));
-            }
-            #[cfg(all(test, feature = "cloud-fixture"))]
-            emit_ingress_diagnostic_for_fixture(
-                (
-                    "ticket-request",
-                    peer_error_variant_for_test(&_error),
-                    INGRESS_ORIGIN.with(|origin| origin.get()),
-                    1,
-                    "none",
-                    false,
-                    false,
-                ),
-                request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            );
+
+        if self.request_ticket(auth, runtime, eligibility).is_err() {
             self.discard();
             return false;
         }
@@ -1126,11 +744,6 @@ impl<'cancel> Driver<'cancel> {
             let Some(eligibility) = eligibility else {
                 return false;
             };
-            #[cfg(test)]
-            {
-                INGRESS_ORIGIN.with(|origin| origin.set(None));
-                self.diagnostic_turns += 1;
-            }
             match self.connection_turn(auth, runtime, eligibility) {
                 Ok(advanced) => return advanced,
                 Err(_) => {
@@ -1140,45 +753,9 @@ impl<'cancel> Driver<'cancel> {
             }
         }
         if self.ticketed.is_some() {
-            #[cfg(test)]
-            {
-                INGRESS_ORIGIN.with(|origin| origin.set(None));
-                self.diagnostic_connects += 1;
-            }
-            #[cfg(all(test, feature = "cloud-fixture"))]
-            let connect_started = self
-                .ticketed
-                .as_ref()
-                .map(|ticketed| ticketed.request_started)
-                .unwrap_or_else(Instant::now);
             let result = eligibility
                 .ok_or(peer::PeerError::Invalid)
                 .and_then(|e| self.connect(auth, runtime, e));
-            #[cfg(test)]
-            if let Err(error) = &result {
-                self.failure_observation = Some((
-                    "connect",
-                    peer_error_variant_for_test(error),
-                    INGRESS_ORIGIN.with(|origin| origin.get()),
-                    0,
-                    "none",
-                    false,
-                    false,
-                ));
-                #[cfg(all(test, feature = "cloud-fixture"))]
-                emit_ingress_diagnostic_for_fixture(
-                    (
-                        "connect",
-                        peer_error_variant_for_test(error),
-                        INGRESS_ORIGIN.with(|origin| origin.get()),
-                        0,
-                        "none",
-                        false,
-                        false,
-                    ),
-                    connect_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                );
-            }
             if result.is_ok() {
                 return true;
             }
@@ -1195,17 +772,8 @@ impl<'cancel> Driver<'cancel> {
     ) -> peer::ResultPeer<()> {
         // Take before every fallible stage, especially before POST. Uncertainty
         // can never restore/requeue the candidate or replay this ticket request.
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "take-candidate";
-        }
         let handoff = self.candidate.take().ok_or(peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "check-initial-handoff";
-        }
         handoff.check_current(auth, runtime, eligibility)?;
-        #[cfg(not(test))]
         let transport = DataTransport::new(
             RemoteApiOrigin::new(
                 auth.trusted_configuration(),
@@ -1214,15 +782,7 @@ impl<'cancel> Driver<'cancel> {
             .map_err(|_| peer::PeerError::Invalid)?,
         )
         .map_err(|_| peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "provider-before-ticket";
-        }
         let provider = peer::ProviderCapture::read(auth, runtime, eligibility)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "capture-ticket-effect";
-        }
         let mut effect = peer::owner_turn(runtime, || {
             runtime.owner.capture_channel_ticket(
                 runtime.operation,
@@ -1232,18 +792,10 @@ impl<'cancel> Driver<'cancel> {
                 runtime.anchor,
             )
         })?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "validate-ticket-effect";
-        }
         peer::owner_turn(runtime, || effect.try_validate(&provider))?;
         let now = runtime
             .base
             .saturating_add(runtime.anchor.elapsed().as_secs());
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "access-credential";
-        }
         let access = peer::managed(auth.access_credential(now))?;
         let params = handoff.ticket_params();
         let operation = runtime.operation;
@@ -1268,71 +820,21 @@ impl<'cancel> Driver<'cancel> {
             Ok(())
         };
         let watch: &WatchCheck<'_> = &watch;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "check-before-ticket";
-        }
         handoff.check_current(auth, runtime, eligibility)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "boundary-before-ticket";
-        }
         effect
             .check_boundary(&provider)
             .map_err(owner_error_at!())?;
-        #[cfg(not(test))]
         let budget = transport.with_budget(handoff.deadline(), watch);
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "ticket-http-response";
-        }
         let request_started = Instant::now();
-        #[cfg(not(test))]
         let response = budget.channel_ticket(handoff.channel_id(), &params, &access);
-        #[cfg(test)]
-        let (response, minimum_elapsed) = self.channel_ticket_for_test(
-            auth,
-            eligibility,
-            &handoff,
-            &params,
-            operation,
-            watch,
-            &access,
-        );
         let response = response.map_err(|_| peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "provider-after-ticket";
-        }
         let provider = peer::ProviderCapture::read(auth, runtime, eligibility)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "validate-after-ticket";
-        }
         peer::owner_turn(runtime, || effect.try_validate(&provider))?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "boundary-after-ticket";
-        }
         effect
             .check_boundary(&provider)
             .map_err(owner_error_at!())?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "check-after-ticket";
-        }
         handoff.check_current(auth, runtime, eligibility)?;
-        #[cfg(test)]
-        {
-            self.channel_step_observation.0 = "validate-ticket-receipt";
-        }
         let received_at = Instant::now();
-        #[cfg(test)]
-        let received_at = received_at.max(
-            request_started
-                .checked_add(minimum_elapsed)
-                .ok_or(peer::PeerError::Invalid)?,
-        );
         let expires_in_ms = response.expires_in_ms.0;
         let expires_at = request_started
             .checked_add(Duration::from_millis(expires_in_ms))
@@ -1355,10 +857,6 @@ impl<'cancel> Driver<'cancel> {
             expires_in_ms,
             expires_at,
         });
-        #[cfg(test)]
-        {
-            self.channel_step_observation = ("ticket-retained", None);
-        }
         Ok(())
     }
     fn connect(
@@ -1435,26 +933,8 @@ impl<'cancel> Driver<'cancel> {
                 .peer_original_boundary(operation, continuation)
                 .map_err(|_| BudgetStop::Cancelled)
         };
-        #[cfg(not(test))]
         let relay = RelayTransport::new(endpoint).map_err(|_| peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        let relay = {
-            #[cfg(feature = "cloud-fixture")]
-            if let Some(roots) = self.cloud_fixture_transport_roots.as_ref() {
-                RelayTransport::with_test_root(endpoint, roots.relay.clone())
-                    .map_err(|_| peer::PeerError::Invalid)?
-            } else {
-                let _ = endpoint;
-                // Default test mode stays closed and scripted. No ambient roots
-                // or real account relay are selected when a script is absent.
-                self.relay_script.take().ok_or(peer::PeerError::Invalid)?
-            }
-            #[cfg(not(feature = "cloud-fixture"))]
-            {
-                let _ = endpoint;
-                self.relay_script.take().ok_or(peer::PeerError::Invalid)?
-            }
-        };
+
         let socket = relay
             .connect(
                 &WssAdmissionFrame {
@@ -1496,10 +976,7 @@ impl<'cancel> Driver<'cancel> {
             peer_cutoff: cutoff,
             applied_observation,
             started_git_peer: None,
-            #[cfg(test)]
-            diagnostic_requests: 0,
-            #[cfg(test)]
-            diagnostic_call: "none",
+
             response: None,
             git_read: None,
             git_mutation: None,
@@ -1513,242 +990,16 @@ impl<'cancel> Driver<'cancel> {
         eligibility: &PeerEligibility,
     ) -> peer::ResultPeer<bool> {
         let mut c = self.connection.take().ok_or(peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        let phase = match &c.crypto {
-            Crypto::Vacant => "connection-turn/vacant",
-            Crypto::ReadFirst(_) => "connection-turn/read-first",
-            Crypto::WriteSecond(_) => "connection-turn/write-second",
-            Crypto::ReadThird(_) => "connection-turn/read-third",
-            Crypto::Established(_) => "connection-turn/established",
-        };
-        #[cfg(test)]
-        let pending_at_turn_entry = (c.response.is_some(), c.stream.is_some());
+
         let result = c.turn(auth, runtime, eligibility, self.cancelled);
-        #[cfg(test)]
-        if let Err(error) = &result {
-            self.failure_observation = Some((
-                phase,
-                peer_error_variant_for_test(error),
-                INGRESS_ORIGIN.with(|origin| origin.get()),
-                c.diagnostic_requests,
-                c.diagnostic_call,
-                pending_at_turn_entry.0,
-                pending_at_turn_entry.1,
-            ));
-            #[cfg(all(test, feature = "cloud-fixture"))]
-            emit_ingress_diagnostic_for_fixture(
-                (
-                    phase,
-                    peer_error_variant_for_test(error),
-                    INGRESS_ORIGIN.with(|origin| origin.get()),
-                    c.diagnostic_requests,
-                    c.diagnostic_call,
-                    pending_at_turn_entry.0,
-                    pending_at_turn_entry.1,
-                ),
-                c.origin.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            );
-        }
         if result.is_ok() {
             self.connection = Some(c);
         }
         result
     }
-    #[cfg(test)]
-    pub(super) fn failure_observation_for_test(&self) -> IngressFailureSnapshot {
-        (
-            self.failure_observation,
-            self.diagnostic_connects,
-            self.diagnostic_turns,
-        )
-    }
-    #[cfg(test)]
-    pub(super) fn diagnostic_request_for_test(&self) -> (u64, &'static str) {
-        self.connection
-            .as_ref()
-            .map(|connection| (connection.diagnostic_requests, connection.diagnostic_call))
-            .unwrap_or((0, "none"))
-    }
-    #[cfg(test)]
-    pub(super) fn diagnostic_response_pending_for_test(&self) -> bool {
-        self.connection
-            .as_ref()
-            .is_some_and(|connection| connection.response.is_some())
-    }
-    #[cfg(test)]
-    pub(super) fn diagnostic_stream_pending_for_test(&self) -> bool {
-        self.connection
-            .as_ref()
-            .is_some_and(|connection| connection.stream.is_some())
-    }
-    #[cfg(test)]
-    pub(super) fn script_relay_for_test(&mut self, relay: RelayTransport) {
-        #[cfg(feature = "cloud-fixture")]
-        assert!(self.cloud_fixture_transport_roots.is_none());
-        assert!(self.relay_script.is_none());
-        self.relay_script = Some(relay);
-    }
-    /// Opt in to the actual HTTP ticket and configured WSS endpoint only for
-    /// private Cloud integration fixtures. Ordinary unit tests remain scripted.
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    pub(super) fn use_cloud_fixture_transport_for_test(
-        &mut self,
-        remote_api_root_der: Vec<u8>,
-        relay_root_der: Vec<u8>,
-    ) -> Result<(), &'static str> {
-        if self.cloud_fixture_transport_roots.is_some()
-            || self.script.is_some()
-            || self.relay_script.is_some()
-            || self.candidate.is_some()
-            || self.ticketed.is_some()
-            || self.connection.is_some()
-        {
-            return Err("cloud fixture transport must be selected before ingress work");
-        }
-        if remote_api_root_der.is_empty()
-            || remote_api_root_der.len() > CLOUD_FIXTURE_ROOT_DER_MAX_BYTES
-            || relay_root_der.is_empty()
-            || relay_root_der.len() > CLOUD_FIXTURE_ROOT_DER_MAX_BYTES
-        {
-            return Err("cloud fixture TLS root is outside its byte bound");
-        }
-        self.cloud_fixture_transport_roots = Some(CloudFixtureTransportRoots {
-            remote_api: remote_api_root_der,
-            relay: relay_root_der,
-        });
-        Ok(())
-    }
-    #[cfg(test)]
-    pub(super) fn connected_for_test(&self) -> bool {
-        self.connection.is_some()
-    }
-    #[cfg(test)]
-    pub(super) fn settle_maintenance_for_test(&mut self) {
-        self.connection
-            .as_ref()
-            .expect("live fixture connection")
-            .maintenance
-            .expire_for_test();
-    }
-    #[cfg(test)]
-    pub(super) fn set_peer_cutoff_for_test(&mut self, cutoff: Instant) {
-        let connection = self.connection.as_mut().expect("live fixture connection");
-        assert!(cutoff < connection.peer_cutoff, "test only shortens cutoff");
-        connection.peer_cutoff = cutoff;
-        connection.peer = None;
-        if let Some(response) = connection.response.as_mut() {
-            response.peer = None;
-        }
-        if let Some(stream) = connection.stream.as_mut() {
-            stream.peer = None;
-        }
-    }
-    #[cfg(test)]
-    fn scripted_ticket(
-        &mut self,
-        handoff: &channel::AdmittedChannelHandoff,
-        params: &ChannelTicketParams,
-        operation: &super::OwnerOperation<'_>,
-        watch: &WatchCheck<'_>,
-        _access: &lomi_remote_protocol::HostAccessCredential,
-    ) -> (Result<ChannelTicketResult, lomi_host_http::Error>, Duration) {
-        // Closed test seam: no fallback to account/network IO when unscripted.
-        let Some(script) = self.script.take() else {
-            return (Err(lomi_host_http::Error::Network), Duration::ZERO);
-        };
-        script.calls.set(script.calls.get() + 1);
-        if watch().is_err() {
-            return (
-                Err(lomi_host_http::Error::Cancelled),
-                script.minimum_elapsed,
-            );
-        }
-        if let Some(hook) = script.hook {
-            hook(handoff.channel_id(), params, operation, watch);
-        }
-        if watch().is_err() {
-            return (
-                Err(lomi_host_http::Error::Cancelled),
-                script.minimum_elapsed,
-            );
-        }
-        (script.response, script.minimum_elapsed)
-    }
-    #[cfg(test)]
-    fn channel_ticket_for_test(
-        &mut self,
-        auth: &HostAuth<'_, dyn SecretStorage + '_>,
-        eligibility: &PeerEligibility,
-        handoff: &channel::AdmittedChannelHandoff,
-        params: &ChannelTicketParams,
-        operation: &super::OwnerOperation<'_>,
-        watch: &WatchCheck<'_>,
-        access: &lomi_remote_protocol::HostAccessCredential,
-    ) -> (Result<ChannelTicketResult, lomi_host_http::Error>, Duration) {
-        #[cfg(not(feature = "cloud-fixture"))]
-        let _ = (auth, eligibility);
-        #[cfg(feature = "cloud-fixture")]
-        if let Some(roots) = self.cloud_fixture_transport_roots.as_ref() {
-            let response = (|| {
-                let origin = RemoteApiOrigin::new(
-                    auth.trusted_configuration(),
-                    eligibility.binding.scope.remote_api_origin.clone(),
-                )?;
-                let transport = DataTransport::with_test_root(origin, roots.remote_api.clone())?;
-                let budget = transport.with_budget(handoff.deadline(), watch);
-                budget.channel_ticket(handoff.channel_id(), params, access)
-            })();
-            self.cloud_fixture_ticket_error = response.as_ref().err().copied();
-            // An opted-in real transport never falls back to the ticket script,
-            // including invalid TLS roots, HTTP failures and lost responses.
-            return (response, Duration::ZERO);
-        }
-        self.scripted_ticket(handoff, params, operation, watch, access)
-    }
-    #[cfg(test)]
-    pub(super) fn script_ticket_for_test(
-        &mut self,
-        response: Result<ChannelTicketResult, lomi_host_http::Error>,
-        hook: Option<TicketTestHook>,
-        minimum_elapsed: Duration,
-    ) -> std::rc::Rc<std::cell::Cell<usize>> {
-        #[cfg(feature = "cloud-fixture")]
-        assert!(self.cloud_fixture_transport_roots.is_none());
-        assert!(self.script.is_none());
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-        self.script = Some(TicketScript {
-            response,
-            hook,
-            calls: calls.clone(),
-            minimum_elapsed,
-        });
-        calls
-    }
-    #[cfg(test)]
-    pub(super) fn ticket_timing_for_test(&self) -> Option<(Instant, Instant, u64)> {
-        self.ticketed.as_ref().map(|cached| {
-            (
-                cached.request_started,
-                cached.expires_at,
-                cached.expires_in_ms,
-            )
-        })
-    }
 }
 
-#[cfg_attr(test, track_caller)]
 fn invalid<E>(_: E) -> peer::PeerError {
-    #[cfg(test)]
-    {
-        let caller = std::panic::Location::caller();
-        record_origin_for_test(
-            std::any::type_name::<E>(),
-            None,
-            caller.file(),
-            caller.line(),
-            caller.column(),
-        );
-    }
     peer::PeerError::Invalid
 }
 fn watch(
@@ -2434,8 +1685,6 @@ impl<'cancel> Connection<'cancel> {
                 operation_disclosure: None,
                 git_receipt_disclosure: None,
                 remaining,
-                #[cfg(test)]
-                sent_fragments: 0,
             },
         )?;
         Ok(())
@@ -2505,8 +1754,6 @@ impl<'cancel> Connection<'cancel> {
             operation_disclosure: None,
             git_receipt_disclosure: None,
             remaining,
-            #[cfg(test)]
-            sent_fragments: 0,
         };
         self.enqueue_started_git_response(bytes, pending)
     }
@@ -2613,8 +1860,6 @@ impl<'cancel> Connection<'cancel> {
             operation_disclosure: disclosure,
             git_receipt_disclosure: None,
             remaining,
-            #[cfg(test)]
-            sent_fragments: 0,
         };
         self.enqueue_started_git_response(bytes, pending)
     }
@@ -2710,10 +1955,6 @@ impl<'cancel> Connection<'cancel> {
             .remaining
             .checked_sub(1)
             .ok_or(peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        {
-            response.sent_fragments = response.sent_fragments.saturating_add(1);
-        }
         if response.remaining > 0 {
             response.peer = None;
         }
@@ -2806,10 +2047,6 @@ impl<'cancel> Connection<'cancel> {
             .remaining
             .checked_sub(1)
             .ok_or(peer::PeerError::Invalid)?;
-        #[cfg(test)]
-        {
-            response.sent_fragments = response.sent_fragments.saturating_add(1);
-        }
         if response.remaining > 0 {
             response.peer = None;
         }
@@ -3534,8 +2771,6 @@ impl<'cancel> Connection<'cancel> {
                             operation_disclosure: None,
                             git_receipt_disclosure: Some(git_receipt_disclosure),
                             remaining: frame_count(bytes.len()),
-                            #[cfg(test)]
-                            sent_fragments: 0,
                         };
                         self.enqueue_reserved_git_response(bytes, response)?;
                         return Ok(true);
@@ -3591,8 +2826,6 @@ impl<'cancel> Connection<'cancel> {
                         operation_disclosure: None,
                         git_receipt_disclosure: Some(git_receipt_disclosure),
                         remaining: frame_count(bytes.len()),
-                        #[cfg(test)]
-                        sent_fragments: 0,
                     };
                     self.enqueue_reserved_git_response(bytes, response)?;
                     return Ok(true);
@@ -3649,8 +2882,6 @@ impl<'cancel> Connection<'cancel> {
                             operation_disclosure: None,
                             git_receipt_disclosure: Some(git_receipt_disclosure),
                             remaining,
-                            #[cfg(test)]
-                            sent_fragments: 0,
                         },
                     )?;
                     return Ok(true);
@@ -3700,8 +2931,6 @@ impl<'cancel> Connection<'cancel> {
                             operation_disclosure: None,
                             git_receipt_disclosure: None,
                             remaining,
-                            #[cfg(test)]
-                            sent_fragments: 0,
                         },
                     )?;
                     return Ok(true);
@@ -3853,8 +3082,6 @@ impl<'cancel> Connection<'cancel> {
                             operation_disclosure: None,
                             git_receipt_disclosure: None,
                             remaining,
-                            #[cfg(test)]
-                            sent_fragments: 0,
                         },
                     )?;
                     return Ok(true);
@@ -3941,10 +3168,6 @@ impl<'cancel> Connection<'cancel> {
                 self.socket
                     .send_binary(&frame, send_deadline, &check)
                     .map_err(invalid_at!())?;
-                #[cfg(test)]
-                {
-                    response.sent_fragments += 1;
-                }
                 response.remaining = response
                     .remaining
                     .checked_sub(1)
@@ -4330,29 +3553,6 @@ impl<'cancel> Connection<'cancel> {
             }
         }
         if let Some((request, received)) = request {
-            #[cfg(test)]
-            {
-                self.diagnostic_requests += 1;
-                self.diagnostic_call = match &request.call {
-                    RpcCall::WorkspaceGet(_) => "workspace.get",
-                    RpcCall::WorkspaceCapabilities(_) => "workspace.capabilities",
-                    RpcCall::TerminalRename(_) => "terminal.rename",
-                    RpcCall::TerminalMove(_) => "terminal.move",
-                    RpcCall::TerminalCreate(_) => "terminal.create",
-                    RpcCall::TerminalSplit(_) => "terminal.split",
-                    RpcCall::TerminalClose(_) => "terminal.close",
-                    RpcCall::TerminalRestart(_) => "terminal.restart",
-                    RpcCall::TerminalAttach(_) => "terminal.attach",
-                    RpcCall::TerminalSnapshot(_) => "terminal.snapshot",
-                    RpcCall::TerminalAck(_) => "terminal.ack",
-                    RpcCall::TerminalClaim(_) => "terminal.claim",
-                    RpcCall::TerminalRenew(_) => "terminal.renew",
-                    RpcCall::TerminalRelease(_) => "terminal.release",
-                    RpcCall::TerminalInput(_) => "terminal.input",
-                    RpcCall::TerminalResize(_) => "terminal.resize",
-                    _ => "other",
-                };
-            }
             // A request uses a different admission. Do not later try to refresh
             // the channel from an older maintenance observation.
             self.peer = None;
@@ -4551,8 +3751,6 @@ impl<'cancel> Connection<'cancel> {
                     operation_disclosure: disclosure,
                     git_receipt_disclosure: None,
                     remaining,
-                    #[cfg(test)]
-                    sent_fragments: 0,
                 });
                 self.peer = None;
                 return Ok(true);
@@ -4845,34 +4043,6 @@ impl<'cancel> Connection<'cancel> {
                         // Early actor/owner/coordinator failures can precede
                         // after_wait consumption. Dispose rather than retaining
                         // an ambiguous queued continuation or retrying an effect.
-                        #[cfg(test)]
-                        {
-                            let category = match error.code() {
-                                lomi_remote_protocol::ErrorCode::ScopeDenied => {
-                                    "terminal.fatal/ScopeDenied"
-                                }
-                                lomi_remote_protocol::ErrorCode::ServiceUnavailable => {
-                                    "terminal.fatal/ServiceUnavailable"
-                                }
-                                lomi_remote_protocol::ErrorCode::OutcomeUnknown => {
-                                    "terminal.fatal/OutcomeUnknown"
-                                }
-                                _ => "terminal.fatal/OtherErrorCode",
-                            };
-                            let effect = match error.effect() {
-                                lomi_remote_protocol::Effect::None => "None",
-                                lomi_remote_protocol::Effect::Committed => "Committed",
-                                lomi_remote_protocol::Effect::Partial => "Partial",
-                                lomi_remote_protocol::Effect::Unknown => "Unknown",
-                            };
-                            record_origin_for_test(
-                                category,
-                                Some(effect),
-                                file!(),
-                                line!(),
-                                column!(),
-                            );
-                        }
                         return Err(peer::PeerError::Invalid);
                     }
                     RpcResponse::Error {
@@ -4899,8 +4069,6 @@ impl<'cancel> Connection<'cancel> {
                 operation_disclosure: None,
                 git_receipt_disclosure,
                 remaining,
-                #[cfg(test)]
-                sent_fragments: 0,
             });
             advanced = true;
         }
@@ -5055,72 +4223,5 @@ impl Drop for Connection<'_> {
         if let Some(mut terminal) = self.terminal.take() {
             terminal.disconnect();
         }
-    }
-}
-
-#[cfg(test)]
-mod rollover_repro_tests {
-    use super::*;
-
-    #[test]
-    fn pending_stream_evidence_keeps_its_original_worker_unit_deadline() {
-        peer::tests::fixture(|f, auth| {
-            let outer = f.runtime();
-            let stream = PendingStream {
-                operation: super::super::OwnerOperation::new(
-                    outer.operation.deadline(),
-                    &f.stopping,
-                ),
-                aborted: std::cell::Cell::new(false),
-                peer: None,
-                kind: MessageKind::WorkspaceFrame,
-                authorization_call: None,
-                delivery: None,
-                remaining: 1,
-            };
-            assert_eq!(
-                stream.operation.deadline(),
-                outer.operation.deadline(),
-                "stream operation is bounded by the worker unit that created it"
-            );
-
-            let stream_runtime = Runtime {
-                operation: &stream.operation,
-                aborted: &stream.aborted,
-                ..outer
-            };
-            let evidence = stream_runtime
-                .remote_worker_evidence(auth, &f.eligibility)
-                .unwrap_or_else(|_| panic!("actual worker evidence"));
-            assert!(evidence.current());
-
-            // Model the worker-unit boundary after ProviderCapture succeeds
-            // but before RemoteWorkerEvidence performs its final current check.
-            stream.operation.expire_for_test();
-            assert!(
-                !evidence.current(),
-                "a boundary between provider capture and current() rejects the evidence"
-            );
-            drop(evidence);
-            assert!(matches!(
-                stream_runtime.remote_worker_evidence(auth, &f.eligibility),
-                Err(peer::PeerError::Fatal(super::super::StepError::Stale))
-            ));
-
-            // The actor can admit a later unit, but that does not renew the
-            // original stream operation or make its next fragment current.
-            let mut units = super::super::WorkerOperationUnits::new(outer.operation, outer.aborted);
-            units.admit_after_settlement(&f.stopping);
-            let resumed = Runtime {
-                operation: units.operation(),
-                aborted: units.aborted(),
-                ..outer
-            };
-            assert!(
-                resumed.remote_worker_evidence(auth, &f.eligibility).is_ok(),
-                "a later worker unit can obtain fresh evidence"
-            );
-            assert!(stream.operation.check().is_err());
-        });
     }
 }

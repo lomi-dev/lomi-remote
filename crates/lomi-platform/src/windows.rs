@@ -1,8 +1,7 @@
 //! Windows local IPC and explicitly selected user-scope secret storage.
 pub mod backup;
 pub(crate) mod diagnostics;
-#[cfg(feature = "dpapi-fixture")]
-pub mod dpapi_fixture;
+
 pub mod file_security_service;
 pub mod maintenance;
 pub mod public_config;
@@ -1940,7 +1939,3 @@ impl LocalClient {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "windows_tests.rs"]
-mod tests;

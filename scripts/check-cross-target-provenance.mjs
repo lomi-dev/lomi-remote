@@ -32,9 +32,9 @@ async function tree(base, subdir) {
   return hashFiles(full, await files(full));
 }
 
-const cryptoDiffs = ['Cargo.toml', 'tests/grant_v3_wire.rs'];
+const cryptoDiffs = [];
 const protocolDiffs = ['Cargo.toml'];
-const cryptoMobileOnly = ['Cargo.lock', 'pkg/lomi_remote_crypto.d.ts', 'pkg/lomi_remote_crypto.js', 'pkg/lomi_remote_crypto_bg.wasm', 'pkg/lomi_remote_crypto_bg.wasm.d.ts', 'tests/grant-v3/proof.rs'];
+const cryptoMobileOnly = [];
 const cryptoSource = await tree(root, 'crates/lomi-remote-crypto');
 const protocolSource = await tree(root, 'crates/lomi-remote-protocol');
 const cryptoMobile = await tree(mobile, 'modules/lomi-remote-crypto/vendor/core');

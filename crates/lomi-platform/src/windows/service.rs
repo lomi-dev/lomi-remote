@@ -471,26 +471,16 @@ struct Context {
     operator_sid: String,
     account_sid: String,
     account: Option<String>,
-    fixture: bool,
-    name: Option<String>,
     wait: Duration,
     create_profile: bool,
-    #[cfg(feature = "service-fixture")]
-    fault: Option<&'static str>,
 }
 impl Context {
     fn pins(&self) -> Result<(Pinned, Option<PrivateProfile>)> {
         let binary = pin(&self.executable, &self.account_sid, true)?;
-        if self.fixture {
-            let parent = self.profile.parent().ok_or(Error::Invalid)?;
-            let _ = pin(parent, &self.account_sid, false)?;
-            Ok((binary, None))
-        } else {
-            Ok((
-                binary,
-                Some(PrivateProfile::open(&self.profile, self.create_profile).map_err(invalid)?),
-            ))
-        }
+        Ok((
+            binary,
+            Some(PrivateProfile::open(&self.profile, self.create_profile).map_err(invalid)?),
+        ))
     }
     fn check(&self, record: &Registration) -> Result<()> {
         if record.version != 1
@@ -499,16 +489,9 @@ impl Context {
             || record.profile != text(self.profile.as_os_str())?
             || record.executable != text(self.executable.as_os_str())?
             || record.command != record.command()?
-            || record.fixture != self.fixture
-            || !matches!(record.mode.as_str(), "boot" | "manual")
-            || (self.fixture
-                && (record.mode != "manual" || Some(&record.name) != self.name.as_ref()))
-            || (!self.fixture && record.mode != "boot")
-            || !record.name.starts_with(if self.fixture {
-                "LomiProductService-"
-            } else {
-                "LomiRemote-"
-            })
+            || record.fixture
+            || record.mode != "boot"
+            || !record.name.starts_with("LomiRemote-")
             || Uuid::parse_str(record.name.split_once('-').ok_or(Error::Conflict)?.1).is_err()
             || account_sid(&text(OsStr::new(&record.account))?)? != record.account_sid
         {
@@ -694,9 +677,6 @@ pub(super) fn wait(
 }
 fn ready(context: &Context, service: &Service, deadline: Instant) -> Result<()> {
     let status = wait(service, ServiceState::Running, deadline)?;
-    if context.fixture {
-        return Ok(());
-    }
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(Error::Deadline);
@@ -786,23 +766,16 @@ fn execute(context: Context, operation: &str) -> Result<String> {
             account: context.account.clone().ok_or(Error::Invalid)?,
             profile: text(context.profile.as_os_str())?,
             executable: text(context.executable.as_os_str())?,
-            name: context
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("LomiRemote-{}", Uuid::new_v4())),
+            name: format!("LomiRemote-{}", Uuid::new_v4()),
             command: String::new(),
-            mode: if context.fixture { "manual" } else { "boot" }.into(),
+            mode: "boot".into(),
             phase: Phase::Intent,
-            fixture: context.fixture,
+            fixture: false,
         };
         record.command = record.command()?;
         context.check(&record)?;
         store.write(None, &record)?;
         existing = Some(record);
-        #[cfg(feature = "service-fixture")]
-        if context.fault == Some("intent") {
-            return Err(Error::Deadline);
-        }
     }
     let mut record = existing.ok_or(Error::NotInstalled)?;
     let access = if operation == "install" {
@@ -840,14 +813,6 @@ fn execute(context: Context, operation: &str) -> Result<String> {
                 return Err(Error::Conflict);
             }
             validate_create(&context, &store, &record)?;
-            #[cfg(feature = "service-fixture")]
-            if context.fault == Some("credentials") {
-                return Err(remember_create_failure(
-                    &store,
-                    &mut record,
-                    Error::CredentialsRequired,
-                )?);
-            }
             let created = match manager.create_service(
                 &record.info(),
                 ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS,
@@ -859,10 +824,6 @@ fn execute(context: Context, operation: &str) -> Result<String> {
             };
             record.matches(&created.query_config().map_err(scm)?)?;
             service = Some(created);
-            #[cfg(feature = "service-fixture")]
-            if context.fault == Some("create") {
-                return Err(Error::Deadline);
-            }
         }
         validate(
             &context,
@@ -870,16 +831,9 @@ fn execute(context: Context, operation: &str) -> Result<String> {
             &record,
             service.as_ref().ok_or(Error::Conflict)?,
         )?;
-        let next = if context.fixture {
-            Phase::Registered
-        } else {
-            Phase::CredentialsRequired
-        };
-        if record.phase == Phase::Intent
-            || (context.fixture && record.phase == Phase::CredentialsRequired)
-        {
+        if record.phase == Phase::Intent {
             let old = record.clone();
-            record.phase = next;
+            record.phase = Phase::CredentialsRequired;
             store.write(Some(&old), &record)?;
         }
         if record.phase == Phase::CredentialsRequired {
@@ -910,10 +864,6 @@ fn execute(context: Context, operation: &str) -> Result<String> {
                 Err(error) => return Err(scm(error)),
             }
             drop(s);
-            #[cfg(feature = "service-fixture")]
-            if context.fault == Some("delete") {
-                return Err(Error::Deadline);
-            }
         }
         let deadline = Instant::now() + context.wait;
         loop {
@@ -1052,354 +1002,9 @@ pub fn run(
             operator_sid: sid.clone(),
             account_sid: sid,
             account: account.map(str::to_owned),
-            fixture: false,
-            name: None,
             wait: WAIT,
             create_profile: operation == "install",
-            #[cfg(feature = "service-fixture")]
-            fault: None,
         },
         operation,
     )
-}
-#[cfg(feature = "service-fixture")]
-pub fn fixture_run(run_id: &str, operation: &str) -> Result<String> {
-    unimpersonated()?;
-    let (operation, fault) = match operation {
-        "install-intent-fault" => ("install", Some("intent")),
-        "install-create-fault" => ("install", Some("create")),
-        "install-logon-fault" => ("install", Some("credentials")),
-        "uninstall-delete-fault" => ("uninstall", Some("delete")),
-        value => (value, None),
-    };
-    let id = Uuid::parse_str(run_id).map_err(|_| Error::Invalid)?;
-    if id.to_string() != run_id {
-        return Err(Error::Invalid);
-    }
-    let root = PathBuf::from(r"C:\ProgramData\LomiWindowsFixture").join(run_id);
-    let _root = pin(&root, "S-1-5-19", false)?;
-    let marker = std::fs::read(root.join("fixture.marker")).map_err(|_| Error::Conflict)?;
-    if marker != format!("lomi-product-service-v1:{run_id}\n").as_bytes() {
-        return Err(Error::Conflict);
-    }
-    let home = std::env::var_os("USERPROFILE").ok_or(Error::Invalid)?;
-    execute(
-        Context {
-            profile: root.join("host-profile"),
-            executable: root.join("lomiremote.exe"),
-            registration: PathBuf::from(home).join(format!(".lomi-service-manager-{run_id}")),
-            operator_sid: current_sid().map_err(invalid)?,
-            account_sid: "S-1-5-19".into(),
-            account: Some(r"NT AUTHORITY\LocalService".into()),
-            fixture: true,
-            name: Some(format!("LomiProductService-{run_id}")),
-            wait: Duration::from_secs(5),
-            create_profile: false,
-            fault,
-        },
-        operation,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn command_roundtrip_matches_service_serializer_cases() {
-        let cases = [
-            "",
-            "simple",
-            r"C:\path\tail\",
-            "with space",
-            "quotes\"here",
-            "😀\\trail\\",
-            "one\\\"two",
-        ];
-        for value in cases {
-            let command = format!(
-                "{} {}",
-                quote(value).unwrap(),
-                quote("next argument").unwrap()
-            );
-            assert_eq!(
-                parse(&command).unwrap(),
-                vec![value.to_owned(), "next argument".into()]
-            );
-        }
-        assert_eq!(
-            quote(r"C:\Program Files\Lomi\lomiremote.exe").unwrap(),
-            r#""C:\Program Files\Lomi\lomiremote.exe""#
-        );
-        assert!(quote("nul\0value").is_err());
-        assert!(parse("\"unterminated").is_err());
-    }
-    fn disabled_config() -> (Registration, ServiceConfig) {
-        let mut record = Registration {
-            version: 1,
-            operator_sid: "S-1-5-19".into(),
-            account_sid: "S-1-5-19".into(),
-            account: r"NT AUTHORITY\LocalService".into(),
-            profile: r"C:\fixture\host-profile".into(),
-            executable: r"C:\fixture\lomiremote.exe".into(),
-            name: "LomiProductService-00000000-0000-4000-8000-000000000001".into(),
-            command: String::new(),
-            mode: "manual".into(),
-            phase: Phase::Registered,
-            fixture: true,
-        };
-        record.command = record.command().unwrap();
-        let config = ServiceConfig {
-            service_type: ServiceType::OWN_PROCESS,
-            start_type: ServiceStartType::Disabled,
-            error_control: ServiceErrorControl::Normal,
-            executable_path: PathBuf::from(&record.command),
-            load_order_group: None,
-            tag_id: 0,
-            dependencies: vec![],
-            account_name: Some(OsString::from(&record.account)),
-            display_name: OsString::from(&record.name),
-        };
-        (record, config)
-    }
-    #[test]
-    fn disabled_start_mode_conflicts_with_strict_mutation_validation() {
-        let (mut record, config) = disabled_config();
-        for phase in [
-            Phase::Intent,
-            Phase::CredentialsRequired,
-            Phase::Registered,
-            Phase::Deleting,
-        ] {
-            record.phase = phase;
-            assert_eq!(record.matches(&config), Err(Error::Conflict));
-        }
-        assert_eq!(record.matches_config(&config, true), Ok(()));
-    }
-    #[test]
-    fn pending_disabled_service_with_changed_raw_command_conflicts() {
-        let (mut record, mut config) = disabled_config();
-        record.phase = Phase::Deleting;
-        config.executable_path = PathBuf::from(format!("{} extra-argument", record.command));
-        assert_eq!(record.matches_config(&config, true), Err(Error::Conflict));
-    }
-    #[test]
-    fn logon_failure_requires_os_setup_without_password_handling() {
-        for code in [1069, 1079, 1057] {
-            assert_eq!(
-                scm(windows_service::Error::Winapi(
-                    std::io::Error::from_raw_os_error(code)
-                )),
-                Error::CredentialsRequired
-            );
-        }
-    }
-    #[test]
-    fn public_login_is_rejected_before_profile_creation() {
-        let path = Path::new(r"C:\must-not-create-lomi-service-profile");
-        assert_eq!(
-            run(path, path, "install", Some("login"), Some("any")),
-            Err(Error::Unimplemented)
-        );
-    }
-}
-
-/// Separate native observer and explicit fixture teardown for the fixed
-/// synthetic host profile. Never initializes or supervises a host.
-#[cfg(feature = "service-fixture")]
-pub fn fixture_probe(run_id: &str, phase: &str) -> Result<()> {
-    probe::dispatch(run_id, phase)
-}
-#[cfg(feature = "service-fixture")]
-mod probe {
-    use super::*;
-    use std::sync::{
-        OnceLock,
-        atomic::{AtomicBool, Ordering},
-    };
-    use windows_service::{
-        define_windows_service,
-        service::{ServiceControlAccept, ServiceStatus},
-        service_control_handler::{self, ServiceControlHandlerResult},
-        service_dispatcher,
-    };
-    static CONFIG: OnceLock<(String, String)> = OnceLock::new();
-    static FAILED: AtomicBool = AtomicBool::new(false);
-    define_windows_service!(ffi_main, main);
-    pub(super) fn dispatch(id: &str, phase: &str) -> Result<()> {
-        if Uuid::parse_str(id).map_err(|_| Error::Invalid)?.to_string() != id {
-            return Err(Error::Invalid);
-        }
-        let dpapi = cfg!(feature = "dpapi-fixture") && phase == "dpapi";
-        if !matches!(phase, "before" | "after" | "cleanup") && !dpapi {
-            return Err(Error::Invalid);
-        }
-        CONFIG
-            .set((id.into(), phase.into()))
-            .map_err(|_| Error::Conflict)?;
-        service_dispatcher::start(format!("LomiProductServiceProbe-{id}"), ffi_main)
-            .map_err(scm)?;
-        if FAILED.load(Ordering::Acquire) {
-            Err(Error::NotReady)
-        } else {
-            Ok(())
-        }
-    }
-    fn digest(bytes: &[u8]) -> Result<String> {
-        use windows_sys::Win32::Security::Cryptography::*;
-        let mut algorithm = ptr::null_mut();
-        if unsafe {
-            BCryptOpenAlgorithmProvider(&mut algorithm, BCRYPT_SHA256_ALGORITHM, ptr::null(), 0)
-        } < 0
-        {
-            return Err(Error::NotReady);
-        }
-        let mut output = [0u8; 32];
-        let result = unsafe {
-            BCryptHash(
-                algorithm,
-                ptr::null(),
-                0,
-                bytes.as_ptr(),
-                bytes.len() as u32,
-                output.as_mut_ptr(),
-                output.len() as u32,
-            )
-        };
-        unsafe { BCryptCloseAlgorithmProvider(algorithm, 0) };
-        if result < 0 {
-            return Err(Error::NotReady);
-        }
-        Ok(output.iter().map(|b| format!("{b:02x}")).collect())
-    }
-    fn observe(id: &str, phase: &str) -> Result<()> {
-        unimpersonated()?;
-        if current_sid().map_err(invalid)? != "S-1-5-19" {
-            return Err(Error::Conflict);
-        }
-        let root = PathBuf::from(r"C:\ProgramData\LomiWindowsFixture").join(id);
-        let _parent = pin(&root, "S-1-5-19", false)?;
-        if std::fs::read(root.join("fixture.marker")).map_err(|_| Error::Conflict)?
-            != format!("lomi-product-service-v1:{id}\n").as_bytes()
-        {
-            return Err(Error::Conflict);
-        }
-        #[cfg(feature = "dpapi-fixture")]
-        if phase == "dpapi" {
-            return super::super::dpapi_fixture::local_service(id);
-        }
-        let profile = PrivateProfile::open(&root.join("host-profile"), false).map_err(invalid)?;
-        if phase == "cleanup" {
-            let owner = OwnerLock::acquire(&profile.path).map_err(invalid)?;
-            let mut files = Vec::new();
-            for entry in std::fs::read_dir(&profile.path).map_err(|_| Error::Conflict)? {
-                let entry = entry.map_err(|_| Error::Conflict)?;
-                if !matches!(
-                    entry.file_name().to_str(),
-                    Some("owner.lock" | "host.sqlite3" | "host.sqlite3-wal" | "host.sqlite3-shm")
-                ) {
-                    return Err(Error::Conflict);
-                }
-                drop(open_regular(&entry.path(), false, false, &profile.sid).map_err(invalid)?);
-                files.push(entry.path());
-            }
-            let path = profile.path.clone();
-            drop(owner);
-            drop(profile);
-            for file in files {
-                std::fs::remove_file(file).map_err(|_| Error::Deadline)?;
-            }
-            std::fs::remove_dir(&path).map_err(|_| Error::Deadline)?;
-            std::fs::write(
-                root.join("profile-cleanup.json"),
-                b"{\"cleanupComplete\":true,\"localService\":true,\"fixtureCleanup\":true}",
-            )
-            .map_err(|_| Error::Deadline)?;
-            return Ok(());
-        }
-        let file = open_regular(
-            &profile.path.join("host.sqlite3"),
-            false,
-            false,
-            &profile.sid,
-        )
-        .map_err(invalid)?;
-        let mut bytes = Vec::new();
-        file.take(8 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::NotReady)?;
-        if bytes.len() > 8 * 1024 * 1024 {
-            return Err(Error::Invalid);
-        }
-        let value = serde_json::json!({"exists":true,"sha256":digest(&bytes)?,"bytes":bytes.len(),"localService":true,"readOnlyObserver":true});
-        std::fs::write(
-            root.join(if phase == "after" {
-                "db-after.json"
-            } else {
-                "db-before.json"
-            }),
-            serde_json::to_vec(&value).map_err(|_| Error::Invalid)?,
-        )
-        .map_err(|_| Error::NotReady)?;
-        Ok(())
-    }
-    fn main(_args: Vec<OsString>) {
-        let Some((id, phase)) = CONFIG.get() else {
-            FAILED.store(true, Ordering::Release);
-            return;
-        };
-        let name = format!("LomiProductServiceProbe-{id}");
-        let Ok(handle) = service_control_handler::register(&name, |_| {
-            ServiceControlHandlerResult::NotImplemented
-        }) else {
-            FAILED.store(true, Ordering::Release);
-            return;
-        };
-        let status = |state, failed| ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: state,
-            controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(u32::from(failed)),
-            checkpoint: 0,
-            wait_hint: Duration::ZERO,
-            process_id: None,
-        };
-        if handle
-            .set_service_status(status(ServiceState::Running, false))
-            .is_err()
-        {
-            FAILED.store(true, Ordering::Release);
-            return;
-        }
-        let failed = observe(id, phase).is_err();
-        FAILED.store(failed, Ordering::Release);
-        let _ = handle.set_service_status(status(ServiceState::Stopped, failed));
-    }
-}
-
-/// Read-only native closure audit: only explicit ERROR_SERVICE_DOES_NOT_EXIST
-/// counts as absence, including for the separate probe and collision fixtures.
-#[cfg(feature = "service-fixture")]
-pub fn fixture_audit_absence(run_id: &str) -> Result<()> {
-    if Uuid::parse_str(run_id)
-        .map_err(|_| Error::Invalid)?
-        .to_string()
-        != run_id
-    {
-        return Err(Error::Invalid);
-    }
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(scm)?;
-    for prefix in [
-        "LomiProductService-",
-        "LomiProductServiceProbe-",
-        "LomiProductServiceForeign-",
-    ] {
-        match manager.open_service(format!("{prefix}{run_id}"), ServiceAccess::QUERY_CONFIG) {
-            Err(error) if missing(&error) => {}
-            Err(error) if deleting(&error) => return Err(Error::Deadline),
-            Err(error) => return Err(scm(error)),
-            Ok(_) => return Err(Error::Conflict),
-        }
-    }
-    Ok(())
 }

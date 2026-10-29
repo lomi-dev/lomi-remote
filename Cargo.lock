@@ -109,45 +109,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "asn1-rs"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f43a50ac4fdca5df8e885c21b835997f0a1cdee65494a6847694a98652d9d8"
-dependencies = [
- "asn1-rs-derive",
- "asn1-rs-impl",
- "displaydoc",
- "nom",
- "num-traits",
- "rusticata-macros",
- "thiserror 2.0.21",
- "time",
-]
-
-[[package]]
-name = "asn1-rs-derive"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
-]
-
-[[package]]
-name = "asn1-rs-impl"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,20 +956,6 @@ checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
  "zeroize",
-]
-
-[[package]]
-name = "der-parser"
-version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
-dependencies = [
- "asn1-rs",
- "displaydoc",
- "nom",
- "num-bigint",
- "num-traits",
- "rusticata-macros",
 ]
 
 [[package]]
@@ -2007,33 +1954,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "lomi-admission-spike"
-version = "0.1.0"
-dependencies = [
- "libc",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "lomi-domain-spike"
-version = "0.0.0"
-dependencies = [
- "lomi-remote-protocol",
-]
-
-[[package]]
-name = "lomi-enrollment-fixtures"
-version = "0.0.0"
-dependencies = [
- "lomi-remote-crypto",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "lomi-files"
 version = "0.1.0"
 dependencies = [
@@ -2042,7 +1962,6 @@ dependencies = [
  "lomi-remote-protocol",
  "serde",
  "sha2 0.10.9",
- "tempfile",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -2088,14 +2007,10 @@ dependencies = [
  "lomi-remote-crypto",
  "lomi-remote-protocol",
  "lomi-terminal",
- "rcgen",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "signal-hook 0.4.5",
- "tempfile",
- "tungstenite",
  "uuid",
  "windows-service",
  "windows-sys 0.61.2",
@@ -2121,7 +2036,6 @@ dependencies = [
  "log",
  "lomi-host-auth",
  "lomi-remote-protocol",
- "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -2142,37 +2056,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "lomi-linux-git-isolation-spike"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
-]
-
-[[package]]
-name = "lomi-linux-git-spike"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
-]
-
-[[package]]
-name = "lomi-macos-storage-fixture"
-version = "0.1.0"
-dependencies = [
- "lomi-platform",
- "lomi-remote-protocol",
- "tempfile",
  "uuid",
 ]
 
@@ -2249,27 +2132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lomi-platform-spike"
-version = "0.1.0"
-dependencies = [
- "libc",
- "portable-pty",
- "tempfile",
-]
-
-[[package]]
-name = "lomi-release-spike"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde_json",
- "tempfile",
- "tokio",
- "tough",
- "url",
-]
-
-[[package]]
 name = "lomi-remote-crypto"
 version = "0.1.0"
 dependencies = [
@@ -2300,20 +2162,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lomi-service-fixture"
-version = "0.1.0"
-dependencies = [
- "libc",
- "portable-pty",
- "serde",
- "serde_json",
- "signal-hook 0.4.5",
- "tempfile",
- "uuid",
- "vt100",
-]
-
-[[package]]
 name = "lomi-terminal"
 version = "0.1.0"
 dependencies = [
@@ -2325,31 +2173,8 @@ dependencies = [
  "portable-pty",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "uuid",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "lomi-terminal-pty-fixture"
-version = "0.1.0"
-dependencies = [
- "libc",
- "lomi-terminal-state",
- "portable-pty",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "lomi-terminal-spike"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "serde",
- "serde_json",
- "vt100",
 ]
 
 [[package]]
@@ -2357,12 +2182,10 @@ name = "lomi-terminal-state"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
- "libc",
  "log",
  "lomi-remote-protocol",
  "serde",
  "serde_json",
- "tempfile",
  "url",
  "uuid",
 ]
@@ -2394,18 +2217,6 @@ dependencies = [
 name = "lomi-windows-pty"
 version = "0.1.0"
 dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "lomi-windows-service-fixture"
-version = "0.1.0"
-dependencies = [
- "lomi-terminal-state",
- "serde",
- "serde_json",
- "uuid",
- "windows-service",
  "windows-sys 0.61.2",
 ]
 
@@ -2492,12 +2303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
 name = "mio"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2558,39 +2363,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
-
-[[package]]
-name = "num-integer"
-version = "0.1.47"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "num-traits"
@@ -2620,15 +2396,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "memchr",
-]
-
-[[package]]
-name = "oid-registry"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f40cff3dde1b6087cc5d5f5d4d65712f34016a03ed60e9c08dcc392736b5b7"
-dependencies = [
- "asn1-rs",
 ]
 
 [[package]]
@@ -3115,19 +2882,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rcgen"
-version = "0.14.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10b99e0098aa4082912d4c649628623db6aba77335e4f4569ff5083a6448b32e"
-dependencies = [
- "ring",
- "rustls-pki-types",
- "time",
- "x509-parser",
- "yasna",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3246,15 +3000,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rusticata-macros"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
-dependencies = [
- "nom",
 ]
 
 [[package]]
@@ -3772,17 +3517,6 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
@@ -3873,7 +3607,6 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
- "time-macros",
 ]
 
 [[package]]
@@ -3881,16 +3614,6 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
-
-[[package]]
-name = "time-macros"
-version = "0.2.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
-dependencies = [
- "num-conv",
- "time-core",
-]
 
 [[package]]
 name = "tinystr"
@@ -4254,17 +3977,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vt100"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
-dependencies = [
- "itoa",
- "unicode-width",
- "vte",
-]
 
 [[package]]
 name = "vte"
@@ -5051,33 +4763,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "x509-parser"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
-dependencies = [
- "asn1-rs",
- "data-encoding",
- "der-parser",
- "lazy_static",
- "nom",
- "oid-registry",
- "ring",
- "rusticata-macros",
- "thiserror 2.0.21",
- "time",
-]
-
-[[package]]
-name = "yasna"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
-dependencies = [
- "time",
-]
-
-[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5097,7 +4782,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
- "synstructure 0.14.0",
+ "synstructure",
 ]
 
 [[package]]
@@ -5208,7 +4893,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
- "synstructure 0.14.0",
+ "synstructure",
 ]
 
 [[package]]

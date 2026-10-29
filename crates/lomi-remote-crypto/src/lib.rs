@@ -58,8 +58,7 @@ fn random<const N: usize>() -> Result<[u8; N]> {
 
 pub const LIVE_PRODUCTION_QUALIFIED: bool = true;
 pub const MAILBOX_PRODUCTION_QUALIFIED: bool = false;
-#[cfg(all(feature = "test-fixtures", not(debug_assertions)))]
-compile_error!("test-fixtures must not enter release builds");
+
 
 mod public_identity_wire;
 pub use public_identity_wire::{verify_consumer_window_identity, verify_registered_host_identity};

@@ -1,13 +1,9 @@
-# Grant/context 3 isolated proof
+# Grant/context 3 format
 
-This E0.5 proof adds a new canonical format around the existing audited host
-identity keys, Ed25519 signatures and Snow Noise XX profile. It does not change
-algorithms, migrate an application, integrate a relay or qualify Remote for
-production. `REMOTE_V2_PRODUCTION_QUALIFIED` remains false. The historical live
-qualification constants refer only to the imported historical implementation.
-Existing v1/v2 fixture files and tests remain historical evidence, unchanged;
-they are not acceptance vectors for this format. There is no legacy permission
-conversion or `permissions: control` expansion.
+Grant/context v3 uses the existing host identity keys, Ed25519 signatures, and
+Snow Noise XX profile. It introduces no legacy permission conversion and does
+not expand `permissions: control`. Historical compatibility constants refer
+only to the imported implementation.
 
 Remote API major 2, application major 2, grant/context version 3 and the terminal
 profile are independent axes. V3 validation requires the first three exact
@@ -126,34 +122,12 @@ an admission token; replay prevention requires authoritative storage. Disconnect
 requires a fresh handshake/admission. This proof does not implement storage,
 control leases, revocation delivery, dispatch authorization or production policy.
 
-## Evidence
+## Caller responsibilities
 
-`tests/grant-v3/vectors.json` freezes canonical grant, workspace context and
-terminal context bytes and deterministic Ed25519 signatures. The Rust test target
-`grant_v3` checks those bytes, array arities, every signed grant/context field,
-trusted pins and current epochs, strict JSON/capability validation, expiry
-boundaries, roles, terminal membership, full valid-field Noise prologue mismatch,
-legacy refusal and two independent window channels sharing one account session.
-The current native suite also preserves the historical fixture tests. The actual
-Chromium/WASM/native proof now passes 79 checks, including 34 admission negatives
-and five XX handshakes, using the canonical Rust verification and transport in
-both runtimes. Two ephemeral browser keys share only the synthetic opaque account
-session binding. Independent review also verifies abnormal native shutdown fails
-the evidence after remaining cleanup. See
-[browser proof](../../tests/crypto-v3-browser/README.md) for the exact runner and
-limits. Native mobile runtime and production authority/freshness remain gaps.
-
-Reproduce:
-
-```sh
-cargo test -p lomi-remote-crypto --features browser,test-fixtures
-cargo check -p lomi-remote-crypto --target wasm32-unknown-unknown --features browser,test-fixtures
-cargo clippy -p lomi-remote-crypto --all-targets --features browser,test-fixtures -- -D warnings
-python3 tools/check_crypto_source.py
-python3 tools/run_crypto_v3_browser.py --output artifacts/crypto-v3-browser/report.json
-```
-
-The provenance manifest preserves every original source hash. It records the
-Cargo dependency/test target, module exports and minimal channel constructor hook
-as explicit adaptations, inventories the new source separately and also hashes
-this proof's external test files and documentation.
+A verified token is a point-in-time proof, not a freshness lease or storage
+transaction. Callers must read current, non-revoked authority and membership
+state, atomically consume nonce/channel admission where required, enforce unique
+channel IDs, and recheck freshness, membership, capabilities, and fences before
+each operation and effect. Replay prevention requires authoritative storage.
+Disconnect requires a fresh handshake. This format does not implement storage,
+control leases, revocation delivery, dispatch authorization, or production policy.

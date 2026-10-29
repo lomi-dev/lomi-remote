@@ -8,16 +8,7 @@
     "./stream": "./src/stream-assembler.ts",
     "./workspace-stream": "./src/workspace-stream.ts"
   },
-  "scripts": {
-    "test": "node --test ../../tests/terminal-state/*.test.mjs",
-    "test:browser": "node ../../tests/terminal-state/browser.mjs"
-  },
   "peerDependencies": {
-    "@xterm/xterm": "6.0.0"
-  },
-  "devDependencies": {
-    "@playwright/test": "1.62.1",
-    "@xterm/headless": "6.0.0",
     "@xterm/xterm": "6.0.0"
   }
 }

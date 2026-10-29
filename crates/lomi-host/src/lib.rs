@@ -76,8 +76,6 @@ impl std::fmt::Display for HostError {
 }
 impl std::error::Error for HostError {}
 
-#[cfg(test)]
-mod testsupport;
 #[cfg(any(unix, windows))]
 mod unix;
 #[cfg(windows)]

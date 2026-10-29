@@ -265,19 +265,7 @@ impl PendingHostIdentity {
         }
         Ok(pending)
     }
-    #[cfg(feature = "test-fixtures")]
-    pub fn fixture(seed: u8) -> Result<Self> {
-        let mut identity = Identity::fixture(Role::Host, seed)?;
-        identity.signed.bundle.account_id = [0; 16];
-        identity.signed.signature = identity
-            .signing
-            .sign(&identity.signed.bundle.canonical()?)
-            .to_bytes()
-            .to_vec();
-        let pending = Self { identity };
-        pending.check_pending()?;
-        Ok(pending)
-    }
+
 }
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> Result<T> {
     if json.len() > crate::MAX_JSON {

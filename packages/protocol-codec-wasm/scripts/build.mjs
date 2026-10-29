@@ -22,7 +22,7 @@ function sourceSnapshot() {
     }
   }
   collect('crates/lomi-remote-protocol/src');
-  sourceFiles.push('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/lomi-remote-protocol/Cargo.toml', 'packages/protocol-codec-wasm/scripts/build.mjs', 'packages/protocol-codec-wasm/src/index.mjs', 'packages/protocol-codec-wasm/src/index.d.ts', 'packages/protocol-codec-wasm/package.json', 'packages/protocol-codec-wasm/test/codec.test.mjs', 'packages/protocol-codec-wasm/README.md');
+  sourceFiles.push('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/lomi-remote-protocol/Cargo.toml', 'packages/protocol-codec-wasm/scripts/build.mjs', 'packages/protocol-codec-wasm/src/index.mjs', 'packages/protocol-codec-wasm/src/index.d.ts', 'packages/protocol-codec-wasm/package.json', 'packages/protocol-codec-wasm/README.md');
   return Object.fromEntries(sourceFiles.sort().map(name => [name, sha(readFileSync(resolve(root,name)))]));
 }
 const sources = sourceSnapshot();

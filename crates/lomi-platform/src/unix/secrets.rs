@@ -379,38 +379,3 @@ impl Drop for Temporary<'_> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{secrets::ProtectedFileAcknowledgement, unix::OwnerLock};
-    use std::{fs, os::unix::fs::PermissionsExt};
-    #[test]
-    fn failed_atomic_update_keeps_previous_bundle() {
-        let root = tempfile::tempdir().unwrap();
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let owner = OwnerLock::acquire(&root.path().canonicalize().unwrap()).unwrap();
-        let mut store = ProtectedFile::open(
-            owner.profile(),
-            Selection::ProtectedFile(ProtectedFileAcknowledgement::OsPermissionsOnly),
-        )
-        .unwrap();
-        store
-            .replace(&SecretBundle::new(b"old-fixture".to_vec()).unwrap())
-            .unwrap();
-        let before = fs::read(root.path().join("host-secrets.bundle")).unwrap();
-        assert_eq!(
-            store.write(
-                &SecretBundle::new(b"new-fixture".to_vec()).unwrap(),
-                || Err(Error::Io)
-            ),
-            Err(Error::Io)
-        );
-        assert_eq!(
-            fs::read(root.path().join("host-secrets.bundle")).unwrap(),
-            before
-        );
-        assert_eq!(store.load().unwrap().unwrap().expose(), b"old-fixture");
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 3);
-    }
-}

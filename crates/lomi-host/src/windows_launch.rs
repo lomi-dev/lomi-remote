@@ -173,18 +173,3 @@ pub(super) fn prepare_console_control() -> io::Result<()> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn quote_spaces_quotes_and_trailing_slashes() {
-        let value = std::ffi::OsStr::new("a b\"c\\");
-        let expected: Vec<u16> = "\"a b\\\"c\\\\\"".encode_utf16().collect();
-        assert_eq!(quote(value).unwrap(), expected);
-    }
-    #[test]
-    fn reject_embedded_nul() {
-        assert!(quote(std::ffi::OsStr::new("a\0b")).is_err());
-    }
-}

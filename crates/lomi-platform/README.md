@@ -17,10 +17,9 @@ because they cannot grant authority. SYSTEM, Administrators and TrustedInstaller
 are trusted OS authorities for ancestor ownership/replacement, not IPC peers.
 The lifelong owner file uses `LockFileEx` and is never unlinked.
 
-Use a protected user-profile child for the profile. The tested Windows 10 LTSC
-machine grants AppPackage DELETE permissions on AppData/Local/Temp ancestors;
-the adapter deliberately rejects those chains. Tests create exclusive UUID
-folders directly beneath USERPROFILE and never change existing user directory ACLs.
+Use a protected user-profile child for the profile. The adapter rejects broad
+package/user permissions on temporary-directory ancestors and never changes
+existing user directory ACLs.
 
 The initial named-pipe instance uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, a restrictive
 owner SID ACL and `PIPE_REJECT_REMOTE_CLIENTS`. Acceptance creates a replacement
@@ -44,23 +43,18 @@ handling drains cancellation and releases buffers. This does not claim recovery
 from a stalled or malfunctioning OS driver. Client correlation/stream failures
 close and poison the connection before returning.
 
-Native Windows evidence is produced by `tests/platform-windows/run_native.py`.
-It uses the pinned SSH host, a fresh owned UUID directory, exact source inventories
-and hashes, an offline-derived subset Cargo lock whose dependency versions,
-sources and checksums must match the workspace lock, and a bounded native process
-runner. It records actual OS/toolchain and test binary hashes, then removes only
-its owned remote inputs after confirming no owned process remains. The tested
-scope is the recorded Windows 10 Enterprise LTSC build; Windows 11 and Windows
-Server are not qualified. Cross-compilation alone is not qualification.
+Windows runtime compatibility remains subject to release qualification;
+cross-compilation alone is not qualification.
 
 The `secrets` module defines the E1 host secret-storage boundary separately from
 local transport. It holds one opaque, nonempty bundle of at most 32 KiB, without
 serde or plaintext diagnostics. Owned secret buffers are zeroized on drop;
 callers remain responsible for erasing their input and any exposed copies.
 Selection reports `Unconfigured`, `Available`, `Locked` or `Unavailable` with a
-provider kind. macOS Keychain, Windows DPAPI and Secret Service are explicit
-unimplemented selections and report unavailable, with no fallback or file effects.
-No host/coordinator/CLI/enrollment or existing Chat/AI keychain is wired here.
+provider kind. macOS Keychain, Windows DPAPI and Linux Secret Service are
+explicit native providers; selecting an unavailable or unconfigured provider
+does not fall back to another provider or create file-backed secrets. No
+existing Chat/AI keychain is reused here.
 
 On Unix, `unix::secrets::ProtectedFile::open` requires a borrowed validated
 `PrivateProfile` and an explicit `Selection::ProtectedFile` acknowledgement of
@@ -84,7 +78,3 @@ published automatically. Backup/restore fencing, controlled remnant cleanup and
 cross-system credential rotation recovery remain separate deliverables. No
 protection against malicious processes under the same UID or administrators is
 claimed, and disk copies contain plaintext.
-
-Focused native checks: `CARGO_INCREMENTAL=0 cargo test -p lomi-platform --locked
---offline --test unix_secrets` and `CARGO_INCREMENTAL=0 cargo test -p lomi-platform
---locked --offline --lib failed_atomic_update`. These use fixture bytes only.

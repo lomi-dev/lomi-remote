@@ -8,11 +8,10 @@ qualified implementation of Remote API/application major 2 or grant/context v3.
 `REMOTE_V2_PRODUCTION_QUALIFIED` is false. No backward negotiation or fallback is
 added to the new product.
 
-[README.upstream.md](README.upstream.md), existing examples, fixtures, historical
-qualification constants and compatibility tests describe the imported old live
-profile. Passing them preserves historical security evidence; it does not admit
-old grants into the new Remote product. New context/grant encoding and terminal
-profile binding still require a separately reviewed contract.
+[README.upstream.md](README.upstream.md) preserves the imported upstream
+documentation. Historical compatibility behavior is not accepted as a grant or
+authority path in the Remote product. New context/grant encoding and terminal
+profile binding remain separate contract surfaces.
 
 The patched Snow source is retained at `vendor/snow`, including its original
 MIT/Apache licenses, upstream digest inventory, low-order DH rejection and secret
@@ -21,25 +20,19 @@ is made. Identity seed ownership, Zeroizing storage, Dalek zeroize feature and
 explicit disposal are unchanged. The enrollment API borrows the existing signing
 key and does not export or retain a second secret.
 
-The provenance inventory at `tests/crypto-provenance/source.json` records every
-upstream file's SHA-256 at that commit, its destination hash and any adaptation.
-The nested Cargo.lock is excluded in favor of the root workspace lock; serde and
-serde_json are pinned to root-compatible versions. The historical README is
-relocated without changing its bytes. Every vendored Snow file is byte-identical.
+The root workspace lockfile pins serde and serde_json alongside product
+transitive dependencies. The historical README is retained as upstream reference
+material. Snow source, license files, upstream digests, and local patch provenance
+remain under `vendor/snow`.
 
-From the repository root:
+Build checks from the repository root:
 
 ```sh
-python3 tools/check_crypto_source.py --source-repo ../lomi
-cargo test --locked -p lomi-remote-crypto --features test-fixtures
+cargo check --locked -p lomi-remote-crypto
 cargo check --locked -p lomi-remote-crypto --features browser --target wasm32-unknown-unknown
 ```
 
-The provenance checker also works without `--source-repo` for destination drift;
-with that argument it independently reads every source blob from the pinned Git
-commit, without depending on the source working tree.
-
-## Isolated enrollment proof API
+## Enrollment proof API
 
 `Identity::sign_enrollment_proof` signs a fixed-length canonical CBOR array under
 the independent domain `lomi-remote-host-enrollment-proof-v1`, using the existing

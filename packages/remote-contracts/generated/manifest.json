@@ -71,7 +71,7 @@
     "contracts/workspace-context.schema.json": "cb5da276c351decdd7639fa9c223ff108dbd37eac3cd491820de7a48d0394aa5",
     "contracts/workspace-stream-frame.schema.json": "57de3da227ee985d43c54d6249182114e0396b46c45b325f0b0c40fbc1dba8cd",
     "contracts/wss-admission-frame.schema.json": "e86d727e74fa024fbf385d12b0527fa20b5ed0a47f3722ba77938b39e93a931f",
-    "packages/remote-contracts/package.json": "92b966a0bc1a8c42df76568e130e8f479cd4ffee4ba179c29592e6873b315f45",
+    "packages/remote-contracts/package.json": "d4a6d884768e79b0cd62820d0e92eef2a9497c62e96693ed80762dbb048f50c0",
     "packages/remote-contracts/package-lock.json": "8d100b5b1b61bd05fe3b380a530b7548996693a5643568e6fed1ae91c5762a31",
     "packages/remote-contracts/scripts/generate.mjs": "7deae7bec7f090ebb73367b7db749d9d2749dd7f230217d3656812065c694d13",
     "packages/remote-contracts/src/index.mjs": "d0311713112c3d84903a614b7a0c85abc386e9ef54628a356315480f9ddb9d58"

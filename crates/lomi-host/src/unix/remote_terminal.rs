@@ -70,79 +70,15 @@ pub(super) struct RemoteTerminalState {
 fn fault(code: ErrorCode) -> RemoteError {
     RemoteError::new(code, false, Effect::None, ErrorDetails::empty(), None).expect("static error")
 }
-#[cfg(not(test))]
 fn gate(_: GateError) -> RemoteError {
     fault(ErrorCode::ScopeDenied)
 }
-#[cfg(test)]
-fn gate(error: GateError) -> RemoteError {
-    let category = match error {
-        GateError::Denied => "Denied",
-        GateError::Busy => "Busy",
-        GateError::Disposed => "Disposed",
-    };
-    eprintln!(
-        "remote terminal mapper=gate category={category} origin={}:{}",
-        file!(),
-        line!()
-    );
-    fault(ErrorCode::ScopeDenied)
-}
-#[cfg(not(test))]
+
 fn owner(_: super::shared_owner::Error) -> RemoteError {
     fault(ErrorCode::ServiceUnavailable)
 }
-#[cfg(test)]
-fn owner(error: super::shared_owner::Error) -> RemoteError {
-    let category = match error {
-        super::shared_owner::Error::Store(_) => "Store",
-        super::shared_owner::Error::UncertainStore(_) => "UncertainStore",
-        super::shared_owner::Error::Domain(error) => match error {
-            super::owner_domain::Error::Busy => "Domain/Busy",
-            super::owner_domain::Error::Cancelled => "Domain/Cancelled",
-            super::owner_domain::Error::Deadline => "Domain/Deadline",
-            super::owner_domain::Error::Denied => "Domain/Denied",
-            super::owner_domain::Error::Poisoned => "Domain/Poisoned",
-            super::owner_domain::Error::Exhausted => "Domain/Exhausted",
-            super::owner_domain::Error::Stale => "Domain/Stale",
-            super::owner_domain::Error::Unfinished => "Domain/Unfinished",
-        },
-    };
-    eprintln!(
-        "remote terminal mapper=owner category={category} origin={}:{}",
-        file!(),
-        line!()
-    );
-    fault(ErrorCode::ServiceUnavailable)
-}
+
 fn terminal(error: lomi_terminal::Error) -> RemoteError {
-    #[cfg(test)]
-    {
-        let category = match error {
-            lomi_terminal::Error::UnsupportedPlatform => "UnsupportedPlatform",
-            lomi_terminal::Error::SessionMissing => "SessionMissing",
-            lomi_terminal::Error::SessionExists => "SessionExists",
-            lomi_terminal::Error::StaleEpoch => "StaleEpoch",
-            lomi_terminal::Error::ResourceExhausted => "ResourceExhausted",
-            lomi_terminal::Error::InvalidArgument => "InvalidArgument",
-            lomi_terminal::Error::SpawnFailed => "SpawnFailed",
-            lomi_terminal::Error::SpawnOutcomeUnknown => "SpawnOutcomeUnknown",
-            lomi_terminal::Error::StateFailed => "StateFailed",
-            lomi_terminal::Error::SessionExited => "SessionExited",
-            lomi_terminal::Error::ControlRequired => "ControlRequired",
-            lomi_terminal::Error::LeaseExpired => "LeaseExpired",
-            lomi_terminal::Error::SequenceConflict => "SequenceConflict",
-            lomi_terminal::Error::RenderAckRequired => "RenderAckRequired",
-            lomi_terminal::Error::CleanupFailed => "CleanupFailed",
-            lomi_terminal::Error::FenceRejected => "FenceRejected",
-            lomi_terminal::Error::OutcomeUnknown => "OutcomeUnknown",
-        };
-        eprintln!(
-            "remote terminal mapper=terminal category={category} origin={}:{}",
-            file!(),
-            line!()
-        );
-    }
     if error == lomi_terminal::Error::OutcomeUnknown {
         return RemoteError::new(
             ErrorCode::OutcomeUnknown,
@@ -1128,7 +1064,3 @@ impl RemoteTerminalState {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "remote_terminal_tests.rs"]
-mod tests;

@@ -47,5 +47,5 @@ Run `cargo run -p lomi-remote-protocol --bin generate-contracts` to regenerate t
 draft schema, foundation schema catalog and compatibility manifest. Add
 `-- --check` to reject drift. The manifest hashes exact generated schema bytes
 and the existing experimental profile bytes with SHA-256. `foundation-e0` does
-not claim complete parameters, fixture coverage for every method, an HTTP API,
-a frozen contract, production admission or terminal qualification.
+not claim complete parameters, an HTTP API, a frozen contract, production
+admission or terminal qualification.

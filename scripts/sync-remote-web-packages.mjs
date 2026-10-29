@@ -32,7 +32,7 @@ async function contractRuntimeFiles() {
     }
   }
   return [
-    'src/index.mjs', 'src/rpc-client.ts', 'fixtures/rust-codec.json',
+    'src/index.mjs', 'src/rpc-client.ts',
     'generated/registry.mjs', 'generated/validators.mjs',
     ...[...referenced].sort().map(name => `generated/${name}`),
   ];
@@ -91,6 +91,7 @@ async function runtimePackageJson(source) {
   return Buffer.from(`${JSON.stringify(pkg, null, 2)}\n`);
 }
 const errors = [];
+await syncMobileCrypto();
 await syncMobileProtocol();
 const manifestDigests = {};
 for (const snapshot of snapshots) {
@@ -183,6 +184,69 @@ async function listFiles(directory, prefix = '') {
     else output.push(path);
   }
   return output;
+}
+
+async function syncMobileCrypto() {
+  const source = join(root, 'crates/lomi-remote-crypto');
+  const destination = join(mobile, 'modules/lomi-remote-crypto/vendor/core');
+  const provenancePath = join(mobile, 'modules/lomi-remote-crypto/PROVENANCE.json');
+  const provenance = JSON.parse(await readFile(provenancePath, 'utf8'));
+  const recorded = provenance.sha256;
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) {
+    throw new Error('Mobile crypto vendor has no trusted source inventory');
+  }
+  const current = (await listFiles(destination)).sort();
+  const recordedPaths = Object.keys(recorded).sort();
+  const paths = (await listFiles(source)).sort();
+  if (!paths.includes('Cargo.toml') || !recordedPaths.includes('Cargo.toml') || !current.includes('Cargo.toml')) {
+    throw new Error('Mobile crypto Cargo source inventory is missing');
+  }
+
+  const snowPrefix = 'vendor/snow/';
+  const currentSnow = current.filter(path => path.startsWith(snowPrefix));
+  const sourceSnow = paths.filter(path => path.startsWith(snowPrefix));
+  if (JSON.stringify(currentSnow) !== JSON.stringify(sourceSnow)) {
+    throw new Error('Mobile crypto Snow vendor file inventory differs from its canonical source');
+  }
+
+  const expected = new Map();
+  for (const path of paths) expected.set(path, await readFile(join(source, path)));
+  for (const path of sourceSnow) {
+    if (!(await readFile(join(destination, path))).equals(expected.get(path))) {
+      throw new Error(`Mobile crypto Snow vendor source must be reconciled manually: ${path}`);
+    }
+  }
+  for (const path of current) {
+    const actual = digest(await readFile(join(destination, path)));
+    const canonical = expected.has(path) ? digest(expected.get(path)) : undefined;
+    if (actual !== recorded[path] && actual !== canonical) {
+      throw new Error(`Mobile crypto snapshot was edited: ${path}`);
+    }
+  }
+  for (const path of expected.keys()) {
+    if (!current.includes(path) && check) errors.push(`mobile native crypto snapshot is missing: ${path}`);
+  }
+
+  if (check) {
+    for (const [path, bytes] of expected) {
+      if (recorded[path] !== digest(bytes)) errors.push(`mobile native crypto snapshot differs: ${path}`);
+    }
+    for (const path of recordedPaths) {
+      if (!expected.has(path)) errors.push(`mobile native crypto snapshot retains removed source: ${path}`);
+    }
+    return;
+  }
+
+  for (const [path, bytes] of expected) {
+    if (path.startsWith(snowPrefix)) continue;
+    await mkdir(dirname(join(destination, path)), { recursive: true });
+    await writeFile(join(destination, path), bytes);
+  }
+  for (const path of recordedPaths) {
+    if (!expected.has(path)) await rm(join(destination, path), { force: true });
+  }
+  provenance.sha256 = Object.fromEntries([...expected].map(([path, bytes]) => [path, digest(bytes)]));
+  await writeFile(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`);
 }
 
 async function syncMobileProtocol() {

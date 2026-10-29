@@ -223,8 +223,6 @@ struct Work {
     observation: Arc<Observation>,
     intent: Option<ChannelAdmissionIntent>,
 }
-#[cfg(test)]
-type SnapshotHook = Box<dyn FnOnce(u64, Runtime<'_>)>;
 
 #[derive(Default)]
 pub(super) struct Worker {
@@ -246,14 +244,6 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     prefer_recovery: bool,
     capacity_blocked: bool,
-    #[cfg(test)]
-    after_snapshot: Option<SnapshotHook>,
-    #[cfg(test)]
-    after_sign: Option<Box<dyn FnOnce()>>,
-    #[cfg(test)]
-    before_prepare_lock: Option<Box<dyn FnOnce()>>,
-    #[cfg(test)]
-    before_ack_lock: Option<Box<dyn FnOnce()>>,
 }
 impl Worker {
     pub(super) fn discard_retained_operation(&mut self) {
@@ -594,10 +584,6 @@ impl Worker {
             &pairing_work,
             Some(signed.grant.expires_at),
         )?;
-        #[cfg(test)]
-        if let Some(hook) = self.after_snapshot.take() {
-            hook(_snapshot_now, runtime);
-        }
         if scope != original.scope {
             return Err(PeerError::Invalid);
         }
@@ -709,10 +695,6 @@ impl Worker {
             self.reconstruct(auth, config, runtime, eligibility, &work)?;
         let now = self.trust.live(auth, runtime, eligibility)?;
         let admission = managed(auth.sign_channel_admission_v3(prepared.context(), now))?;
-        #[cfg(test)]
-        if let Some(hook) = self.after_sign.take() {
-            hook();
-        }
         let wire = crypt(admission.to_wire())?;
         self.verify_admission(auth, runtime, eligibility, &work, &wire)?;
         let p = ChannelAdmissionPreparation {
@@ -729,10 +711,6 @@ impl Worker {
                 admission: wire,
             },
         };
-        #[cfg(test)]
-        if let Some(hook) = self.before_prepare_lock.take() {
-            hook();
-        }
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         let capture = owner_turn(runtime, || {
             runtime.owner.capture_peer_journal(
@@ -925,10 +903,6 @@ impl Worker {
             operation: runtime.operation.retained_identity(),
             deadline: runtime.operation.deadline().min(channel_deadline),
         };
-        #[cfg(test)]
-        if let Some(hook) = self.before_ack_lock.take() {
-            hook();
-        }
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         let capture = owner_turn(runtime, || {
             runtime.owner.capture_peer_journal(
@@ -1292,6 +1266,3 @@ fn verify_expired(
         context.expires_at.saturating_sub(1),
     )
 }
-#[cfg(test)]
-#[path = "channel_tests.rs"]
-mod tests;

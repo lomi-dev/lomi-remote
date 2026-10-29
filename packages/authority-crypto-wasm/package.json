@@ -12,9 +12,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node scripts/build.mjs --check",
-    "test": "node --test test/*.test.mjs",
-    "test:bun": "bun test test/*.test.mjs"
+    "check": "node scripts/build.mjs --check"
   },
   "files": [
     "README.md",

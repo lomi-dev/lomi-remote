@@ -14,12 +14,6 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# Test-time cost control: unoptimized code dominates real TLS/Noise terminal
-# tests (per-fragment signature verification, hex/JSON validation). Light
-# optimization keeps assertions, overflow checks and debuginfo intact.
-[profile.dev]
-opt-level = 1
-
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 vte = { path = "vendor/vte" }

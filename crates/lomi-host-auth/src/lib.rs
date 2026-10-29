@@ -1283,32 +1283,7 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
         check_time(credentials.expires, now)?;
         wire(credentials.access.as_str().to_owned())
     }
-    /// Replace only the wire credential and epoch in a ready fixture bundle.
-    /// This is available solely to opt-in integration-test builds.
-    #[cfg(feature = "fixture-support")]
-    pub fn replace_ready_access_for_fixture(
-        &mut self,
-        access: HostAccessCredential,
-        epoch: DecimalU64,
-        expires_at: u64,
-    ) -> Result<()> {
-        if epoch.0 == 0 || expires_at <= self.current()?.observed_at {
-            return Err(Error::InvalidResponse);
-        }
-        let mut next = self.current()?.clone();
-        let State::Ready {
-            credentials,
-            epoch: stored_epoch,
-            ..
-        } = &mut next.lifecycle
-        else {
-            return Err(Error::InvalidState);
-        };
-        credentials.access = Text::new(access.expose_wire().to_owned());
-        credentials.expires = expires_at;
-        *stored_epoch = epoch.0;
-        self.commit(next)
-    }
+
     pub fn prepare_rotation(&mut self, now: u64) -> Result<()> {
         self.observe(now)?;
         let r = self.current()?;

@@ -24,7 +24,7 @@ The dashboard supports selection, details, refresh, keyboard help and q/Ctrl-C.
 Closing it restores raw mode, alternate screen and cursor state independently;
 it never sends a host stop command. Untrusted labels have control characters
 replaced and their displayed length bounded. No shell output is interpreted by
-Ratatui. The 80×24 screen has an exact `TestBackend` snapshot regression.
+Ratatui. The dashboard uses Ratatui and does not interpret shell output as UI content.
 
 `setup` loads and can save a local manual/login/boot start preference. Saving it
 does not install or start an OS service, enroll an account, or share a workspace;
@@ -33,8 +33,6 @@ of reporting success.
 Workspace removal and sharing changes require `--confirm` and pass through local
 IPC admission. Removing a registration never requests deletion of project files.
 
-The crate is private development software. Successful local tests do not
-qualify account enrollment, cloud sharing, service installation or a release.
 
 Terminal commands inspect the current workspace context and domain revision
 before each explicit mutation. The configured `default` profile starts the
@@ -72,16 +70,3 @@ presses are coalesced into one bounded write to reduce output backpressure.
 Closing a view does not stop the host or shell, and the host continues reading
 output without an attached view. A view does not automatically reclaim control
 after revocation. Windows defaults to `%USERPROFILE%\.lomiRemote`.
-
-Focused validation commands:
-
-```sh
-cargo test -p lomiremote --locked
-cargo clippy -p lomiremote --all-targets --no-deps --locked -- -D warnings
-cargo build -p lomiremote --locked
-python3 crates/lomiremote/tests/attach_pty.py target/debug/lomiremote
-```
-
-The Python PTY regression uses a private synthetic local profile and bounded
-process deadlines. It checks structured observer/control views, PTY input,
-Ctrl-C, terminal restoration, and a second observer after local view exit.

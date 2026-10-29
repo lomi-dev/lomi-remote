@@ -11,9 +11,6 @@ experimental-macos-coalition-cleanup = ["lomi-terminal/experimental-macos-coalit
 default = []
 release-maintenance = ["lomi-update-trust/release-root"]
 linux-setup-handoff = ["release-maintenance"]
-scm-fixture = ["lomi-host/scm-fixture"]
-service-fixture = ["lomi-platform/service-fixture"]
-dpapi-fixture = ["service-fixture", "lomi-platform/dpapi-fixture"]
 
 [dependencies]
 lomi-terminal = { path = "../lomi-terminal" }

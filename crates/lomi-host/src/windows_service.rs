@@ -37,14 +37,7 @@ struct Configuration {
 }
 static CONFIGURATION: OnceLock<Configuration> = OnceLock::new();
 static FAILED: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "scm-fixture")]
-static EXPIRE_STOP_DEADLINE: AtomicBool = AtomicBool::new(false);
 
-/// Native fixture only: expire the next real SCM stop's deadline. Defaults off.
-#[cfg(feature = "scm-fixture")]
-pub fn fixture_expire_stop_deadline() {
-    EXPIRE_STOP_DEADLINE.store(true, Ordering::Release);
-}
 define_windows_service!(ffi_service_main, service_main);
 
 /// Enter the SCM dispatcher before argument parsing or any interactive UI.
@@ -245,12 +238,7 @@ fn owner(profile: &Path, stop: &AtomicBool, handle: ServiceStatusHandle) -> Resu
     status(handle, ServiceState::StopPending, 1, false).unwrap_or_else(|_| incomplete());
     let intentional = stop.load(Ordering::Acquire);
     let deadline = Instant::now() + STOP_TIMEOUT;
-    #[cfg(feature = "scm-fixture")]
-    let deadline = if EXPIRE_STOP_DEADLINE.swap(false, Ordering::AcqRel) {
-        Instant::now()
-    } else {
-        deadline
-    };
+
     remaining(deadline);
     let mut requested = false;
     if !host.is_finished() && Some(client.discovery().runtime_id) == expected {

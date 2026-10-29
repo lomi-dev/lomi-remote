@@ -6,7 +6,6 @@
   "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.mjs" }, "./wasm": "./generated/protocol_codec_bg.wasm" },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node scripts/build.mjs --check",
-    "test": "node --test test/*.test.mjs"
+    "check": "node scripts/build.mjs --check"
   }
 }

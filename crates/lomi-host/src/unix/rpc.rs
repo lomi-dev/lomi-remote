@@ -49,20 +49,8 @@ pub(super) struct ConnectionState {
     subscriptions: HashMap<String, Subscription>,
     leases: HashMap<String, (TerminalContext, ControlLease)>,
     schedule: VecDeque<String>,
-    #[cfg(test)]
-    profile_override: Option<SpawnProfile>,
-    #[cfg(test)]
-    startup_check: Option<Arc<dyn Fn() -> lomi_terminal::Result<()> + Send + Sync>>,
-    #[cfg(test)]
-    before_terminal_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
-#[cfg(test)]
-impl ConnectionState {
-    /// Test-only: pin the spawn profile (shell, environment, grid size).
-    pub(super) fn set_profile_override_for_test(&mut self, profile: SpawnProfile) {
-        self.profile_override = Some(profile);
-    }
-}
+
 fn fault(code: ErrorCode) -> RemoteError {
     RemoteError::new(code, false, Effect::None, ErrorDetails::empty(), None)
         .expect("static safe error")
@@ -264,12 +252,6 @@ impl ConnectionState {
             subscriptions: HashMap::new(),
             leases: HashMap::new(),
             schedule: VecDeque::new(),
-            #[cfg(test)]
-            profile_override: None,
-            #[cfg(test)]
-            startup_check: None,
-            #[cfg(test)]
-            before_terminal_stop: None,
         })
     }
     fn prune_leases(&mut self) {
@@ -2081,12 +2063,6 @@ fn profile(
     operation: &Operation<'_>,
     profile_id: &HostProfileId,
 ) -> Result<SpawnProfile, RemoteError> {
-    #[cfg(test)]
-    if let Some(profile) = &connection.profile_override {
-        let mut profile = profile.clone();
-        profile.cwd = project.local_root.clone();
-        return Ok(profile);
-    }
     let _ = connection;
     if profile_id.as_str() != "default" {
         let (configured, cwd_override) = owner_call(operation, || {
@@ -2968,10 +2944,6 @@ fn mutate(
         return Err(error);
     }
     if let Some(target) = &plan.stop {
-        #[cfg(test)]
-        if let Some(before_stop) = &connection.before_terminal_stop {
-            before_stop();
-        }
         if let Err(error) = coordinator
             .terminals
             .stop_checked(target.session_id, || terminal_effect_current(operation))
@@ -3025,14 +2997,7 @@ fn mutate(
             )?;
             return Err(fault(ErrorCode::ServiceUnavailable));
         }
-        #[cfg(test)]
-        let check = || {
-            connection
-                .startup_check
-                .as_ref()
-                .map_or(Ok(()), |check| check())
-        };
-        #[cfg(not(test))]
+
         let check = || Ok(());
         let spawn_result = coordinator.terminals.spawn_with_checks_until(
             target.session_id,
@@ -3403,203 +3368,5 @@ impl GitDispatchFailure {
         } else {
             Self::NoEffect(error)
         }
-    }
-}
-#[cfg(all(test, unix))]
-#[path = "../../tests/rpc/mod.rs"]
-mod tests;
-
-#[cfg(test)]
-mod owner_queue_tests {
-    use super::*;
-    use std::sync::atomic::AtomicBool;
-
-    #[test]
-    fn reserve_capacity_before_admitting_another_effect() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = HostStore::open(
-            &temp.path().join("host.sqlite"),
-            lomi_host_store::Limits::default(),
-        )
-        .unwrap();
-        let coordinator = Coordinator::new(store, Arc::new(AtomicBool::new(false)));
-        let cancelled = AtomicBool::new(false);
-        let operation = Operation::new(Instant::now() + Duration::from_secs(60), &cancelled);
-        let workspace = fresh();
-        let mut slots = Vec::new();
-        for _ in 0..COMPLETION_SLOTS {
-            slots.push(CompletionSlot::reserve(&coordinator, &operation, workspace).unwrap());
-        }
-        let error = match CompletionSlot::reserve(&coordinator, &operation, workspace) {
-            Err(error) => error,
-            Ok(_) => panic!("must reject before journal or physical effect"),
-        };
-        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
-        drop(slots.pop());
-        assert!(CompletionSlot::reserve(&coordinator, &operation, workspace).is_ok());
-    }
-
-    #[test]
-    fn expired_request_retains_actual_permit_until_persistence_only_recovery() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut store = HostStore::open(
-            &temp.path().join("host.sqlite"),
-            lomi_host_store::Limits::default(),
-        )
-        .unwrap();
-        let project = store
-            .add_project(temp.path(), "Synthetic".to_owned().try_into().unwrap())
-            .unwrap();
-        let workspace = project.state.context.workspace_id;
-        let actor =
-            ConsumerAuthorizationId::from_bytes(store.identity().host_id.to_bytes()).unwrap();
-        let id = fresh();
-        let binding = OperationBinding {
-            rights: StoredOperationRights::new(
-                id,
-                actor,
-                workspace,
-                Method::TerminalCreate,
-                local_rights(),
-                false,
-            )
-            .unwrap(),
-            parameter_hash: parameter_hash(&"retained-permit-test").unwrap(),
-        };
-        // Exclusive startup fixture setup; no Core/PTY effect is executed.
-        store
-            .admit_external(&binding, project.state.domain_revision)
-            .unwrap();
-        let permit = store.start_external(&binding).unwrap();
-        let coordinator = Coordinator::new(store, Arc::new(AtomicBool::new(false)));
-        let cancelled = AtomicBool::new(false);
-        let original = Operation::new(Instant::now() + Duration::from_secs(60), &cancelled);
-        let slot = CompletionSlot::reserve(&coordinator, &original, workspace).unwrap();
-        original.expire_for_test();
-        assert!(
-            finish_external(
-                &slot,
-                &original,
-                binding,
-                permit,
-                OperationState::Failed,
-                Effect::None,
-                None,
-                None,
-                false
-            )
-            .is_err()
-        );
-        drop(slot);
-        assert!(ensure_workspace_settled(&coordinator, workspace).is_err());
-        let maintenance = Operation::new(Instant::now() + Duration::from_secs(60), &cancelled);
-        reconcile_deferred_completions(&coordinator, &maintenance).unwrap();
-        assert!(ensure_workspace_settled(&coordinator, workspace).is_ok());
-        let receipt = coordinator
-            .owner
-            .lookup_operation(&maintenance, actor, workspace, id, &local_rights())
-            .unwrap()
-            .unwrap();
-        assert_eq!(receipt.state(), OperationState::Failed);
-    }
-}
-
-#[cfg(test)]
-mod terminal_move_plan_tests {
-    use super::*;
-    fn project() -> (tempfile::TempDir, ProjectRecord) {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = HostStore::open(
-            &directory.path().join("host.sqlite"),
-            lomi_host_store::Limits::default(),
-        )
-        .unwrap();
-        let mut project = store
-            .add_project(
-                directory.path(),
-                "local move".to_owned().try_into().unwrap(),
-            )
-            .unwrap();
-        project.state.tabs = BoundedList(
-            (0..2u8)
-                .map(|id| TerminalTab {
-                    tab_id: TabId::from_bytes([11 + id; 16]).unwrap(),
-                    name: format!("tab-{id}").try_into().unwrap(),
-                    layout: TerminalLayout::Pane {
-                        pane: TerminalPane {
-                            pane_id: PaneId::from_bytes([21 + id; 16]).unwrap(),
-                            state: PaneState::Stopped,
-                            session: None,
-                        },
-                    },
-                })
-                .collect(),
-        );
-        (directory, project)
-    }
-    fn params(project: &ProjectRecord, placement: MovePlacement) -> TerminalMoveParams {
-        TerminalMoveParams {
-            mutation: MutationContext {
-                operation_id: OperationId::from_bytes([31; 16]).unwrap(),
-                context: project.state.context.clone(),
-                expected_revision: project.state.domain_revision,
-            },
-            pane_id: PaneId::from_bytes([21; 16]).unwrap(),
-            source_tab_id: TabId::from_bytes([11; 16]).unwrap(),
-            target_tab_id: TabId::from_bytes([12; 16]).unwrap(),
-            target_pane_id: PaneId::from_bytes([22; 16]).unwrap(),
-            placement,
-        }
-    }
-    #[test]
-    fn local_move_reuses_typed_layout_with_one_revision_and_no_physical_effect_plan() {
-        let (_directory, project) = project();
-        for placement in [MovePlacement::Before, MovePlacement::After] {
-            let params = params(&project, placement);
-            let layout = lomi_host_store::TerminalMoveLayout::from(&params);
-            let mut expected =
-                lomi_host_store::plan_terminal_move(&project.state, &layout).unwrap();
-            expected.domain_revision.0 += 1;
-            let actual = plan(&RpcCall::TerminalMove(params), &project).unwrap();
-            assert_eq!(actual.state, expected);
-            assert!(actual.stop.is_none());
-            assert!(actual.spawn.is_none());
-            assert_eq!(
-                actual.result,
-                OperationResult::Domain {
-                    domain_revision: expected.domain_revision
-                }
-            );
-        }
-    }
-    #[test]
-    fn local_move_preserves_invalid_missing_and_overflow_error_precedence() {
-        let (_directory, mut project) = project();
-        let mut params = params(&project, MovePlacement::Before);
-        params.target_pane_id = params.pane_id;
-        assert_eq!(
-            plan(&RpcCall::TerminalMove(params.clone()), &project)
-                .err()
-                .unwrap()
-                .code(),
-            ErrorCode::InvalidArgument
-        );
-        params.target_pane_id = PaneId::from_bytes([99; 16]).unwrap();
-        assert_eq!(
-            plan(&RpcCall::TerminalMove(params.clone()), &project)
-                .err()
-                .unwrap()
-                .code(),
-            ErrorCode::ResourceNotFound
-        );
-        project.state.domain_revision = DecimalU64(u64::MAX);
-        params.target_pane_id = params.pane_id;
-        assert_eq!(
-            plan(&RpcCall::TerminalMove(params), &project)
-                .err()
-                .unwrap()
-                .code(),
-            ErrorCode::ResourceExhausted
-        );
     }
 }

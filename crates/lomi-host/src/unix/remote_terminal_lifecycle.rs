@@ -70,7 +70,7 @@ pub(super) fn run<'d, 'o, 'e, 'w, 'p, 's>(
 ) -> Result<RemoteRenameOutcome<'d, 'o, 'e, 'w, 'p, 's>, RemoteRenameError> {
     use lomi_remote_protocol::rpc::RpcCall;
     // (operation id, workspace, terminal domain revision CAS if any).
-    let (operation_id, workspace, expected_revision) = match &original.call {
+    let (_operation_id, workspace, expected_revision) = match &original.call {
         RpcCall::TerminalCreate(p) => (
             p.mutation.operation_id,
             p.mutation.context.workspace_id,
@@ -112,7 +112,6 @@ pub(super) fn run<'d, 'o, 'e, 'w, 'p, 's>(
     if is_file && file_guarded_ids.is_none() {
         return Err(RemoteRenameError::Closed);
     }
-    let _ = operation_id; // consumed only by test fault injection
     // A previous effect whose completion could not be persisted must settle
     // under maintenance before this workspace may run another effect.
     rpc::ensure_workspace_settled(coordinator, workspace).map_err(|_| RemoteRenameError::Closed)?;
@@ -176,9 +175,6 @@ pub(super) fn run<'d, 'o, 'e, 'w, 'p, 's>(
             }
         }
     }
-
-    #[cfg(test)]
-    fault::fire(operation_id.to_bytes(), owner, worker.operation(), &write);
 
     let mut namespace = None;
     let (outcome, file_error, spawn_refused) = match write.file_plan().cloned() {
@@ -574,88 +570,5 @@ fn perform_effect(
         effect: Effect::Committed,
         result: Some(plan.result.clone()),
         projection: Some(plan.state.clone()),
-    }
-}
-
-/// Test-only injection point between the durable start and the physical effect:
-/// lets a test interleave a competing writer exactly where the lock-free
-/// predicate must stop the spawn/stop. Keyed by operation id so concurrently
-/// running tests never consume each other's fault.
-#[cfg(test)]
-pub(super) mod fault {
-    use super::*;
-    use crate::unix::owner_domain::Operation;
-    use crate::unix::shared_owner::SharedOwner;
-    use lomi_remote_protocol::TerminalContext;
-    use std::sync::Mutex;
-
-    type Competing = Box<dyn FnOnce(&SharedOwner, &Operation<'_>) + Send>;
-    struct Armed {
-        operation: [u8; 16],
-        competing: Competing,
-    }
-    static ARMED: Mutex<Vec<Armed>> = Mutex::new(Vec::new());
-    static PLANNED: Mutex<Vec<Planned>> = Mutex::new(Vec::new());
-
-    /// What the sealed plan intended: (operation, spawn target, stop target).
-    type Planned = ([u8; 16], Option<TerminalContext>, Option<TerminalContext>);
-
-    static FAIL_COMPLETION: Mutex<Vec<[u8; 16]>> = Mutex::new(Vec::new());
-
-    /// The next completion write of `operation` fails with a Store storage
-    /// error AFTER the physical effect ran (the retained permit must recover).
-    pub(in crate::unix) fn fail_completion(operation: [u8; 16]) {
-        FAIL_COMPLETION.lock().unwrap().push(operation);
-    }
-    pub(in crate::unix) fn take_completion_failure(operation: [u8; 16]) -> bool {
-        let mut armed = FAIL_COMPLETION.lock().unwrap();
-        match armed.iter().position(|op| *op == operation) {
-            Some(index) => {
-                armed.remove(index);
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub(in crate::unix) fn arm(operation: [u8; 16], competing: Competing) {
-        ARMED.lock().unwrap().push(Armed {
-            operation,
-            competing,
-        });
-    }
-
-    /// `(spawn, stop)` targets the sealed plan intended for `operation`.
-    pub(in crate::unix) fn planned(
-        operation: [u8; 16],
-    ) -> Option<(Option<TerminalContext>, Option<TerminalContext>)> {
-        let mut planned = PLANNED.lock().unwrap();
-        let index = planned.iter().position(|(op, ..)| *op == operation)?;
-        let (_, spawn, stop) = planned.remove(index);
-        Some((spawn, stop))
-    }
-
-    pub(super) fn fire(
-        operation: [u8; 16],
-        owner: &SharedOwner,
-        op: &Operation<'_>,
-        write: &RemoteTerminalEffectWrite<'_, '_, '_, '_, '_, '_>,
-    ) {
-        let armed = {
-            let mut armed = ARMED.lock().unwrap();
-            armed
-                .iter()
-                .position(|a| a.operation == operation)
-                .map(|i| armed.remove(i))
-        };
-        if let Some(armed) = armed {
-            let plan = &write.plan().plan;
-            PLANNED.lock().unwrap().push((
-                operation,
-                plan.spawn.as_ref().map(|(t, _)| t.clone()),
-                plan.stop.clone(),
-            ));
-            (armed.competing)(owner, op);
-        }
     }
 }

@@ -12,16 +12,10 @@ use lomi_remote_protocol::{
 use lomi_terminal::TerminalService;
 use platform::{LocalClient, LocalDiscovery, OwnerEndpoint, OwnerLock};
 use serde::{Deserialize, Serialize};
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-use sha2::{Digest, Sha256};
+
 #[cfg(unix)]
 use std::process::{Command, Stdio};
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-use std::{
-    fs::{self, OpenOptions},
-    io::{Read, Seek, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-};
+
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -212,38 +206,6 @@ struct Coordinator {
     native_evidence: Mutex<Option<Arc<native_evidence::NativeEvidenceHost>>>,
 }
 impl Coordinator {
-    #[cfg(test)]
-    fn with_existing_owner_for_test(
-        owner: Arc<shared_owner::SharedOwner>,
-        stopping: Arc<AtomicBool>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            profile: None,
-            started: Instant::now(),
-            logs: diagnostics::DiagnosticLogRing::default(),
-            clients: Mutex::new(None),
-            diagnostic_auth: Mutex::new(None),
-            started_git_terminal: Mutex::new(None),
-            owner,
-            stopping,
-            terminals: Arc::new(TerminalService::new()),
-            deferred_completions: Arc::new(Mutex::new(rpc::CompletionQueue::new())),
-            auth: Mutex::new(None),
-            workspace_locks: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            files: remote_files::Roots::default(),
-            git_reads: remote_git::Reads::default(),
-            git_mutations: remote_git_mutations::Mutations::default(),
-            native_editor: Mutex::new(None),
-            native_git: Mutex::new(None),
-            #[cfg(target_os = "macos")]
-            native_evidence: Mutex::new(None),
-        })
-    }
-
-    #[cfg(test)]
-    fn new(store: HostStore, stopping: Arc<AtomicBool>) -> Self {
-        Self::with_terminals(store, stopping, TerminalService::new()).expect("test owner state")
-    }
     fn with_terminals(
         store: HostStore,
         stopping: Arc<AtomicBool>,
@@ -321,20 +283,7 @@ impl Coordinator {
             .clone()
             .ok_or(LocalError::Unavailable)
     }
-    #[cfg(test)]
-    fn dispatch(
-        &self,
-        operation: &owner_domain::Operation<'_>,
-        call: LocalCall,
-    ) -> Result<LocalResult, LocalError> {
-        self.dispatch_with_connection(
-            operation,
-            call,
-            None,
-            #[cfg(target_os = "macos")]
-            None,
-        )
-    }
+
     fn dispatch_on_connection(
         &self,
         operation: &owner_domain::Operation<'_>,
@@ -1152,7 +1101,6 @@ pub fn run_bound_identity(
         |_| Ok(()),
         |_| Ok(()),
         auth::start,
-        None,
         Some(expected_identity.host_id),
         Some(expected_identity.profile_id),
         true,
@@ -1173,7 +1121,7 @@ pub(super) fn run_with_fallible_ready(
     profile: &Path,
     ready: impl FnOnce(lomi_remote_protocol::RuntimeId) -> Result<(), HostError>,
 ) -> Result<(), HostError> {
-    run_with_managed_callbacks_using_auth(profile, ready, |_| Ok(()), auth::start, None)
+    run_with_managed_callbacks_using_auth(profile, ready, |_| Ok(()), auth::start)
 }
 
 /// Managed service readiness callback that never creates a profile, owner
@@ -1187,7 +1135,6 @@ pub(super) fn run_with_ready_existing(
         ready,
         |_| Ok(()),
         auth::start,
-        None,
         None,
         None,
         true,
@@ -1206,14 +1153,13 @@ pub(super) fn run_with_ready_existing_identity(
         ready,
         |_| Ok(()),
         auth::start,
-        None,
         Some(expected_identity.host_id),
         Some(expected_identity.profile_id),
         true,
     )
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(super) fn run_with_managed_callbacks(
     profile: &Path,
     ready: impl FnOnce(lomi_remote_protocol::RuntimeId) -> Result<(), HostError>,
@@ -1226,380 +1172,8 @@ pub(super) fn run_with_managed_callbacks(
         auth::start,
         None,
         None,
-        None,
         cfg!(windows),
     )
-}
-
-/// Test-only managed startup with explicitly pinned HTTPS roots for both
-/// enrollment/authentication and the configured public Cloud API. It shares
-/// the production startup body and changes only the Auth worker factory.
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-pub(super) fn run_with_managed_cloud_fixture(
-    profile: &Path,
-    auth_root_der: Vec<u8>,
-    remote_api_root_der: Vec<u8>,
-    ready: impl FnOnce(lomi_remote_protocol::RuntimeId) -> Result<(), HostError>,
-    finished: impl FnOnce(Result<(), HostError>) -> Result<(), HostError>,
-) -> Result<(), HostError> {
-    let roots = auth::validate_cloud_fixture_roots(auth_root_der, remote_api_root_der)
-        .map_err(|_| HostError::InvalidProfile)?;
-    run_with_managed_callbacks_using_auth(
-        profile,
-        ready,
-        finished,
-        move |endpoint, owner, stopping, coordinator| {
-            auth::start_with_cloud_fixture(endpoint, owner, stopping, coordinator, roots)
-        },
-        None,
-    )
-}
-
-/// Test-only joined fixture with explicitly pinned auth, API and relay roots,
-/// plus the exact host executable used for terminal worker processes.
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-pub(super) fn run_with_managed_joined_fixture(
-    profile: &Path,
-    auth_root_der: Vec<u8>,
-    remote_api_root_der: Vec<u8>,
-    relay_root_der: Vec<u8>,
-    worker_executable: &Path,
-    worker_sha256: &str,
-    ready: impl FnOnce(lomi_remote_protocol::RuntimeId) -> Result<(), HostError>,
-    finished: impl FnOnce(Result<(), HostError>) -> Result<(), HostError>,
-) -> Result<(), HostError> {
-    #[cfg(feature = "owned-host-fixture")]
-    {
-        // That fixture feature deliberately selects a different terminal
-        // supervisor which ignores TerminalService's executable override.
-        // Reject before profile startup so this entry point never claims that
-        // the pinned worker is the one a terminal will execute.
-        let _ = (
-            profile,
-            auth_root_der,
-            remote_api_root_der,
-            relay_root_der,
-            worker_executable,
-            worker_sha256,
-            ready,
-            finished,
-        );
-        return Err(HostError::InvalidProfile);
-    }
-    #[cfg(not(feature = "owned-host-fixture"))]
-    {
-        let roots = auth::validate_joined_cloud_fixture_roots(
-            auth_root_der,
-            remote_api_root_der,
-            relay_root_der,
-        )
-        .map_err(|_| HostError::InvalidProfile)?;
-        let verified_worker = validate_joined_worker_executable(worker_executable, worker_sha256)?;
-        let mut worker_snapshot = JoinedWorkerSnapshot::from_verified(verified_worker)?;
-        let result = run_with_managed_callbacks_using_auth(
-            profile,
-            ready,
-            finished,
-            move |endpoint, owner, stopping, coordinator| {
-                auth::start_with_joined_cloud_fixture(endpoint, owner, stopping, coordinator, roots)
-            },
-            Some(worker_snapshot.executable().to_path_buf()),
-        );
-        if result.is_ok() {
-            // The shared runner returns success only after stopping IPC workers,
-            // joining Auth, and shutting down TerminalService. Until that complete
-            // lifecycle is confirmed, the Drop guard preserves the executable.
-            worker_snapshot.authorize_cleanup_after_quiescence();
-        }
-        result
-    }
-}
-
-fn terminal_worker_executable(fixture_executable: Option<PathBuf>) -> Result<PathBuf, HostError> {
-    match fixture_executable {
-        Some(path) => Ok(path),
-        None => std::env::current_exe().map_err(|_| HostError::Unavailable),
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-const JOINED_WORKER_MAX_BYTES: u64 = 64 * 1024 * 1024;
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-struct VerifiedJoinedWorkerExecutable {
-    canonical_source: PathBuf,
-    bytes: Vec<u8>,
-    sha256: [u8; 32],
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-struct JoinedWorkerSnapshot {
-    directory: Option<tempfile::TempDir>,
-    executable: PathBuf,
-    sha256: [u8; 32],
-    cleanup_authorized: bool,
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-fn create_joined_worker_snapshot_directory(
-    temp_base: &Path,
-) -> Result<tempfile::TempDir, HostError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let canonical_base = fs::canonicalize(temp_base).map_err(|_| HostError::InvalidProfile)?;
-    if !fs::metadata(&canonical_base)
-        .map_err(|_| HostError::InvalidProfile)?
-        .is_dir()
-    {
-        return Err(HostError::InvalidProfile);
-    }
-    tempfile::Builder::new()
-        .prefix("lomi-joined-worker-")
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir_in(canonical_base)
-        .map_err(|_| HostError::InvalidProfile)
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-impl JoinedWorkerSnapshot {
-    fn from_verified(verified: VerifiedJoinedWorkerExecutable) -> Result<Self, HostError> {
-        Self::from_verified_in(verified, &std::env::temp_dir())
-    }
-
-    fn from_verified_in(
-        verified: VerifiedJoinedWorkerExecutable,
-        temp_base: &Path,
-    ) -> Result<Self, HostError> {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fn valid_private_directory(metadata: &std::fs::Metadata) -> bool {
-            metadata.is_dir()
-                && metadata.uid() == unsafe { libc::geteuid() }
-                && metadata.mode() & 0o7777 == 0o700
-        }
-
-        let directory = create_joined_worker_snapshot_directory(temp_base)?;
-        let directory_path = directory.path();
-        let directory_before =
-            fs::symlink_metadata(directory_path).map_err(|_| HostError::InvalidProfile)?;
-        if !directory_path.is_absolute()
-            || fs::canonicalize(directory_path).map_err(|_| HostError::InvalidProfile)?
-                != directory_path
-            || !valid_private_directory(&directory_before)
-        {
-            return Err(HostError::InvalidProfile);
-        }
-
-        let executable = directory_path.join("host-worker");
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&executable)
-            .map_err(|_| HostError::InvalidProfile)?;
-        file.write_all(&verified.bytes)
-            .map_err(|_| HostError::InvalidProfile)?;
-        file.sync_all().map_err(|_| HostError::InvalidProfile)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o500))
-            .map_err(|_| HostError::InvalidProfile)?;
-
-        let opened = file.metadata().map_err(|_| HostError::InvalidProfile)?;
-        let named = fs::symlink_metadata(&executable).map_err(|_| HostError::InvalidProfile)?;
-        let directory_after =
-            fs::symlink_metadata(directory_path).map_err(|_| HostError::InvalidProfile)?;
-        let same_directory = directory_before.dev() == directory_after.dev()
-            && directory_before.ino() == directory_after.ino()
-            && directory_before.uid() == directory_after.uid()
-            && directory_before.mode() == directory_after.mode();
-        if !opened.is_file()
-            || opened.uid() != unsafe { libc::geteuid() }
-            || opened.mode() & 0o7777 != 0o500
-            || opened.nlink() != 1
-            || opened.dev() != directory_before.dev()
-            || opened.len() != verified.bytes.len() as u64
-            || opened.dev() != named.dev()
-            || opened.ino() != named.ino()
-            || !valid_private_directory(&directory_after)
-            || !same_directory
-        {
-            return Err(HostError::InvalidProfile);
-        }
-
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(|_| HostError::InvalidProfile)?;
-        let mut copied = Vec::with_capacity(verified.bytes.len());
-        (&mut file)
-            .take(JOINED_WORKER_MAX_BYTES + 1)
-            .read_to_end(&mut copied)
-            .map_err(|_| HostError::InvalidProfile)?;
-        if copied != verified.bytes || <[u8; 32]>::from(Sha256::digest(&copied)) != verified.sha256
-        {
-            return Err(HostError::InvalidProfile);
-        }
-        let opened_after_read = file.metadata().map_err(|_| HostError::InvalidProfile)?;
-        let named_after_read =
-            fs::symlink_metadata(&executable).map_err(|_| HostError::InvalidProfile)?;
-        let directory_after_read =
-            fs::symlink_metadata(directory_path).map_err(|_| HostError::InvalidProfile)?;
-        let same_file = |left: &std::fs::Metadata, right: &std::fs::Metadata| {
-            left.dev() == right.dev()
-                && left.ino() == right.ino()
-                && left.uid() == right.uid()
-                && left.mode() == right.mode()
-                && left.nlink() == right.nlink()
-                && left.len() == right.len()
-                && left.mtime() == right.mtime()
-                && left.mtime_nsec() == right.mtime_nsec()
-                && left.ctime() == right.ctime()
-                && left.ctime_nsec() == right.ctime_nsec()
-        };
-        let same_directory = |left: &std::fs::Metadata, right: &std::fs::Metadata| {
-            left.dev() == right.dev()
-                && left.ino() == right.ino()
-                && left.uid() == right.uid()
-                && left.mode() == right.mode()
-        };
-        if !same_file(&opened, &opened_after_read)
-            || !same_file(&opened_after_read, &named_after_read)
-            || !same_directory(&directory_before, &directory_after_read)
-            || fs::canonicalize(&executable).map_err(|_| HostError::InvalidProfile)? != executable
-        {
-            return Err(HostError::InvalidProfile);
-        }
-
-        Ok(Self {
-            directory: Some(directory),
-            executable,
-            sha256: verified.sha256,
-            cleanup_authorized: false,
-        })
-    }
-
-    fn executable(&self) -> &Path {
-        &self.executable
-    }
-
-    fn authorize_cleanup_after_quiescence(&mut self) {
-        self.cleanup_authorized = true;
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-impl Drop for JoinedWorkerSnapshot {
-    fn drop(&mut self) {
-        if !self.cleanup_authorized
-            && let Some(directory) = self.directory.take()
-        {
-            // Unknown shutdown state retains the private snapshot rather than
-            // removing an executable a still-live terminal worker may use.
-            let _retained_path = directory.keep();
-        }
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-fn validate_joined_worker_executable(
-    path: &Path,
-    expected_sha256: &str,
-) -> Result<VerifiedJoinedWorkerExecutable, HostError> {
-    fn digest_bytes(text: &str) -> Option<[u8; 32]> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 64
-            || !bytes
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-        {
-            return None;
-        }
-        let mut digest = [0; 32];
-        for (index, pair) in bytes.chunks_exact(2).enumerate() {
-            let high = (pair[0] as char).to_digit(16)? as u8;
-            let low = (pair[1] as char).to_digit(16)? as u8;
-            digest[index] = (high << 4) | low;
-        }
-        Some(digest)
-    }
-
-    fn valid_metadata(metadata: &std::fs::Metadata) -> bool {
-        metadata.is_file()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.mode() & 0o7777 == 0o700
-            && metadata.nlink() == 1
-            && metadata.len() > 0
-            && metadata.len() <= JOINED_WORKER_MAX_BYTES
-    }
-
-    fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-        left.dev() == right.dev()
-            && left.ino() == right.ino()
-            && left.uid() == right.uid()
-            && left.mode() == right.mode()
-            && left.nlink() == right.nlink()
-            && left.len() == right.len()
-            && left.mtime() == right.mtime()
-            && left.mtime_nsec() == right.mtime_nsec()
-            && left.ctime() == right.ctime()
-            && left.ctime_nsec() == right.ctime_nsec()
-    }
-
-    let expected = digest_bytes(expected_sha256).ok_or(HostError::InvalidProfile)?;
-    if !path.is_absolute() {
-        return Err(HostError::InvalidProfile);
-    }
-    let canonical = fs::canonicalize(path).map_err(|_| HostError::InvalidProfile)?;
-    if canonical.as_os_str() != path.as_os_str() {
-        return Err(HostError::InvalidProfile);
-    }
-    let named_before = fs::symlink_metadata(path).map_err(|_| HostError::InvalidProfile)?;
-    if !valid_metadata(&named_before) {
-        return Err(HostError::InvalidProfile);
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| HostError::InvalidProfile)?;
-    let opened_before = file.metadata().map_err(|_| HostError::InvalidProfile)?;
-    if !valid_metadata(&opened_before) || !same_file(&named_before, &opened_before) {
-        return Err(HostError::InvalidProfile);
-    }
-    let mut digest = Sha256::new();
-    let mut total = 0u64;
-    let mut contents = Vec::with_capacity(opened_before.len() as usize);
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| HostError::InvalidProfile)?;
-        if count == 0 {
-            break;
-        }
-        total = total
-            .checked_add(count as u64)
-            .filter(|length| *length <= JOINED_WORKER_MAX_BYTES)
-            .ok_or(HostError::InvalidProfile)?;
-        digest.update(&buffer[..count]);
-        contents.extend_from_slice(&buffer[..count]);
-    }
-    let opened_after = file.metadata().map_err(|_| HostError::InvalidProfile)?;
-    let named_after = fs::symlink_metadata(path).map_err(|_| HostError::InvalidProfile)?;
-    let actual_sha256 = <[u8; 32]>::from(digest.finalize());
-    if !valid_metadata(&opened_after)
-        || !same_file(&opened_before, &opened_after)
-        || !same_file(&opened_after, &named_after)
-        || total != opened_after.len()
-        || actual_sha256 != expected
-        || fs::canonicalize(path).map_err(|_| HostError::InvalidProfile)? != canonical
-    {
-        return Err(HostError::InvalidProfile);
-    }
-    Ok(VerifiedJoinedWorkerExecutable {
-        canonical_source: canonical,
-        bytes: contents,
-        sha256: actual_sha256,
-    })
 }
 
 fn require_host_account() -> Result<(), HostError> {
@@ -1988,16 +1562,8 @@ fn run_with_managed_callbacks_using_auth(
         Arc<AtomicBool>,
         std::sync::Weak<Coordinator>,
     ) -> (auth::Handle, thread::JoinHandle<()>),
-    worker_executable: Option<PathBuf>,
 ) -> Result<(), HostError> {
-    run_with_managed_callbacks_using_auth_bound(
-        profile,
-        ready,
-        finished,
-        start_auth,
-        worker_executable,
-        None,
-    )
+    run_with_managed_callbacks_using_auth_bound(profile, ready, finished, start_auth, None)
 }
 
 fn run_with_managed_callbacks_bound(
@@ -2011,7 +1577,6 @@ fn run_with_managed_callbacks_bound(
         ready,
         finished,
         auth::start,
-        None,
         expected_host_id,
         None,
         true,
@@ -2028,7 +1593,6 @@ fn run_with_managed_callbacks_using_auth_bound(
         Arc<AtomicBool>,
         std::sync::Weak<Coordinator>,
     ) -> (auth::Handle, thread::JoinHandle<()>),
-    worker_executable: Option<PathBuf>,
     expected_host_id: Option<HostId>,
 ) -> Result<(), HostError> {
     run_with_managed_callbacks_using_auth_bound_mode(
@@ -2036,7 +1600,6 @@ fn run_with_managed_callbacks_using_auth_bound(
         ready,
         finished,
         start_auth,
-        worker_executable,
         expected_host_id,
         None,
         false,
@@ -2053,7 +1616,6 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
         Arc<AtomicBool>,
         std::sync::Weak<Coordinator>,
     ) -> (auth::Handle, thread::JoinHandle<()>),
-    worker_executable: Option<PathBuf>,
     expected_host_id: Option<HostId>,
     expected_profile_id: Option<IpcProfileId>,
     existing_profile: bool,
@@ -2161,7 +1723,7 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
                 .map_err(|_| HostError::Unavailable)?,
         );
     }
-    let executable = terminal_worker_executable(worker_executable)?;
+    let executable = std::env::current_exe().map_err(|_| HostError::Unavailable)?;
     let mut coordinator = Coordinator::with_terminals(
         store,
         stopping.clone(),
@@ -2771,302 +2333,4 @@ fn stop_with_expected_host_id(
         thread::sleep(Duration::from_millis(20));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod managed_ready_tests {
-    use super::*;
-    use crate::testsupport::BuilderExt as _;
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    fn fixture_root_der() -> Vec<u8> {
-        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-
-        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        params
-            .self_signed(&KeyPair::generate().unwrap())
-            .unwrap()
-            .der()
-            .to_vec()
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    fn fixture_worker(directory: &Path) -> (PathBuf, String) {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let path = directory.join("host-worker");
-        let bytes = b"owned joined fixture worker bytes";
-        std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        (path.canonicalize().unwrap(), digest)
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    #[test]
-    fn joined_worker_override_requires_stable_owned_private_binary_and_matching_hash() {
-        use std::os::unix::fs::{PermissionsExt as _, symlink};
-
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let (worker, digest) = fixture_worker(directory.path());
-        let verified = validate_joined_worker_executable(&worker, &digest).unwrap();
-        assert_eq!(verified.canonical_source, worker);
-        let mut snapshot = JoinedWorkerSnapshot::from_verified(verified).unwrap();
-        let expected_sha256: [u8; 32] = Sha256::digest(b"owned joined fixture worker bytes").into();
-        assert_eq!(snapshot.sha256, expected_sha256);
-        assert_eq!(
-            terminal_worker_executable(Some(snapshot.executable().to_path_buf())).unwrap(),
-            snapshot.executable()
-        );
-        assert!(validate_joined_worker_executable(&worker, &"0".repeat(64)).is_err());
-        assert!(validate_joined_worker_executable(&worker, &digest.to_uppercase()).is_err());
-        assert_eq!(
-            terminal_worker_executable(None).unwrap(),
-            std::env::current_exe().unwrap()
-        );
-
-        let noncanonical = PathBuf::from(format!("{}/./host-worker", directory.path().display()));
-        assert!(validate_joined_worker_executable(&noncanonical, &digest).is_err());
-        let alias = directory.path().join("worker-alias");
-        symlink(&worker, &alias).unwrap();
-        assert!(validate_joined_worker_executable(&alias, &digest).is_err());
-
-        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(validate_joined_worker_executable(&worker, &digest).is_err());
-        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let hardlink = directory.path().join("worker-hardlink");
-        std::fs::hard_link(&worker, &hardlink).unwrap();
-        assert!(validate_joined_worker_executable(&worker, &digest).is_err());
-        snapshot.authorize_cleanup_after_quiescence();
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    #[test]
-    fn joined_fixture_rejects_invalid_inputs_before_profile_startup() {
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().join("profile");
-        let worker = directory.path().join("missing-worker");
-        let result = run_with_managed_joined_fixture(
-            &profile,
-            fixture_root_der(),
-            fixture_root_der(),
-            vec![0x30, 0x01, 0x00],
-            &worker,
-            &"0".repeat(64),
-            |_| panic!("invalid relay root must fail before readiness"),
-            |_| panic!("invalid relay root must not enter managed startup"),
-        );
-        assert_eq!(result, Err(HostError::InvalidProfile));
-        assert!(!profile.exists());
-
-        let result = run_with_managed_joined_fixture(
-            &profile,
-            fixture_root_der(),
-            fixture_root_der(),
-            fixture_root_der(),
-            &worker,
-            &"0".repeat(64),
-            |_| panic!("unavailable pinned worker must fail before readiness"),
-            |_| panic!("unavailable pinned worker must not enter managed startup"),
-        );
-        assert_eq!(result, Err(HostError::InvalidProfile));
-        assert!(!profile.exists());
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    #[test]
-    fn joined_worker_snapshot_survives_source_replacement_after_validation() {
-        use std::os::unix::fs::{PermissionsExt as _, symlink};
-
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let (worker, digest) = fixture_worker(directory.path());
-        let verified = validate_joined_worker_executable(&worker, &digest).unwrap();
-        let original_bytes = verified.bytes.clone();
-        let original_digest = verified.sha256;
-        let temp_base_alias = directory.path().join("temp-base-alias");
-        symlink(directory.path(), &temp_base_alias).unwrap();
-
-        let replacement = directory.path().join("replacement-worker");
-        std::fs::write(&replacement, b"replaced worker bytes").unwrap();
-        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::rename(&replacement, &worker).unwrap();
-
-        let mut snapshot =
-            JoinedWorkerSnapshot::from_verified_in(verified, &temp_base_alias).unwrap();
-        assert_ne!(snapshot.executable(), worker);
-        assert_eq!(
-            std::fs::canonicalize(snapshot.executable()).unwrap(),
-            snapshot.executable()
-        );
-        assert_eq!(
-            std::fs::read(snapshot.executable()).unwrap(),
-            original_bytes
-        );
-        assert_eq!(
-            <[u8; 32]>::from(Sha256::digest(
-                std::fs::read(snapshot.executable()).unwrap()
-            )),
-            original_digest
-        );
-        let snapshot_metadata = std::fs::symlink_metadata(snapshot.executable()).unwrap();
-        assert_eq!(snapshot_metadata.mode() & 0o7777, 0o500);
-        let snapshot_directory = snapshot.executable().parent().unwrap();
-        assert_eq!(
-            std::fs::symlink_metadata(snapshot_directory)
-                .unwrap()
-                .mode()
-                & 0o7777,
-            0o700
-        );
-        assert_eq!(
-            terminal_worker_executable(Some(snapshot.executable().to_path_buf())).unwrap(),
-            snapshot.executable()
-        );
-        let snapshot_directory = snapshot_directory.to_path_buf();
-        snapshot.authorize_cleanup_after_quiescence();
-        drop(snapshot);
-        assert!(!snapshot_directory.exists());
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture", feature = "owned-host-fixture"))]
-    #[test]
-    fn joined_fixture_rejects_owned_host_worker_bypass_before_profile_startup() {
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().join("profile");
-        let worker = directory.path().join("missing-worker");
-        let result = run_with_managed_joined_fixture(
-            &profile,
-            fixture_root_der(),
-            fixture_root_der(),
-            fixture_root_der(),
-            &worker,
-            &"0".repeat(64),
-            |_| panic!("unsupported supervisor must reject before readiness"),
-            |_| panic!("unsupported supervisor must reject before startup"),
-        );
-        assert_eq!(result, Err(HostError::InvalidProfile));
-        assert!(!profile.exists());
-    }
-
-    #[test]
-    fn setup_start_mode_dispatch_reads_defaults_and_saves_explicitly() {
-        let store = HostStore::open(Path::new(":memory:"), Limits::default()).unwrap();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let coordinator = Coordinator::new(store, stopping);
-        let cancelled = AtomicBool::new(false);
-        let operation =
-            owner_domain::Operation::new(Instant::now() + Duration::from_secs(2), &cancelled);
-        let read = || coordinator.dispatch(&operation, LocalCall::SetupStartModeRead {});
-        assert_eq!(
-            read().unwrap(),
-            LocalResult::SetupStartMode(LocalStartModePreference {
-                start_mode: LocalStartMode::Manual,
-            })
-        );
-        let saved = LocalStartModePreference {
-            start_mode: LocalStartMode::Login,
-        };
-        assert_eq!(
-            coordinator
-                .dispatch(&operation, LocalCall::SetupStartModeSave(saved.clone()),)
-                .unwrap(),
-            LocalResult::SetupStartMode(saved.clone())
-        );
-        assert_eq!(read().unwrap(), LocalResult::SetupStartMode(saved));
-    }
-
-    #[test]
-    fn managed_completion_holds_owner_and_preserves_original_failure() {
-        crate::testsupport::initialize_child_ownership();
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().canonicalize().unwrap().join("profile");
-        crate::testsupport::create_private_dir(&profile).unwrap();
-        let mut finished = false;
-        let result = run_with_managed_callbacks(
-            &profile,
-            |_| Err(HostError::Unavailable),
-            |result| {
-                finished = true;
-                assert_eq!(result, Err(HostError::Unavailable));
-                assert!(matches!(
-                    OwnerLock::acquire(&profile),
-                    Err(platform::Error::Busy)
-                ));
-                Err(HostError::Cleanup)
-            },
-        );
-        assert!(finished, "completion not reached: {result:?}");
-        assert_eq!(result, Err(HostError::Unavailable));
-        let _lock = OwnerLock::acquire(&profile).unwrap();
-    }
-    #[test]
-    fn failed_managed_ready_holds_owner_then_cleans_and_releases() {
-        crate::testsupport::initialize_child_ownership();
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().canonicalize().unwrap().join("profile");
-        crate::testsupport::create_private_dir(&profile).unwrap();
-        let mut called = false;
-        let result = run_with_fallible_ready(&profile, |_| {
-            called = true;
-            assert!(matches!(
-                OwnerLock::acquire(&profile),
-                Err(platform::Error::Busy)
-            ));
-            Err(HostError::Unavailable)
-        });
-        assert!(called, "readiness not reached: {result:?}");
-        assert_eq!(result, Err(HostError::Unavailable));
-        let _lock = OwnerLock::acquire(&profile).unwrap();
-        assert!(LocalClient::connect_with_timeout(&profile, Duration::from_millis(20)).is_err());
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    #[test]
-    fn managed_cloud_fixture_uses_shared_startup_and_releases_resources_after_ready_failure() {
-        crate::testsupport::initialize_child_ownership();
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().canonicalize().unwrap().join("profile");
-        crate::testsupport::create_private_dir(&profile).unwrap();
-        let mut finished = false;
-        let result = run_with_managed_cloud_fixture(
-            &profile,
-            fixture_root_der(),
-            fixture_root_der(),
-            |_| Err(HostError::Unavailable),
-            |result| {
-                finished = true;
-                assert_eq!(result, Err(HostError::Unavailable));
-                assert!(matches!(
-                    OwnerLock::acquire(&profile),
-                    Err(platform::Error::Busy)
-                ));
-                Ok(())
-            },
-        );
-        assert!(
-            finished,
-            "managed fixture cleanup callback was skipped: {result:?}"
-        );
-        assert_eq!(result, Err(HostError::Unavailable));
-        let _lock = OwnerLock::acquire(&profile).unwrap();
-        assert!(LocalClient::connect_with_timeout(&profile, Duration::from_millis(20)).is_err());
-    }
-
-    #[cfg(all(unix, feature = "cloud-fixture"))]
-    #[test]
-    fn managed_cloud_fixture_rejects_bad_roots_before_profile_startup() {
-        let directory = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = directory.path().join("profile");
-        let result = run_with_managed_cloud_fixture(
-            &profile,
-            vec![0x30, 0x01, 0x00],
-            fixture_root_der(),
-            |_| panic!("invalid fixture root must be rejected before readiness"),
-            |_| panic!("invalid fixture root must not enter managed startup"),
-        );
-        assert_eq!(result, Err(HostError::InvalidProfile));
-        assert!(!profile.exists());
-    }
 }

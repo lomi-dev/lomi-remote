@@ -39,7 +39,3 @@ close waits for an in-flight resize to release its access. A global 32-slot
 admission bound stays charged through uncertain cleanup, including failures
 before a complete `Pty` exists; retained handles and workers cannot accumulate
 without bound.
-
-Native evidence and the synthetic fault harness are documented in
-`tests/product-pty-windows/README.md`. The `proof-hooks` feature is for that
-harness only and is excluded from production dependency features.

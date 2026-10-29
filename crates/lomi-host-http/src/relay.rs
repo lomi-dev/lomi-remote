@@ -51,14 +51,7 @@ impl RelayTransport {
             tls: Arc::new(tls),
         })
     }
-    #[cfg(any(test, feature = "test-fixtures"))]
-    pub fn with_test_root(endpoint: LocalRelayEndpoint, root: Vec<u8>) -> Result<Self> {
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(rustls::pki_types::CertificateDer::from(root))
-            .map_err(|_| Error::InvalidConfig)?;
-        Self::with_roots(endpoint, roots)
-    }
+
     /// The timestamp is captured BEFORE requesting the one-use ticket, never
     /// when this method starts. DNS/TCP/TLS/upgrade/admission/ready all share
     /// min(original deadline, ticket request start + expires_in_ms). A failed
@@ -120,8 +113,6 @@ impl RelayTransport {
                     tcp,
                     state: Some(state.clone()),
                     polling: false,
-                    #[cfg(test)]
-                    write_fault: None,
                 },
             );
             // client_with_config uses this exact verified TLS stream, never its
@@ -216,15 +207,7 @@ impl RelayConnection {
     pub fn close(&mut self) {
         self.socket.take();
     }
-    #[cfg(test)]
-    pub(crate) fn fail_write_after_prefix(
-        &mut self,
-        limit: usize,
-        written: Arc<std::sync::atomic::AtomicUsize>,
-    ) {
-        self.socket.as_mut().unwrap().get_mut().sock.write_fault =
-            Some(WriteFault { limit, written });
-    }
+
     pub fn send_binary(
         &mut self,
         ciphertext: &[u8],
@@ -348,29 +331,10 @@ struct RelaySocket {
     tcp: TcpStream,
     state: Option<Arc<budget::State>>,
     polling: bool,
-    #[cfg(test)]
-    write_fault: Option<WriteFault>,
 }
-#[cfg(test)]
-struct WriteFault {
-    limit: usize,
-    written: Arc<std::sync::atomic::AtomicUsize>,
-}
+
 impl RelaySocket {
     fn write_tcp(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        #[cfg(test)]
-        if let Some(fault) = &self.write_fault {
-            use std::sync::atomic::Ordering;
-            let written = fault.written.load(Ordering::SeqCst);
-            if written >= fault.limit {
-                return Err(io::ErrorKind::BrokenPipe.into());
-            }
-            let amount = self
-                .tcp
-                .write(&bytes[..bytes.len().min(fault.limit - written)])?;
-            fault.written.fetch_add(amount, Ordering::SeqCst);
-            return Ok(amount);
-        }
         self.tcp.write(bytes)
     }
     fn current(&self) -> io::Result<&budget::State> {

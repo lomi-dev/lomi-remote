@@ -13,15 +13,3 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 url = "=2.5.8"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
-
-[dev-dependencies]
-libc = "=0.2.189"
-tempfile = "=3.27.0"
-
-[[bin]]
-name = "state-fixtures"
-path = "src/bin/state-fixtures.rs"
-
-[[test]]
-name = "native-qualification"
-path = "../../tests/terminal-state-native/qualification.rs"

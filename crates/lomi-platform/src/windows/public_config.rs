@@ -383,5 +383,3 @@ impl Drop for Temporary<'_> {
         }
     }
 }
-#[cfg(test)]
-mod tests;

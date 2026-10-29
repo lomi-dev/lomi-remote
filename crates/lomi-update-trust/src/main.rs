@@ -53,31 +53,15 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
             println!("{}", store.generation()?);
         }
         #[cfg(not(feature = "release-root"))]
-        Some("update") if (5..=7).contains(&args.len()) => {
+        Some("update") if (5..=6).contains(&args.len()) => {
             let mut store = TrustStore::open(Path::new(&args[2]))?;
             let target = args
                 .get(5)
                 .filter(|s| s.as_str() != "-")
                 .map(String::as_str);
-            #[cfg(feature = "fault-injection")]
-            let result = if let Some(fault) = args.get(6) {
-                store
-                    .update_fault(Path::new(&args[3]), Path::new(&args[4]), target, fault)
-                    .await?
-            } else {
-                store
-                    .update(Path::new(&args[3]), Path::new(&args[4]), target)
-                    .await?
-            };
-            #[cfg(not(feature = "fault-injection"))]
-            let result = {
-                if args.len() > 6 {
-                    return Err("fault injection not compiled".into());
-                }
-                store
-                    .update(Path::new(&args[3]), Path::new(&args[4]), target)
-                    .await?
-            };
+            let result = store
+                .update(Path::new(&args[3]), Path::new(&args[4]), target)
+                .await?;
             println!(
                 "{}",
                 serde_json::json!({"generation": store.generation()?, "verifiedTargetBytes": result.map(|v| v.len())})
@@ -102,15 +86,6 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
                     "activeObject": object
                 })
             );
-        }
-        #[cfg(feature = "fault-injection")]
-        Some("hold-lock") if args.len() == 3 => {
-            use std::io::{BufRead, Write};
-            let _store = TrustStore::open(Path::new(&args[2]))?;
-            println!("locked");
-            std::io::stdout().flush()?;
-            let mut line = String::new();
-            std::io::stdin().lock().read_line(&mut line)?;
         }
         #[cfg(feature = "release-root")]
         Some("initialize-release") if args.len() == 3 => {

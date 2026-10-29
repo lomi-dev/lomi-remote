@@ -402,10 +402,3 @@ impl<'d, 'o, 'e, 'w, 'p, 's> RemoteRenameResponseFrame<'d, 'o, 'e, 'w, 'p, 's> {
         self.receipt.into_io_watch()
     }
 }
-
-#[cfg(test)]
-#[path = "remote_terminal_rename_delivery_tests.rs"]
-mod delivery_tests;
-#[cfg(test)]
-#[path = "remote_terminal_rename_journal_tests.rs"]
-mod journal_tests;

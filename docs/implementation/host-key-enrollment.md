@@ -30,8 +30,6 @@ independently retained init commitment, never a request's self-derived pin.
 JSON uses camelCase, rejects unknown/duplicate fields and u32 overflow, and has
 the existing 128 KiB input limit through `from_json`. Cryptographic entry points
 revalidate descriptor semantics. Public descriptor/proof types contain no seeds.
-The frozen synthetic vector is `tests/fixtures/host-key-commitment-v1.json` inside
-the crypto crate.
 
 ## Lifecycle and authority binding
 
@@ -78,30 +76,18 @@ and account approval checks are required before effects.
 Two accounts derive different ordinary fingerprints from the same committed key
 material. Changing even an encryption key while retaining the same signing key
 also changes the commitment and derived fingerprint; a fresh self-signature cannot
-replace the authority's stored init binding. Compile-fail API tests show that the
-pending wrapper cannot expose its private ordinary identity and that returned
-bound identities cannot be finalized again. Pending keys cannot be passed as an
-ordinary `Identity` to grant or Noise APIs.
+replace the authority's stored init binding. The pending wrapper keeps its
+ordinary identity private, and pending keys cannot be passed as an ordinary
+`Identity` to grant or Noise APIs.
 
-## Native persistence and evidence
+## Native persistence
 
 Native `export_secret_seed_blob` / `import_secret_seed_blob` reuse the existing
 version-1 fixed 97-byte format and `Zeroizing<Vec<u8>>`: one version byte and the
 three 32-byte seeds. Import validates exact length/version, verifies the retained
 public init proof/pin, invokes the original private key derivation with forced
 Host/zero-account context, and rejects any resulting descriptor mismatch. There
-is no public arbitrary-seed constructor or general rebind API. Browser builds do
-not expose native seed persistence. The test-fixtures-only pending fixture uses
-the same public synthetic keys and subject as the historical host fixture.
-
-Tests cover exact native seed roundtrip before/after finalization, equality with
-the historical account-bound fixture, every descriptor and account mutation,
-pinned/self-signature validation, account and same-signing-key encryption-key
-replacement attacks, wrong role, weak/zero keys, malformed JSON/import blobs,
-disposal, invalid finalization and final enrollment PoP without a request bundle.
-Fixed CBOR/commitment/signature/account-bound fingerprint vectors and compile-fail
-privacy/one-time API tests accompany the proof. The WASM browser-feature build is
-compile-checked; pending host runtime/keychain behavior is a native concern.
+is no public arbitrary-seed constructor or general rebind API. Browser builds do not expose native seed persistence.
 
 Consuming finalization enforces one-time use of that in-memory wrapper only. The
 unchanged seed format carries no account/lifecycle marker: a retained seed copy
@@ -117,7 +103,3 @@ makes no claim about a durable OS credential receipt. Existing bounded enrollmen
 store/CAS proofs and a future keychain adapter must own those effects. The wrapper
 does not itself deliver host authorization, implement TLS or alter auth/store
 schemas. Remote production qualification remains false.
-
-Reproduce with the crypto crate's complete native browser/test-fixtures test
-suite, Clippy with warnings denied, WASM browser/test-fixtures compile check and
-`tools/check_crypto_source.py --source-repo ../lomi`.

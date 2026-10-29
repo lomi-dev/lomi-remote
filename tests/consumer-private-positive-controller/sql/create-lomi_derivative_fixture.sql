@@ -1,1 +1,0 @@
-CREATE DATABASE lomi_derivative_fixture TEMPLATE template0;

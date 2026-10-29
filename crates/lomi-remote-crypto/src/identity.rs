@@ -141,21 +141,7 @@ impl Identity {
     pub fn public_bundle(&self) -> SignedBundle {
         self.signed.clone()
     }
-    #[cfg(feature = "test-fixtures")]
-    pub fn fixture(role: Role, seed: u8) -> Result<Self> {
-        Self::from_seeds(
-            [1; 16],
-            match role {
-                Role::Host => [2; 16],
-                Role::Device => [3; 16],
-            },
-            role,
-            1,
-            Zeroizing::new([seed; 32]),
-            Zeroizing::new([seed.wrapping_add(1); 32]),
-            Zeroizing::new([seed.wrapping_add(2); 32]),
-        )
-    }
+
 }
 
 impl Identity {

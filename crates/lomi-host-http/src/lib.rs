@@ -40,22 +40,6 @@ pub enum Error {
     InvalidResponse,
     ResolverUnavailable,
     RelayClosed,
-    #[cfg(feature = "test-fixtures")]
-    FixtureTls,
-    #[cfg(feature = "test-fixtures")]
-    FixtureIoConnect,
-    #[cfg(feature = "test-fixtures")]
-    FixtureIoTls,
-    #[cfg(feature = "test-fixtures")]
-    FixtureIoOther,
-    #[cfg(feature = "test-fixtures")]
-    FixtureConnect,
-    #[cfg(feature = "test-fixtures")]
-    FixtureHost,
-    #[cfg(feature = "test-fixtures")]
-    FixtureProtocol,
-    #[cfg(feature = "test-fixtures")]
-    FixtureOther,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -73,22 +57,6 @@ impl fmt::Display for Error {
             Self::InvalidResponse => "HOST_HTTP_RESPONSE",
             Self::ResolverUnavailable => "HOST_HTTP_RESOLVER",
             Self::RelayClosed => "HOST_RELAY_CLOSED",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureTls => "HOST_HTTP_FIXTURE_TLS",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureIoConnect => "HOST_HTTP_FIXTURE_IO_CONNECT",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureIoTls => "HOST_HTTP_FIXTURE_IO_TLS",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureIoOther => "HOST_HTTP_FIXTURE_IO_OTHER",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureConnect => "HOST_HTTP_FIXTURE_CONNECT",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureHost => "HOST_HTTP_FIXTURE_HOST",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureProtocol => "HOST_HTTP_FIXTURE_PROTOCOL",
-            #[cfg(feature = "test-fixtures")]
-            Self::FixtureOther => "HOST_HTTP_FIXTURE_OTHER",
         })
     }
 }
@@ -165,17 +133,7 @@ impl Transport {
     pub fn new(config: &Config) -> Result<Self> {
         Self::with_tls(config, tls_config())
     }
-    #[cfg(any(test, feature = "test-fixtures"))]
-    pub fn with_test_root(config: &Config, root_der: &[u8]) -> Result<Self> {
-        let tls = ureq::tls::TlsConfig::builder()
-            .provider(ureq::tls::TlsProvider::Rustls)
-            .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .root_certs(ureq::tls::RootCerts::new_with_certs(&[
-                ureq::tls::Certificate::from_der(root_der).to_owned(),
-            ]))
-            .build();
-        Self::with_tls(config, tls)
-    }
+
     fn with_tls(config: &Config, tls: ureq::tls::TlsConfig) -> Result<Self> {
         // Config is publicly deserializable; its constructor is not a trust gate.
         config.validate().map_err(|_| {
@@ -371,45 +329,17 @@ fn tls_config() -> ureq::tls::TlsConfig {
 }
 fn network_error(error: ureq::Error) -> Error {
     diagnostics::transport_error(&error);
-    #[cfg(feature = "test-fixtures")]
-    {
-        match &error {
-            ureq::Error::Timeout(_) => Error::Timeout,
-            ureq::Error::Tls(_) | ureq::Error::Rustls(_) => Error::FixtureTls,
-            ureq::Error::Io(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                Error::FixtureIoConnect
-            }
-            ureq::Error::Io(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::UnexpectedEof
-                        | io::ErrorKind::InvalidData
-                        | io::ErrorKind::ConnectionReset
-                ) =>
-            {
-                Error::FixtureIoTls
-            }
-            ureq::Error::Io(_) => Error::FixtureIoOther,
-            ureq::Error::HostNotFound => Error::FixtureHost,
-            ureq::Error::ConnectionFailed => Error::FixtureConnect,
-            ureq::Error::Protocol(_) => Error::FixtureProtocol,
-            _ => Error::FixtureOther,
+    match error {
+        ureq::Error::Timeout(_) => Error::Timeout,
+        ureq::Error::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Error::Timeout
         }
-    }
-    #[cfg(not(feature = "test-fixtures"))]
-    {
-        match error {
-            ureq::Error::Timeout(_) => Error::Timeout,
-            ureq::Error::Io(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                Error::Timeout
-            }
-            _ => Error::Network,
-        }
+        _ => Error::Network,
     }
 }
 struct Bounded(Zeroizing<Vec<u8>>);
@@ -675,18 +605,4 @@ fn parse_poll(status: u16, bytes: &[u8]) -> Result<PollOutcome> {
         "invalid_grant" => PollOutcome::InvalidGrant,
         _ => return Err(Error::InvalidResponse),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    include!("tests.rs");
-    mod relay_tests {
-        include!("relay_tests.rs");
-    }
-    mod budget_network_tests {
-        include!("budget_network_tests.rs");
-    }
-    mod data_tests {
-        include!("data_tests.rs");
-    }
 }

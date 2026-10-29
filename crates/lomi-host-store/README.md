@@ -124,7 +124,7 @@ workspace outbox. This also permits cleanup after an authorization-generation
 change. Replacement requires a fresh claim for the current runtime ID.
 No lease/freshness duration is persisted or grants authority; cloud freshness,
 networking, response verification and publisher wiring remain caller work.
-These APIs and their source tests do not establish runtime qualification.
+These APIs do not establish runtime qualification.
 
 Schema `user_version=1` is installed transactionally. An existing empty version-0
 SQLite database receives a verified backup before initialization. Unrecognized
@@ -138,9 +138,3 @@ On Windows the same parent must have the private profile ACL established by
 the native platform owner, which backup files inherit. Existing backup paths
 are never overwritten. Network filesystems, disk/OS failures and
 malicious database modification are outside this crate's durability guarantees.
-
-Run `cargo test -p lomi-host-store` and
-`cargo clippy -p lomi-host-store --all-targets -- -D warnings`. Tests use real
-SQLite files, transaction rollback, owner contention, backups, stale CAS,
-deduplication, capacity, delayed publication and a subprocess that exits without
-running destructors to exercise crash recovery.

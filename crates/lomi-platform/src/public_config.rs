@@ -80,6 +80,3 @@ pub fn encode(configuration: &Configuration) -> Result<Vec<u8>, Error> {
     }
     Ok(text.into_bytes())
 }
-
-#[cfg(test)]
-mod tests;

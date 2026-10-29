@@ -2313,15 +2313,7 @@ impl TrustStore {
         let metadata_url = transport.metadata.clone();
         let targets_url = transport.targets.clone();
         let verified = self
-            .update_inner(
-                metadata_url,
-                targets_url,
-                transport,
-                target,
-                None,
-                None,
-                None,
-            )
+            .update_inner(metadata_url, targets_url, transport, target, None, None)
             .await?;
         Ok(verified.into_iter().next().map(|target| target.bytes))
     }
@@ -2340,7 +2332,7 @@ impl TrustStore {
         target_name: &str,
         install_dir: &Path,
     ) -> Result<PathBuf> {
-        self.update_and_activate_inner(metadata, targets, target_name, install_dir, false)
+        self.update_and_activate_inner(metadata, targets, target_name, install_dir)
             .await
     }
 
@@ -2483,7 +2475,6 @@ impl TrustStore {
                 Some(target_name),
                 None,
                 Some((platform, profile_schema)),
-                None,
                 expected_version,
             )
             .await?
@@ -2850,7 +2841,6 @@ impl TrustStore {
                     Some(target_name),
                     None,
                     Some((platform, profile_schema)),
-                    None,
                     expected_version,
                 )
                 .await?
@@ -3119,7 +3109,6 @@ impl TrustStore {
                 Some(primary_target),
                 Some(companion_target),
                 Some((platform, profile_schema)),
-                None,
                 expected_version,
             )
             .await?;
@@ -3180,7 +3169,6 @@ impl TrustStore {
                 Some(target_name),
                 None,
                 Some((platform, 0)),
-                None,
             )
             .await?;
         if verified.len() != 1 {
@@ -3514,7 +3502,6 @@ impl TrustStore {
                 Some(primary_target),
                 Some(helper_target),
                 Some((platform, profile_schema)),
-                None,
                 expected_version,
             )
             .await?;
@@ -4119,22 +4106,6 @@ impl TrustStore {
         Ok(removed_objects)
     }
 
-    #[cfg(all(unix, feature = "fault-injection"))]
-    pub async fn update_and_activate_fault(
-        &mut self,
-        metadata: &Path,
-        targets: &Path,
-        target_name: &str,
-        install_dir: &Path,
-        fault: &str,
-    ) -> Result<PathBuf> {
-        if fault != "before-pointer-swap" {
-            return Err(invalid("unknown activation fault point"));
-        }
-        self.update_and_activate_inner(metadata, targets, target_name, install_dir, true)
-            .await
-    }
-
     /// Restore the previous verified executable and retain the current target
     /// as the next rollback point.
     #[cfg(unix)]
@@ -4316,7 +4287,6 @@ impl TrustStore {
         targets: &Path,
         target_name: &str,
         install_dir: &Path,
-        inject_failure: bool,
     ) -> Result<PathBuf> {
         activation::validate_directory(install_dir)?;
         let transport = BoundedLocal::new(metadata, targets)?;
@@ -4328,44 +4298,13 @@ impl TrustStore {
                 Some(target_name),
                 None,
                 None,
-                None,
             )
             .await?
             .into_iter()
             .next()
             .ok_or_else(|| invalid("verified target missing"))?
             .bytes;
-        #[cfg(all(unix, feature = "fault-injection"))]
-        if inject_failure {
-            return Err(invalid("injected failure before active pointer swap"));
-        }
-        #[cfg(not(all(unix, feature = "fault-injection")))]
-        let _ = inject_failure;
         activation::activate_verified_bytes(install_dir, &bytes)
-    }
-    #[cfg(feature = "fault-injection")]
-    pub async fn update_fault(
-        &mut self,
-        metadata: &Path,
-        targets: &Path,
-        target: Option<&str>,
-        fault: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        if !["before-commit", "after-commit"].contains(&fault) {
-            return Err(invalid("unknown fault point"));
-        }
-        let transport = BoundedLocal::new(metadata, targets)?;
-        self.update_inner(
-            transport.metadata.clone(),
-            transport.targets.clone(),
-            transport,
-            target,
-            None,
-            None,
-            Some(fault),
-        )
-        .await
-        .map(|verified| verified.into_iter().next().map(|target| target.bytes))
     }
     async fn update_inner<T: Transport + 'static>(
         &mut self,
@@ -4375,7 +4314,6 @@ impl TrustStore {
         target: Option<&str>,
         companion_target: Option<&str>,
         release_policy: Option<(&str, u64)>,
-        fault: Option<&str>,
     ) -> Result<Vec<VerifiedTarget>> {
         self.update_inner_pinned(
             metadata,
@@ -4384,7 +4322,6 @@ impl TrustStore {
             target,
             companion_target,
             release_policy,
-            fault,
             None,
         )
         .await
@@ -4398,7 +4335,6 @@ impl TrustStore {
         target: Option<&str>,
         companion_target: Option<&str>,
         release_policy: Option<(&str, u64)>,
-        fault: Option<&str>,
         expected_version: Option<&str>,
     ) -> Result<Vec<VerifiedTarget>> {
         if expected_version.is_some_and(|version| version.is_empty() || version.len() > 128) {
@@ -4510,22 +4446,12 @@ impl TrustStore {
         if changed != 1 {
             return Err(invalid("concurrent trust state changed"));
         }
-        fault_point(fault, "before-commit");
         tx.commit()?;
-        fault_point(fault, "after-commit");
         sync_dir(&self.directory)?;
         Ok(verified)
     }
 }
 
-fn fault_point(fault: Option<&str>, point: &str) {
-    #[cfg(feature = "fault-injection")]
-    if fault == Some(point) {
-        unsafe { libc::_exit(if point == "before-commit" { 91 } else { 92 }) }
-    }
-    #[cfg(not(feature = "fault-injection"))]
-    let _ = (fault, point);
-}
 #[derive(Debug, Clone)]
 struct BoundedLocal {
     metadata: Url,

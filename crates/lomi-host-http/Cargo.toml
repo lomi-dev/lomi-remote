@@ -5,15 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-# Synthetic roots are opt-in fixture support, never a production default.
-test-fixtures = []
-
-[[example]]
-name = "runtime_fixture"
-path = "examples/runtime_fixture.rs"
-required-features = ["test-fixtures"]
-
 [dependencies]
 lomi-host-auth = { path = "../lomi-host-auth" }
 lomi-remote-protocol = { path = "../lomi-remote-protocol" }
@@ -29,6 +20,3 @@ webpki-roots = "=1.0.9"
 # Same product policy as lomi-terminal-state; frames/upgrade requests must never
 # reach a logger, including standalone host-http builds and debug profiles.
 log = { version = "=0.4.34", features = ["max_level_off", "release_max_level_off"] }
-
-[dev-dependencies]
-rcgen = { version = "=0.14.7", default-features = false, features = ["ring"] }

@@ -1,5 +1,0 @@
-abi <abi/4.0>,
-include <tunables/global>
-profile lomi-git-bwrap-experimental /usr/bin/bwrap flags=(unconfined) {
-  userns,
-}

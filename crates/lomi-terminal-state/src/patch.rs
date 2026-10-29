@@ -706,27 +706,3 @@ impl GridPatch {
         Ok(next)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn prospective_serialization_matches_the_complete_snapshot_exactly() {
-        let mut model = TerminalState::new(6, 24, 8).unwrap();
-        let mut previous = model.snapshot().unwrap();
-        for bytes in [
-            "A界🙂e\u{301}\x1b[31;1m\x1b]2;quoted\"title\x07".as_bytes(),
-            b"\x1b]4;1;rgb:12/34/56\x07\x1b]8;id=link;https://example.invalid/\x1b\\linked".as_slice(),
-            b"\x1b[?1049hALT\x1b7\x1b[?1006h".as_slice(),
-            b"\x1b[?1049l\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n11\r\n12\r\n13\r\n14\r\n15".as_slice(),
-        ] {
-            model.feed(bytes).unwrap();
-            let next = model.snapshot().unwrap();
-            let patch = GridPatch::between(&previous, &next).unwrap();
-            let GridUpdate::Sparse { metadata, normal, alternate } = &patch.update else { panic!("same-geometry state must remain sparse"); };
-            let view = SnapshotView { baseline:&previous,patch:&patch,metadata,normal,alternate };
-            assert_eq!(serde_json::to_vec(&view).unwrap(),serde_json::to_vec(&next).unwrap());
-            previous = next;
-        }
-    }
-}

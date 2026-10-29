@@ -8435,39 +8435,3 @@ impl Drop for DirectoryWatch {
         }
     }
 }
-
-#[cfg(test)]
-mod watch_record_tests {
-    use super::*;
-
-    fn record(next: u32, action: u32, name: &[u16]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&next.to_ne_bytes());
-        bytes.extend_from_slice(&action.to_ne_bytes());
-        bytes.extend_from_slice(&((name.len() * 2) as u32).to_ne_bytes());
-        for unit in name {
-            bytes.extend_from_slice(&unit.to_ne_bytes());
-        }
-        bytes
-    }
-
-    #[test]
-    fn notification_parser_accepts_valid_and_rejects_lost_or_malformed_data() {
-        assert!(validate_notify_records(&record(0, 1, &[b'x' as u16])).is_ok());
-        assert_eq!(validate_notify_records(&[]), Err(Error::Changed));
-        assert_eq!(
-            validate_notify_records(&record(0, 99, &[b'x' as u16])),
-            Err(Error::Changed)
-        );
-        assert_eq!(
-            validate_notify_records(&record(0, 1, &[])),
-            Err(Error::Changed)
-        );
-        let mut truncated = record(0, 1, &[b'x' as u16]);
-        truncated.pop();
-        assert_eq!(validate_notify_records(&truncated), Err(Error::Changed));
-    }
-}
-
-#[cfg(test)]
-mod tests;

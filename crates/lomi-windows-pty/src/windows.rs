@@ -459,13 +459,6 @@ impl Console {
         thread::Builder::new()
             .name("lomi-conpty-resize".into())
             .spawn(move || {
-                #[cfg(feature = "proof-hooks")]
-                {
-                    let delay = proof_hooks::RESIZE_DELAY.swap(0, Ordering::SeqCst);
-                    if delay > 0 {
-                        thread::sleep(Duration::from_millis(delay as u64));
-                    }
-                }
                 // A queued operation must never begin after the caller's
                 // absolute deadline or after timeout/revocation cancellation.
                 let ok = if worker_cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -494,10 +487,6 @@ impl Console {
             return Err(Error::Deadline);
         }
         if self.handle != 0 {
-            #[cfg(feature = "proof-hooks")]
-            if proof_hooks::FAIL_CLOSE.swap(false, Ordering::SeqCst) {
-                return Err(Error::Cleanup);
-            }
             let h = self.handle;
             let input = self.input.clone();
             let output = self.output.clone();
@@ -603,10 +592,6 @@ impl Endpoint {
             if input.is_none() && previous == Err(Error::Closed) {
                 return Ok(Vec::new());
             }
-            #[cfg(feature = "proof-hooks")]
-            if input.is_none() && previous.is_ok_and(|count| count > 0) {
-                proof_hooks::RACED_READ.store(true, Ordering::SeqCst);
-            }
             if input.is_none()
                 && let Ok(count) = previous
             {
@@ -653,14 +638,6 @@ impl Endpoint {
             }
             Err(Error::Closed) if input.is_none() => Ok(Vec::new()),
             Err(error) => {
-                #[cfg(feature = "proof-hooks")]
-                if input.is_none()
-                    && error == Error::Deadline
-                    && proof_hooks::DELAY_READ_TIMEOUT.swap(false, Ordering::SeqCst)
-                {
-                    let _ = std::fs::write("synthetic-read-timeout-paused", b"ready");
-                    thread::sleep(Duration::from_millis(300));
-                }
                 unsafe { CancelIoEx(op.pipe.0, &op.overlapped) };
                 // Keep exactly one cancelled operation until kernel completion.
                 self.pending = Some(op);
@@ -782,12 +759,6 @@ impl Pty {
                 thread: Handle(info.hThread, None),
                 pid: info.dwProcessId,
             };
-            #[cfg(feature = "proof-hooks")]
-            proof_hooks::CREATED.fetch_add(1, Ordering::SeqCst);
-            #[cfg(feature = "proof-hooks")]
-            if proof_hooks::FAIL_AFTER_CREATE.swap(false, Ordering::SeqCst) {
-                return Err(native_error("synthetic suspended failure"));
-            }
             unsafe {
                 check(AssignProcessToJobObject(job.0.0, process.process.0))?;
             }
@@ -823,8 +794,7 @@ impl Pty {
                 }
                 console.close()
             })();
-            #[cfg(feature = "proof-hooks")]
-            proof_hooks::REJECTED_CLEAN.store(cleanup.is_ok(), Ordering::SeqCst);
+
             return Err(if cleanup.is_ok() {
                 Error::SpawnFailed
             } else {
@@ -930,10 +900,6 @@ impl Pty {
         Ok(())
     }
     fn stop_input(&mut self) -> Result<()> {
-        #[cfg(feature = "proof-hooks")]
-        if proof_hooks::FAIL_DRAIN.swap(false, Ordering::SeqCst) {
-            return Err(Error::Cleanup);
-        }
         self.input.stop()
     }
     /// Begin natural-exit cleanup while the independent reader keeps feeding output.
@@ -982,76 +948,6 @@ impl Drop for Pty {
     }
 }
 
-/// Synthetic fault controls, excluded from production builds.
-#[cfg(feature = "proof-hooks")]
-#[doc(hidden)]
-pub mod proof_hooks {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    static SERVICE_FAILURE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    pub fn record_service_failure(stage: u32) {
-        SERVICE_FAILURE.store(stage, Ordering::SeqCst)
-    }
-    pub fn last_service_failure() -> u32 {
-        SERVICE_FAILURE.load(Ordering::SeqCst)
-    }
-    pub(super) static RESIZE_DELAY: std::sync::atomic::AtomicU32 =
-        std::sync::atomic::AtomicU32::new(0);
-    pub fn delay_next_resize(millis: u32) {
-        RESIZE_DELAY.store(millis, Ordering::SeqCst)
-    }
-    pub fn charged_slots() -> usize {
-        super::OWNED_CONSOLES.load(Ordering::Acquire)
-    }
-    pub fn resize_in_flight(pty: &super::Pty) -> bool {
-        pty.console.resizing.is_some()
-    }
-    /// Fill remaining admission capacity without creating additional OS resources.
-    pub fn probe_admission_bound(check: impl FnOnce() -> bool) -> bool {
-        let mut charges = Vec::new();
-        while let Ok(permit) = super::Permit::acquire() {
-            charges.push(permit)
-        }
-        let bounded = super::OWNED_CONSOLES.load(Ordering::Acquire) == super::MAX_CONSOLES
-            && super::Permit::acquire().is_err();
-        let rejected = check();
-        drop(charges);
-        bounded && rejected
-    }
-    pub(super) static DELAY_READ_TIMEOUT: AtomicBool = AtomicBool::new(false);
-    pub(super) static RACED_READ: AtomicBool = AtomicBool::new(false);
-    pub fn delay_next_read_timeout() {
-        SERVICE_FAILURE.store(0, Ordering::SeqCst);
-        RACED_READ.store(false, Ordering::SeqCst);
-        DELAY_READ_TIMEOUT.store(true, Ordering::SeqCst)
-    }
-    pub fn raced_read_completion_observed() -> bool {
-        RACED_READ.load(Ordering::SeqCst)
-    }
-    pub(super) static CREATED: AtomicUsize = AtomicUsize::new(0);
-    pub(super) static REJECTED_CLEAN: AtomicBool = AtomicBool::new(false);
-    pub fn created_suspended_count() -> usize {
-        CREATED.load(Ordering::SeqCst)
-    }
-    pub fn rejected_cleanup_confirmed() -> bool {
-        REJECTED_CLEAN.load(Ordering::SeqCst)
-    }
-    pub(super) static FAIL_CLOSE: AtomicBool = AtomicBool::new(false);
-    pub(super) static FAIL_DRAIN: AtomicBool = AtomicBool::new(false);
-    pub(super) static FAIL_AFTER_CREATE: AtomicBool = AtomicBool::new(false);
-    pub fn fail_next_io_drain() {
-        FAIL_DRAIN.store(true, Ordering::SeqCst)
-    }
-    pub fn fail_next_close_thread() {
-        FAIL_CLOSE.store(true, Ordering::SeqCst)
-    }
-    pub fn fail_next_suspended_setup() {
-        FAIL_AFTER_CREATE.store(true, Ordering::SeqCst)
-    }
-    pub fn console_retained(pty: &super::Pty) -> bool {
-        pty.console.handle != 0
-    }
-}
-
 /// Clear inherited Ctrl+C ignore once at owned host startup, before spawning children.
 /// Does not allocate/attach a console or change other processes' control policy.
 pub fn prepare_host_control() -> Result<()> {
@@ -1059,30 +955,5 @@ pub fn prepare_host_control() -> Result<()> {
         Err(Error::Io)
     } else {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod shell_cwd_tests {
-    use super::shell_cwd;
-    use std::path::Path;
-
-    #[test]
-    fn plain_drive_paths_lose_the_verbatim_prefix_and_everything_else_is_kept() {
-        assert_eq!(
-            shell_cwd(Path::new(r"\\?\C:\work\app")),
-            Path::new(r"C:\work\app")
-        );
-        assert_eq!(shell_cwd(Path::new(r"C:\work")), Path::new(r"C:\work"));
-        assert_eq!(
-            shell_cwd(Path::new(r"\\?\UNC\server\share")),
-            Path::new(r"\\?\UNC\server\share")
-        );
-        assert_eq!(
-            shell_cwd(Path::new(r"\\?\Volume{1234}\x")),
-            Path::new(r"\\?\Volume{1234}\x")
-        );
-        let long = format!(r"\\?\C:\{}", "a".repeat(250));
-        assert_eq!(shell_cwd(Path::new(&long)), Path::new(&long));
     }
 }

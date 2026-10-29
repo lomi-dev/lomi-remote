@@ -2,7 +2,7 @@
   "format": 1,
   "scope": "Locked wasm32 crypto dependency closure; excludes dev edges; includes build dependencies and conservatively unified workspace features.",
   "ownerLicense": "No license grant is inferred for private Lomi sources.",
-  "cargoLockSha256": "8dc1e5a5a2227fea6d11fd708279ee7c8acc56d770d03db827892c6a8f720d27",
+  "cargoLockSha256": "1a1a4690b17bffe9cc3ccc6b11f4a10360c27faf4292e7ac30486bed57b74d2a",
   "packages": [
     {
       "name": "aead",

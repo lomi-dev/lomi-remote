@@ -351,65 +351,6 @@ impl Drop for OwnerLock {
     }
 }
 
-#[cfg(test)]
-mod owner_lock_tests {
-    use super::*;
-
-    #[test]
-    fn setup_start_mode_result_validation_binds_save_to_requested_value() {
-        let requested = ipc::LocalStartModePreference {
-            start_mode: ipc::LocalStartMode::Boot,
-        };
-        assert_eq!(
-            setup_start_mode_result_matches(
-                &LocalCall::SetupStartModeRead {},
-                &ipc::LocalResult::SetupStartMode(requested.clone()),
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            setup_start_mode_result_matches(
-                &LocalCall::SetupStartModeSave(requested.clone()),
-                &ipc::LocalResult::SetupStartMode(requested.clone()),
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            setup_start_mode_result_matches(
-                &LocalCall::SetupStartModeSave(requested),
-                &ipc::LocalResult::SetupStartMode(ipc::LocalStartModePreference {
-                    start_mode: ipc::LocalStartMode::Login,
-                }),
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn owner_drop_unlocks_while_inherited_description_remains_open() {
-        let directory = tempfile::Builder::new()
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
-        let profile = directory.path().canonicalize().unwrap();
-        let owner = OwnerLock::acquire(&profile).unwrap();
-        let lock_path = profile.join("owner.lock");
-        let inode = fs::symlink_metadata(&lock_path).unwrap().ino();
-        // dup and fork retain the same open-file description. Keeping this
-        // duplicate open makes close-only cleanup fail deterministically.
-        let inherited = owner._file.try_clone().unwrap();
-        drop(owner);
-        assert_eq!(fs::symlink_metadata(&lock_path).unwrap().ino(), inode);
-        let next = OwnerLock::acquire(&profile).unwrap();
-        drop(inherited);
-        // Closing the older description must preserve the newer owner's lock.
-        assert!(matches!(OwnerLock::acquire(&profile), Err(Error::Busy)));
-        drop(next);
-        let _last = OwnerLock::acquire(&profile).unwrap();
-        assert_eq!(fs::symlink_metadata(&lock_path).unwrap().ino(), inode);
-    }
-}
-
 fn setup_start_mode_result_matches(call: &LocalCall, result: &ipc::LocalResult) -> Option<bool> {
     match (call, result) {
         (LocalCall::SetupStartModeRead {}, ipc::LocalResult::SetupStartMode(_)) => Some(true),

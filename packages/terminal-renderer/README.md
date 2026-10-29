@@ -5,9 +5,9 @@ into exactly **@xterm/xterm 6.0.0**. Rust owns PTY parsing and its partial
 UTF-8/CSI/OSC/DCS state. The client applies cell/mode state and uses xterm for
 rendering and input encoding. It does not restore a second output parser.
 
-The package and its lockfile have exact xterm/headless pins. Playwright is a dev
-fixture only. No Rust host, production service, or sibling repository depends
-on this npm package. `node_modules` is not part of the artifact.
+Consumers pin `@xterm/xterm` 6.0.0. This canonical renderer helper is shared by
+the desktop, web and mobile clients; it contains no emulator or browser runtime.
+`node_modules` is not part of the artifact.
 
 ## Consumer contract
 
@@ -100,36 +100,13 @@ arbitrary JavaScript with access to private terminal internals.
   so preservation across eviction/reflow is limited. xterm markers/decorations
   are not preserved across full grid replacement.
 
-## Reproducible validation
+## Runtime boundary
 
-From the `lomi-remote` repository root:
-
-```sh
-npm ci --prefix packages/terminal-renderer --ignore-scripts
-npm test --prefix packages/terminal-renderer
-npm run test:browser --prefix packages/terminal-renderer
-cargo run -q -p lomi-terminal-state --bin state-fixtures > /tmp/lomi-rust-state-fixtures.json
-node tests/terminal-state/rust-oracle.mjs /tmp/lomi-rust-state-fixtures.json
-```
-
-The browser command requires the pinned Playwright Chromium installation. If it
-is unavailable, report that check as `not_run`; it is not a host dependency.
-The Rust oracle consumes an explicitly generated synthetic artifact and checks
-both grids, all cell attributes, cursor metadata and modes at each emitted host
-state, including attaching at each boundary and continuing with its next delta.
-It never feeds raw PTY bytes into xterm.
-
-Observed on 2026-10-19, macOS arm64, Node 22.22.3, npm 10.9.8:
-
-- Seven Node/headless tests passed.
-- Chromium 151.0.7922.34 browser test passed: real DOM renderer, palette
-  set/restore, title, live selection/scroll, ArrowUp encoding, bracketed paste,
-  focus reports, cursor style, all 17 optional keypad intents and disposal.
-  The xterm PTY parser was called zero times.
-- Rust projection fixture results are emitted by the oracle rather than frozen
-  here: the corpus may grow independently. At the initial checkpoint, 17 cases,
-  189 full-grid/mode projections and 63 attachment boundaries passed, including
-  one-byte UTF8/CSI/OSC/DCS continuation states.
+The adapter depends on the pinned xterm 6 internal service and buffer shapes
+described above. It applies structured terminal state; it does not parse PTY bytes,
+authorize control, or issue PTY input. Consumers must provide their own
+authenticated connection, render acknowledgement, input classification, and
+control-lease checks.
 
 ## Qualification boundaries
 
@@ -137,11 +114,11 @@ The adapter relies on private xterm 6 services, buffers, bit masks and events.
 Shape checks reject missing internals; the exact package/lockfile pins are part
 of the compatibility boundary. There is no runtime version-string API in xterm.
 Upgrading, substituting builds or installing addons requires fresh review and
-native/browser tests. DOM rendering was checked; WebGL, canvas addons, other
-browsers, mobile platforms and long-running stress behavior were not qualified.
+qualification. WebGL, canvas addons, other browsers, mobile platforms and
+long-running stress behavior are not qualified.
 
 xterm's hyperlink ExtendedAttrs exposes its own dashed-link underline appearance;
-the raw requested underline metadata is retained and tested, but this visual
+the raw requested underline metadata is retained, but this visual
 override remains a compatibility limit. Font shaping, Unicode versions, color
 rounding, dim/bold rendering and the Rust engine's original escape-sequence
 semantics can still differ from an ordinary xterm PTY parser. Projection equality

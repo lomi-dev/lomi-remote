@@ -55,11 +55,9 @@ returned access credentials contain transport secrets in the protocol crate's
 redacted wrappers: the caller must protect their lifetimes and serialization and
 use them only for their documented request. They are not loggable artifacts.
 
-Tests use an injected provider for publication failures and uncertain commits.
-The `protected_file` example is a native Unix process/reopen probe requiring an
-explicit `OsPermissionsOnly` acknowledgement and a trusted private fixture path.
-These tests establish library/storage behavior, not HTTP, PostgreSQL, DPAPI or
-native Keychain integration.
+The optional Unix `ProtectedFile` provider requires an explicit
+`OsPermissionsOnly` acknowledgement and a private owner-controlled profile. It is
+plaintext storage and is distinct from the platform secret providers.
 
 Every time argument, including the required open/restart anchor, must use trusted
 Unix seconds projected onto a nondecreasing timeline across reopen. The
@@ -79,12 +77,6 @@ Protected JSON accepts only bounded ASCII bytes without backslash escapes before
 serde parsing. Its own serializer needs no escapes for the strict field alphabets;
 rejection prevents escaped secret strings from entering serde scratch allocations.
 Validation checks secret alphabets and lengths through borrowed bytes.
-
-`tools/validate.py` uses an explicit source allowlist and writes a fresh private
-UUID directory under `artifacts/rust-host-auth`. Exact source copies and hashes
-are captured before commands; after hashes must match. Every command gets a
-separate retained receipt, including failures. Completed evidence is read-only.
-The earlier `evidence/local.json` receipt is historical and is never overwritten.
 
 Scoped v3 crypto is available only from unsealed, confirmed `Ready` credentials
 before their local access deadline. `public_host_identity(now)` returns only the
@@ -113,9 +105,10 @@ then fail the existing saved-binding checks. Backward epochs are rejected.
 This synchronization grants no runtime lease ownership, readiness or local
 workspace context. The future owner data worker must separately implement the
 authenticated GET/store-generation/logout-gate integration and its SQLite
-claim/outbox/lease handoff. This source preparation is not execution-qualified;
-the historical 42 HostAuth tests and seven coverage proofs at `a364878d` do not
-validate these changes. New lifecycle cases require the designated Windows run.
+claim/outbox/lease handoff. This synchronization path has not been qualified
+against a full native host lifecycle. The owner must integrate it with the
+current Store generation and logout gate before enabling it for a product
+workflow.
 
 `start_host_channel_v3(HostChannelAdmissionV3)` takes an independently expected
 context, stored host-signed grant, signed admission, pinned consumer identity and
@@ -143,6 +136,5 @@ closes the channel permanently. It can continue after admission expiry. Its owne
 must enforce ongoing authority
 and the local effect gate for every operation, including grant expiry and any
 observed revocation, runtime or membership failure. Reconnection requires a new
-admission and handshake. Deterministic private-clock tests cover deadline
-crossings; a native crypto consumer test exercises the same Noise initiator
-profile used by the browser, without claiming browser/HTTP product integration.
+admission and handshake. Browser/HTTP product integration and lifecycle
+qualification remain separate requirements.

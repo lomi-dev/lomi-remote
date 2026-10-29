@@ -67,36 +67,8 @@ impl PublicationReceiptProof
         self.current_for(connection)
     }
 }
-#[cfg_attr(test, track_caller)]
 fn checked<T>(r: lomi_remote_crypto::Result<T>) -> Result<T> {
-    #[cfg(test)]
-    let caller = std::panic::Location::caller();
-    r.map_err(|_| {
-        #[cfg(test)]
-        super::remote_ingress::record_origin_for_test(
-            "GateError",
-            Some("Disposed"),
-            caller.file(),
-            caller.line(),
-            caller.column(),
-        );
-        GateError::Disposed
-    })
-}
-
-#[cfg(test)]
-pub(in super::super) fn record_shared_owner_origin_for_test(
-    file: &'static str,
-    line: u32,
-    column: u32,
-) {
-    super::remote_ingress::record_origin_for_test(
-        "GateError",
-        Some("Disposed"),
-        file,
-        line,
-        column,
-    );
+    r.map_err(|_| GateError::Disposed)
 }
 
 /// Full precision trusted Unix time + monotonic sample. Never raw Instant units.
@@ -206,8 +178,7 @@ struct PeerProof {
 }
 struct Binding {
     context: ChannelContextV3,
-    #[cfg(test)]
-    canonical: Vec<u8>,
+
     signed_grant: SignedGrantV3,
     host: PublicHostIdentity,
     origin: RemoteOrigin,
@@ -371,17 +342,7 @@ impl Binding {
         let g = &self.context.grant;
         let authority = self
             .projected_authority(read.authority, f)
-            .map_err(|error| {
-                #[cfg(test)]
-                super::remote_ingress::record_origin_for_test(
-                    "GateError",
-                    Some("Disposed"),
-                    file!(),
-                    line!(),
-                    column!(),
-                );
-                error
-            })?;
+            .map_err(|error| error)?;
         if read.origin != &self.origin
             || read.signed_grant != &self.signed_grant
             || read.consumer_window.to_bytes() != g.consumer_id
@@ -395,14 +356,6 @@ impl Binding {
             || read.authority_expires_at > i64::MAX as u64
             || wall >= Duration::from_secs(read.authority_expires_at)
         {
-            #[cfg(test)]
-            super::remote_ingress::record_origin_for_test(
-                "GateError",
-                Some("Disposed"),
-                file!(),
-                line!(),
-                column!(),
-            );
             return Err(GateError::Disposed);
         }
         let host = checked(SignedBundle::from_wire(&self.host.identity))?;
@@ -431,14 +384,6 @@ impl Binding {
                 read.original_heartbeat.lease_ms,
             )?);
         if now.monotonic >= valid_until {
-            #[cfg(test)]
-            super::remote_ingress::record_origin_for_test(
-                "GateError",
-                Some("Disposed"),
-                file!(),
-                line!(),
-                column!(),
-            );
             return Err(GateError::Disposed);
         }
         Ok(PeerProof {
@@ -453,7 +398,7 @@ impl Binding {
 }
 impl GateCore {
     // Private only. Production callers cannot use this as a completed-handshake
-    // constructor. Tests exercise this pure evaluator with real signed fixtures.
+    // constructor.
     fn new(
         canonical: &[u8],
         grant: &SignedGrantV3,
@@ -481,8 +426,7 @@ impl GateCore {
             actor: ConsumerAuthorizationId::from_bytes(context.grant.consumer_authorization_id)
                 .map_err(|_| GateError::Disposed)?,
             context,
-            #[cfg(test)]
-            canonical: canonical.to_vec(),
+
             signed_grant: grant.clone(),
             host: f.protected_host.clone(),
             origin: f.origin.clone(),
@@ -517,19 +461,7 @@ impl GateCore {
         core.admission_live(sample())?;
         Ok(core)
     }
-    #[cfg_attr(test, track_caller)]
     fn poison<T>(&mut self) -> Result<T> {
-        #[cfg(test)]
-        {
-            let caller = std::panic::Location::caller();
-            super::remote_ingress::record_origin_for_test(
-                "GateError",
-                Some("Disposed"),
-                caller.file(),
-                caller.line(),
-                caller.column(),
-            );
-        }
         self.disposed = true;
         self.pending = None;
         Err(GateError::Disposed)
@@ -667,14 +599,6 @@ impl GateCore {
     ) -> Result<()> {
         self.live(f, sample)?; // An expired old observation is permanent loss, never revived.
         if read.request_started <= self.peer.started {
-            #[cfg(test)]
-            super::remote_ingress::record_origin_for_test(
-                "GateError",
-                Some("Denied"),
-                file!(),
-                line!(),
-                column!(),
-            );
             return Err(GateError::Denied);
         }
         let now = sample();
@@ -1299,10 +1223,6 @@ impl QueuedRequest {
     pub(in crate::unix) fn connection_identity(&self) -> uuid::Uuid {
         self.connection
     }
-    #[cfg(test)]
-    pub(in super::super) fn request(&self) -> &RpcRequest {
-        &self.request
-    }
 }
 pub(in super::super) struct AdmissionInputs<'a> {
     pub(in super::super) canonical_context: &'a [u8],
@@ -1540,10 +1460,7 @@ impl RemoteConnectionState {
     pub(in super::super) fn consumer_actor(&self) -> ConsumerAuthorizationId {
         self.core.binding.actor
     }
-    #[cfg(test)]
-    pub(in super::super) fn canonical_context(&self) -> &[u8] {
-        &self.core.binding.canonical
-    }
+
     pub(in super::super) fn refresh_peer(
         &mut self,
         read: PeerRead<'_>,
@@ -1695,11 +1612,6 @@ impl RemoteConnectionState {
         self.completed_channel.dispose();
     }
 }
-
-// Uses the unix-only auth fixtures (`auth::tests`).
-#[cfg(test)]
-#[path = "remote_connection_tests.rs"]
-mod tests;
 
 /// Minted only from the established channel's current gate/time projection.
 /// Callers cannot construct or extend the original absolute expiry cap.

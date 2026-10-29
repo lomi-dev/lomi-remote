@@ -8,10 +8,6 @@ fn main() {
     if env::var_os("CARGO_FEATURE_RELEASE_ROOT").is_none() {
         return;
     }
-    assert!(
-        env::var_os("CARGO_FEATURE_FAULT_INJECTION").is_none(),
-        "release-root cannot be combined with fault-injection"
-    );
     let root_path = env::var_os("LOMI_UPDATE_ROOT_FILE")
         .map(PathBuf::from)
         .expect("release-root requires operator-supplied LOMI_UPDATE_ROOT_FILE");

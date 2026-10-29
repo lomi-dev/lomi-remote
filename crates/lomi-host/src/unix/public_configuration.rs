@@ -7,18 +7,11 @@ use lomi_platform::public_config::Configuration;
 use platform::public_config::{CommitOutcome, PublicFile, Snapshot};
 use std::sync::RwLock;
 
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-const TEST_REMOTE_API_ROOT_LIMIT: usize = 16 * 1024;
-
 pub(super) struct PublicSetup {
     endpoint: Arc<OwnerEndpoint>,
     pub request: Mutex<()>,
     pub io: RwLock<()>,
     pub pending: AtomicBool,
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    test_remote_api_root_der: Option<Arc<[u8]>>,
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    test_relay_root_der: Option<Arc<[u8]>>,
 }
 // Operation-bound owner adapter. The actual read lease and its exact setup travel
 // together; callers cannot construct, clone, serialize, or extract the guard.
@@ -44,17 +37,6 @@ impl<'a> WorkerPublicIo<'a> {
     ) -> Result<lomi_host_http::DataTransport, lomi_host_http::Error> {
         self.setup.data_transport(origin)
     }
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    pub(super) fn cloud_fixture_ingress_roots(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        Some((
-            self.setup.test_remote_api_root_der.as_deref()?.to_vec(),
-            self.setup.test_relay_root_der.as_deref()?.to_vec(),
-        ))
-    }
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    pub(super) fn joined_cloud_fixture_selected(&self) -> bool {
-        self.setup.test_remote_api_root_der.is_some() && self.setup.test_relay_root_der.is_some()
-    }
 }
 impl PublicSetup {
     pub fn new(endpoint: Arc<OwnerEndpoint>) -> Self {
@@ -63,67 +45,13 @@ impl PublicSetup {
             request: Mutex::new(()),
             io: RwLock::new(()),
             pending: AtomicBool::new(false),
-            #[cfg(all(unix, test, feature = "cloud-fixture"))]
-            test_remote_api_root_der: None,
-            #[cfg(all(unix, test, feature = "cloud-fixture"))]
-            test_relay_root_der: None,
         }
     }
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    pub(super) fn with_remote_api_test_root(
-        endpoint: Arc<OwnerEndpoint>,
-        root_der: Vec<u8>,
-    ) -> Result<Self, lomi_host_http::Error> {
-        if root_der.is_empty() || root_der.len() > TEST_REMOTE_API_ROOT_LIMIT {
-            return Err(lomi_host_http::Error::InvalidConfig);
-        }
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(rustls::pki_types::CertificateDer::from(root_der.clone()))
-            .map_err(|_| lomi_host_http::Error::InvalidConfig)?;
-        Ok(Self {
-            endpoint,
-            request: Mutex::new(()),
-            io: RwLock::new(()),
-            pending: AtomicBool::new(false),
-            test_remote_api_root_der: Some(Arc::from(root_der.into_boxed_slice())),
-            test_relay_root_der: None,
-        })
-    }
-    #[cfg(all(unix, test, feature = "cloud-fixture"))]
-    pub(super) fn with_joined_cloud_test_roots(
-        endpoint: Arc<OwnerEndpoint>,
-        remote_api_root_der: Vec<u8>,
-        relay_root_der: Vec<u8>,
-    ) -> Result<Self, lomi_host_http::Error> {
-        fn validate(root_der: &[u8]) -> Result<(), lomi_host_http::Error> {
-            if root_der.is_empty() || root_der.len() > TEST_REMOTE_API_ROOT_LIMIT {
-                return Err(lomi_host_http::Error::InvalidConfig);
-            }
-            let mut roots = rustls::RootCertStore::empty();
-            roots
-                .add(rustls::pki_types::CertificateDer::from(root_der.to_vec()))
-                .map_err(|_| lomi_host_http::Error::InvalidConfig)
-        }
-        validate(&remote_api_root_der)?;
-        validate(&relay_root_der)?;
-        Ok(Self {
-            endpoint,
-            request: Mutex::new(()),
-            io: RwLock::new(()),
-            pending: AtomicBool::new(false),
-            test_remote_api_root_der: Some(Arc::from(remote_api_root_der.into_boxed_slice())),
-            test_relay_root_der: Some(Arc::from(relay_root_der.into_boxed_slice())),
-        })
-    }
+
     fn data_transport(
         &self,
         origin: lomi_host_http::RemoteApiOrigin,
     ) -> Result<lomi_host_http::DataTransport, lomi_host_http::Error> {
-        #[cfg(all(unix, test, feature = "cloud-fixture"))]
-        if let Some(root_der) = &self.test_remote_api_root_der {
-            return lomi_host_http::DataTransport::with_test_root(origin, root_der.to_vec());
-        }
         lomi_host_http::DataTransport::new(origin)
     }
     pub fn enter(
@@ -360,121 +288,7 @@ trait PublicPhases {
     ) -> Result<(), Error>;
     fn block(&mut self);
 }
-#[cfg(test)]
-struct SharedStore<'a>(&'a Mutex<HostStore>);
-#[cfg(test)]
-impl SharedStore<'_> {
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HostStore>, Error> {
-        match self.0.lock() {
-            Ok(store) => Ok(store),
-            Err(poisoned) => {
-                poisoned.into_inner().public_block();
-                Err(Error::Storage)
-            }
-        }
-    }
-}
-#[cfg(test)]
-fn snapshot_store(store: &mut HostStore) -> Result<(PublicDocument, PublicAuthFence), Error> {
-    let result = (|| Ok((store.public_current()?, PublicAuthFence::read(store)?)))();
-    if result.is_err() {
-        store.public_block();
-    }
-    result
-}
-#[cfg(test)]
-fn prepare_store(
-    store: &mut HostStore,
-    current: &PublicDocument,
-    scope: PublicAuthFence,
-    desired: &PublicDocument,
-) -> Result<(PublicPreparation, PublicAuthFence), Error> {
-    check_current(store, current, scope)?;
-    let intent = store.public_prepare(Some(current), desired)?;
-    match PublicAuthFence::read(store) {
-        Ok(scope) => Ok((intent, scope)),
-        Err(error) => {
-            store.public_block();
-            Err(error)
-        }
-    }
-}
-#[cfg(test)]
-fn finish_store(
-    store: &mut HostStore,
-    intent: &PublicPreparation,
-    scope: PublicAuthFence,
-    published: &PublicDocument,
-) -> Result<(), Error> {
-    check_prepared(store, intent, scope)?;
-    let result = store
-        .public_finish(intent.operation_id, published)
-        .map_err(Error::Store);
-    if result.is_err() {
-        store.public_block();
-    }
-    result
-}
-#[cfg(test)]
-impl PublicPhases for SharedStore<'_> {
-    fn snapshot(&mut self) -> Result<(PublicDocument, PublicAuthFence), Error> {
-        snapshot_store(&mut *self.lock()?)
-    }
-    fn current(&mut self, current: &PublicDocument, scope: PublicAuthFence) -> Result<(), Error> {
-        check_current(&mut *self.lock()?, current, scope)
-    }
-    fn prepare(
-        &mut self,
-        current: &PublicDocument,
-        scope: PublicAuthFence,
-        desired: &PublicDocument,
-    ) -> Result<(PublicPreparation, PublicAuthFence), Error> {
-        prepare_store(&mut *self.lock()?, current, scope, desired)
-    }
-    fn finish(
-        &mut self,
-        intent: &PublicPreparation,
-        scope: PublicAuthFence,
-        published: &PublicDocument,
-    ) -> Result<(), Error> {
-        finish_store(&mut *self.lock()?, intent, scope, published)
-    }
-    fn block(&mut self) {
-        if let Ok(mut store) = self.lock() {
-            store.public_block();
-        }
-    }
-}
-#[cfg(test)]
-struct BorrowedStore<'a>(&'a mut HostStore);
-#[cfg(test)]
-impl PublicPhases for BorrowedStore<'_> {
-    fn snapshot(&mut self) -> Result<(PublicDocument, PublicAuthFence), Error> {
-        snapshot_store(self.0)
-    }
-    fn current(&mut self, current: &PublicDocument, scope: PublicAuthFence) -> Result<(), Error> {
-        check_current(self.0, current, scope)
-    }
-    fn prepare(
-        &mut self,
-        current: &PublicDocument,
-        scope: PublicAuthFence,
-        desired: &PublicDocument,
-    ) -> Result<(PublicPreparation, PublicAuthFence), Error> {
-        prepare_store(self.0, current, scope, desired)
-    }
-    fn finish(
-        &mut self,
-        intent: &PublicPreparation,
-        scope: PublicAuthFence,
-        published: &PublicDocument,
-    ) -> Result<(), Error> {
-        finish_store(self.0, intent, scope, published)
-    }
-    fn block(&mut self) {
-        self.0.public_block();
-    }
-}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct PublicAuthFence {
     generation: u64,
@@ -495,44 +309,7 @@ fn block<S: PublicPhases>(store: &mut S) {
     // Preserve the original IO error even if cleanup cannot acquire Store.
     store.block();
 }
-#[cfg(test)]
-fn check_current(
-    store: &mut HostStore,
-    current: &PublicDocument,
-    scope: PublicAuthFence,
-) -> Result<(), Error> {
-    let result = (|| {
-        if PublicAuthFence::read(store)? != scope || store.public_current()? != *current {
-            return Err(Error::Conflict);
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        store.public_block();
-    }
-    result
-}
-#[cfg(test)]
-fn check_prepared(
-    store: &mut HostStore,
-    intent: &PublicPreparation,
-    scope: PublicAuthFence,
-) -> Result<(), Error> {
-    let result = (|| {
-        let state = store.public_configuration_state()?.ok_or(Error::Conflict)?;
-        if PublicAuthFence::read(store)? != scope
-            || state.current.as_ref() != intent.expected.as_ref()
-            || state.prepared.as_ref() != Some(intent)
-        {
-            return Err(Error::Conflict);
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        store.public_block();
-    }
-    result
-}
+
 /// File-only counterpart of startup's exact old/new reconciliation. No Store
 /// reference or closure is passed into load, replace, reopen or fsync/confirm.
 fn publish_preparation<S: PublicPhases, F: PublicIo>(
@@ -569,23 +346,7 @@ fn publish_preparation<S: PublicPhases, F: PublicIo>(
     store.check_operation()?;
     Ok(desired.document)
 }
-#[cfg(test)]
-fn configure_shared<F: PublicIo>(
-    store: &Mutex<HostStore>,
-    file: &mut F,
-    authentication: &LocalAuthConfiguration,
-) -> Result<(), Error> {
-    configure_with(&mut SharedStore(store), file, authentication)
-}
-#[cfg(test)]
-pub(super) fn configure<F: PublicIo>(
-    store: &mut HostStore,
-    file: &mut F,
-    authentication: &LocalAuthConfiguration,
-) -> Result<(), Error> {
-    // Existing exclusive fixture tests exercise the same production engine.
-    configure_with(&mut BorrowedStore(store), file, authentication)
-}
+
 // Progress owns every cross-IO snapshot; there is no guard or borrowed Store.
 enum Progress {
     Snapshot,
@@ -596,14 +357,7 @@ enum Progress {
     Finish(PublicPreparation, PublicAuthFence, PublicDocument),
     Done,
 }
-#[cfg(test)]
-fn configure_with<S: PublicPhases, F: PublicIo>(
-    store: &mut S,
-    file: &mut F,
-    authentication: &LocalAuthConfiguration,
-) -> Result<(), Error> {
-    advance(store, &mut Progress::Snapshot, file, authentication)
-}
+
 fn advance<S: PublicPhases, F: PublicIo>(
     store: &mut S,
     progress: &mut Progress,
@@ -779,341 +533,5 @@ impl PublicPhases for super::shared_owner::PublicConfigurationWrite<'_, '_> {
     }
     fn block(&mut self) {
         self.block();
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-mod remote_api_test_root_tests {
-    use super::*;
-    use crate::testsupport::BuilderExt as _;
-    use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-        KeyUsagePurpose,
-    };
-    use std::{
-        io::{Read, Write},
-        net::{Ipv4Addr, TcpListener},
-        thread,
-        time::{Duration, Instant},
-    };
-
-    fn endpoint_fixture() -> (tempfile::TempDir, Arc<OwnerEndpoint>) {
-        let root = tempfile::Builder::new().private_tempdir().unwrap();
-        let profile = root.path().canonicalize().unwrap();
-        let owner = platform::OwnerLock::acquire(&profile).unwrap();
-        let database = owner.prepare_database().unwrap();
-        let mut store = HostStore::open(&database, Limits::default()).unwrap();
-        startup(&mut store, owner.profile()).unwrap();
-        let endpoint = Arc::new(
-            platform::OwnerEndpoint::bind(
-                owner,
-                platform::LocalDiscovery {
-                    version: lomi_remote_protocol::LocalIpcVersion::CURRENT,
-                    profile_id: store.identity().profile_id,
-                    host_id: store.identity().host_id,
-                    runtime_id: store.runtime_id(),
-                    build_id: "tls-root-fixture".to_owned(),
-                },
-            )
-            .unwrap(),
-        );
-        drop(store);
-        (root, endpoint)
-    }
-
-    fn tls_identity() -> lomi_host_auth::Config {
-        lomi_host_auth::Config::new(
-            lomi_remote_protocol::HostId::from_bytes([1; 16]).unwrap(),
-            lomi_remote_protocol::ipc::IpcProfileId::from_bytes([2; 16]).unwrap(),
-            "https://identity.example".to_owned(),
-            "fixture-client".to_owned().try_into().unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn fixture_certificate() -> (Vec<u8>, Arc<rustls::ServerConfig>) {
-        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        let ca_key = KeyPair::generate().unwrap();
-        let root = ca.self_signed(&ca_key).unwrap();
-        let issuer = Issuer::new(ca, ca_key);
-
-        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let leaf_key = KeyPair::generate().unwrap();
-        let leaf = leaf.signed_by(&leaf_key, &issuer).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der());
-        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![leaf.der().clone()], key.into())
-        .unwrap();
-        (root.der().to_vec(), Arc::new(server))
-    }
-
-    struct OneReplyServer {
-        port: u16,
-        join: Option<thread::JoinHandle<bool>>,
-    }
-
-    impl OneReplyServer {
-        fn new(config: Arc<rustls::ServerConfig>) -> Self {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let join = thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let socket = loop {
-                    match listener.accept() {
-                        Ok((socket, _)) => break socket,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return false;
-                            }
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(_) => return false,
-                    }
-                };
-                if socket.set_nonblocking(false).is_err() {
-                    return false;
-                }
-                let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
-                let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
-                let connection = match rustls::ServerConnection::new(config) {
-                    Ok(connection) => connection,
-                    Err(_) => return false,
-                };
-                let mut stream = rustls::StreamOwned::new(connection, socket);
-                let mut request = [0u8; 4096];
-                let received = matches!(stream.read(&mut request), Ok(count) if count > 0);
-                if received {
-                    let body = br#"{"code":"AUTH_REQUIRED","message":"Authentication required.","retryable":false,"effect":"none","details":{}}"#;
-                    let response = format!(
-                        "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    if stream.write_all(response.as_bytes()).is_err()
-                        || stream.write_all(body).is_err()
-                        || stream.flush().is_err()
-                    {
-                        return false;
-                    }
-                }
-                received
-            });
-            Self {
-                port,
-                join: Some(join),
-            }
-        }
-
-        fn finish(mut self) -> bool {
-            self.join.take().unwrap().join().unwrap()
-        }
-    }
-
-    fn runtime_get(
-        setup: &PublicSetup,
-        server: OneReplyServer,
-    ) -> (
-        Result<lomi_remote_protocol::HostRuntimeGetResult, lomi_host_http::Error>,
-        bool,
-    ) {
-        let identity = tls_identity();
-        let origin = lomi_host_http::RemoteApiOrigin::new(
-            &identity,
-            format!("https://localhost:{}", server.port),
-        )
-        .unwrap();
-        let paused = AtomicBool::new(false);
-        let io = setup.enter_owned(&paused).unwrap().unwrap();
-        let transport = io.data_transport(origin).unwrap();
-        let host = lomi_remote_protocol::HostId::from_bytes([1; 16]).unwrap();
-        let access = "fixture_access".to_owned().try_into().unwrap();
-        let result = transport.runtime_get(host, &access);
-        drop(io);
-        (result, server.finish())
-    }
-
-    #[test]
-    fn configured_worker_transport_uses_only_an_explicit_test_root() {
-        let (_profile, endpoint) = endpoint_fixture();
-        let (root_der, server_config) = fixture_certificate();
-        let setup = PublicSetup::with_remote_api_test_root(endpoint.clone(), root_der.clone())
-            .expect("valid fixture CA is accepted");
-        let (result, request_received) =
-            runtime_get(&setup, OneReplyServer::new(server_config.clone()));
-        assert!(
-            request_received,
-            "fixture-root TLS reached the loopback API: {result:?}"
-        );
-        assert_eq!(
-            result,
-            Err(lomi_host_http::Error::DataRemote(
-                lomi_host_http::DataFailure::AuthRequired
-            ))
-        );
-        let paused = AtomicBool::new(false);
-        let io = setup.enter_owned(&paused).unwrap().unwrap();
-        assert_eq!(io.cloud_fixture_ingress_roots(), None);
-        assert!(!io.joined_cloud_fixture_selected());
-        drop(io);
-
-        let (relay_root_der, _) = fixture_certificate();
-        let joined_setup = PublicSetup::with_joined_cloud_test_roots(
-            endpoint.clone(),
-            root_der.clone(),
-            relay_root_der.clone(),
-        )
-        .expect("both explicit JoinedCloud roots are accepted");
-        let io = joined_setup.enter_owned(&paused).unwrap().unwrap();
-        assert_eq!(
-            io.cloud_fixture_ingress_roots(),
-            Some((root_der.clone(), relay_root_der))
-        );
-        assert!(io.joined_cloud_fixture_selected());
-        drop(io);
-        let (result, request_received) =
-            runtime_get(&joined_setup, OneReplyServer::new(server_config.clone()));
-        assert!(
-            request_received,
-            "joined API root reached the real client: {result:?}"
-        );
-        assert_eq!(
-            result,
-            Err(lomi_host_http::Error::DataRemote(
-                lomi_host_http::DataFailure::AuthRequired
-            ))
-        );
-
-        let default_setup = PublicSetup::new(endpoint);
-        let io = default_setup.enter_owned(&paused).unwrap().unwrap();
-        assert_eq!(io.cloud_fixture_ingress_roots(), None);
-        assert!(!io.joined_cloud_fixture_selected());
-        drop(io);
-        let (result, request_received) =
-            runtime_get(&default_setup, OneReplyServer::new(server_config));
-        assert_ne!(
-            result,
-            Err(lomi_host_http::Error::DataRemote(
-                lomi_host_http::DataFailure::AuthRequired
-            )),
-            "the default setup must not inherit the fixture CA"
-        );
-        assert!(
-            !request_received,
-            "system-root TLS rejection happens before an HTTP request"
-        );
-    }
-
-    #[test]
-    fn test_root_constructor_rejects_empty_oversized_and_malformed_roots() {
-        let (_profile, endpoint) = endpoint_fixture();
-        assert!(matches!(
-            PublicSetup::with_remote_api_test_root(endpoint.clone(), Vec::new()),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-        assert!(matches!(
-            PublicSetup::with_remote_api_test_root(
-                endpoint.clone(),
-                vec![0; TEST_REMOTE_API_ROOT_LIMIT + 1]
-            ),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-        assert!(matches!(
-            PublicSetup::with_remote_api_test_root(endpoint, vec![0x30, 0x01, 0x00]),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-    }
-
-    #[test]
-    fn joined_root_constructor_rejects_each_invalid_downstream_root() {
-        let (_profile, endpoint) = endpoint_fixture();
-        let (remote_root, _) = fixture_certificate();
-        let (relay_root, _) = fixture_certificate();
-        assert!(matches!(
-            PublicSetup::with_joined_cloud_test_roots(
-                endpoint.clone(),
-                Vec::new(),
-                relay_root.clone()
-            ),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-        assert!(matches!(
-            PublicSetup::with_joined_cloud_test_roots(
-                endpoint.clone(),
-                remote_root.clone(),
-                vec![0x30, 0x01, 0x00]
-            ),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-        assert!(matches!(
-            PublicSetup::with_joined_cloud_test_roots(
-                endpoint.clone(),
-                remote_root.clone(),
-                vec![0; TEST_REMOTE_API_ROOT_LIMIT + 1]
-            ),
-            Err(lomi_host_http::Error::InvalidConfig)
-        ));
-        assert!(
-            PublicSetup::with_joined_cloud_test_roots(endpoint, remote_root, relay_root).is_ok()
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(all(test, windows))]
-mod windows_startup_tests {
-    use super::*;
-    #[test]
-    fn native_startup_preserves_existing_dpapi_selection_without_secret_io() {
-        let root = tempfile::Builder::new()
-            .prefix("lomi-public-startup-native-")
-            .tempdir_in(std::env::var_os("USERPROFILE").unwrap())
-            .unwrap();
-        let profile = root.path().canonicalize().unwrap().join("profile");
-        let lock = OwnerLock::acquire(&profile).unwrap();
-        let database = lock.prepare_database().unwrap();
-        let mut store = HostStore::open(&database, Limits::default()).unwrap();
-        let selection = LocalAuthConfiguration {
-            version: 1,
-            origin: "https://identity.example".to_owned().try_into().unwrap(),
-            remote_api_origin: None,
-            relay_endpoint: None,
-            client_id: "host-client".to_owned().try_into().unwrap(),
-            provider: LocalAuthProvider::WindowsDpapi,
-            keychain_path: None,
-            protected_file_acknowledgement: None,
-        };
-        // This is the existing SQLite selection, before public migration; no
-        // credential provider is opened and no new secret is synthesized.
-        store.configure_auth(&selection).unwrap();
-        startup(&mut store, lock.profile()).unwrap();
-        assert!(store.public_configuration_ready().unwrap());
-        assert_eq!(store.auth_configuration().unwrap(), Some(selection.clone()));
-        assert!(super::super::auth::configuration(store.identity(), &selection).is_ok());
-        let file = PublicFile::new(lock.profile()).unwrap();
-        let first = file.load().unwrap().unwrap();
-        assert_eq!(
-            first.configuration().authentication.as_ref(),
-            Some(&selection)
-        );
-        assert_eq!(first.configuration().revision, 1);
-        let bytes = first.source().to_vec();
-        drop(store);
-        let mut reopened = HostStore::open(&database, Limits::default()).unwrap();
-        startup(&mut reopened, lock.profile()).unwrap();
-        assert!(reopened.public_configuration_ready().unwrap());
-        assert_eq!(reopened.auth_configuration().unwrap(), Some(selection));
-        assert_eq!(file.load().unwrap().unwrap().source(), bytes);
-        assert!(!profile.join("host-secrets.dpapi").exists());
-        assert!(!profile.join("host-secrets.lock").exists());
     }
 }

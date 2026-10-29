@@ -170,10 +170,7 @@ impl BrowserIdentity {
             .map(|p| p.to_vec())
             .map_err(error)
     }
-    #[cfg(feature = "test-fixtures")]
-    pub fn fixture(host: bool, seed: u8) -> Result<BrowserIdentity, JsValue> {
-        Identity::fixture(role(host), seed).map(Self).map_err(error)
-    }
+
 }
 #[wasm_bindgen]
 pub struct BrowserHandshake(Handshake);

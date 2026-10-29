@@ -24,8 +24,6 @@ node packages/protocol-codec-wasm/scripts/build.mjs
 cargo run -p lomi-remote-protocol --bin generate-contracts
 cargo run -p lomi-remote-protocol --bin generate-contracts -- --check
 npm --prefix packages/remote-contracts run check
-npm --prefix packages/remote-contracts test
-npm --prefix packages/remote-contracts run typecheck
 ```
 
 The final Rust generation refreshes hashes of generated client artifacts.
@@ -37,8 +35,8 @@ exact dependency lock, schemas and outputs. All root manifest artifact paths are
 its verifier rejects absolute paths, parent traversal and symlink escapes.
 The client manifest labels its input paths as repository-relative and its output
 paths relative to `packages/remote-contracts/generated`.
-The root manifest hashes schema,
-OpenAPI, client outputs, terminal profile and existing crypto vectors/provenance.
+The root manifest hashes schema, OpenAPI, client outputs, terminal profile and
+generated crypto package artifacts/provenance.
 
 ## Runtime boundary
 
@@ -84,6 +82,5 @@ URLs. A credential transport does not establish server-owned H/C/E class.
 `OrderedSequence` rejects gaps until explicit reset after resync; each
 subscription/session needs its own guard. No API retries or replays requests.
 
-Rust validates the generated request/security corpus while generating it.
-Consumer tests use those same JSON values and the Rust-owned text parity corpus.
-Types are generated and tested through the package's actual `exports` entry.
+Consumer codecs share the canonical schema and RPC method registry. Types are
+generated through the package's actual `exports` entry.

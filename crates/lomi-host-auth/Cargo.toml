@@ -5,9 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-fixture-support = []
-
 [dependencies]
 lomi-platform = { path = "../lomi-platform" }
 lomi-remote-crypto = { path = "../lomi-remote-crypto" }

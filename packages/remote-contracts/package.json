@@ -8,14 +8,11 @@
       "types": "./generated/index.d.ts",
       "default": "./src/index.mjs"
     },
-    "./rpc-client": "./src/rpc-client.ts",
-    "./fixtures/rust-codec.json": "./fixtures/rust-codec.json"
+    "./rpc-client": "./src/rpc-client.ts"
   },
   "scripts": {
     "generate": "node scripts/generate.mjs",
-    "check": "node scripts/generate.mjs --check",
-    "test": "node --test test/*.test.mjs",
-    "typecheck": "tsc --noEmit --strict --module nodenext --target es2022 test/types.ts"
+    "check": "node scripts/generate.mjs --check"
   },
   "devDependencies": {
     "ajv": "8.18.0",

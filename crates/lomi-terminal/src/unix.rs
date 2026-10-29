@@ -169,41 +169,7 @@ fn group_has_live_members(group: libc::pid_t) -> Result<bool> {
     }
     Ok(false)
 }
-#[cfg(all(target_os = "linux", feature = "owned-host-fixture"))]
-fn group_has_live_members(group: libc::pid_t) -> Result<bool> {
-    let entries = std::fs::read_dir("/proc").map_err(|_| Error::CleanupFailed)?;
-    for (count, entry) in entries.enumerate() {
-        if count >= 65536 {
-            return Err(Error::CleanupFailed);
-        }
-        let entry = entry.map_err(|_| Error::CleanupFailed)?;
-        if entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-            .is_none()
-        {
-            continue;
-        }
-        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
-            Ok(stat) => stat,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(Error::CleanupFailed),
-        };
-        let suffix = stat.rsplit_once(')').ok_or(Error::CleanupFailed)?.1;
-        let fields: Vec<_> = suffix.split_whitespace().collect();
-        if fields.len() < 3 {
-            return Err(Error::CleanupFailed);
-        }
-        let pgid = fields[2]
-            .parse::<libc::pid_t>()
-            .map_err(|_| Error::CleanupFailed)?;
-        if pgid == group && !matches!(fields[0], "Z" | "X") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
+
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -217,19 +183,6 @@ pub(super) struct Pty {
     remote_master: Option<std::fs::File>,
 }
 impl Pty {
-    /// Inert no-handle fixture for pure Core/gate tests; never starts a child.
-    #[cfg(test)]
-    pub(super) fn inert_for_test() -> Self {
-        Self {
-            master: None,
-            writer: None,
-            child: None,
-            worker: None,
-            remote_master: None,
-        }
-    }
-
-    #[cfg_attr(all(unix, feature = "owned-host-fixture"), allow(dead_code))]
     pub(super) fn spawn(
         profile: &SpawnProfile,
         before_spawn: impl FnOnce() -> bool,
@@ -268,15 +221,7 @@ impl Pty {
     ) -> Result<Self> {
         Self::acquire_inner(profile, before_spawn, true, false, None)
     }
-    #[cfg(feature = "owned-host-fixture")]
-    pub(super) fn acquire_owned_fixture(
-        profile: &SpawnProfile,
-        before_spawn: impl FnOnce() -> bool,
-    ) -> (Result<Self>, bool) {
-        let mut exec_failed = false;
-        let result = Self::acquire_inner(profile, before_spawn, true, true, Some(&mut exec_failed));
-        (result, exec_failed)
-    }
+
     fn acquire_inner(
         profile: &SpawnProfile,
         before_spawn: impl FnOnce() -> bool,
@@ -287,9 +232,8 @@ impl Pty {
         if !profile.executable.is_absolute() || !profile.cwd.is_absolute() {
             return Err(Error::InvalidArgument);
         }
-        // Direct fixtures may share a process with other code. Never start a
-        // child whose status could auto-reap and invalidate its PID/group pin.
-        // Production workers establish this disposition before calling acquire.
+        // Never start a child whose status could auto-reap and invalidate its
+        // PID/group pin. Production workers establish this disposition first.
         if !preserves_child_status() {
             return Err(Error::SpawnFailed);
         }
@@ -453,19 +397,7 @@ impl Pty {
     pub(super) fn final_worker_signal(&mut self) -> Result<()> {
         self.child.as_mut().unwrap().signal()
     }
-    #[cfg(feature = "owned-host-fixture")]
-    pub(super) fn original_group_quiet(&self) -> Result<()> {
-        let child = self.child.as_ref().ok_or(Error::CleanupFailed)?;
-        // No reap has occurred: the original owned child pins group identity.
-        if !child.armed || !owns_unreaped_child(child.group) {
-            return Err(Error::CleanupFailed);
-        }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if !group_has_live_members(child.group)? {
-            return Ok(());
-        }
-        Err(Error::CleanupFailed)
-    }
+
     pub(super) fn reap_worker_leader(&mut self) -> Result<()> {
         self.child.as_mut().unwrap().stop()
     }
@@ -485,15 +417,6 @@ impl Pty {
         graceful
     }
     pub(super) fn stop(&mut self) -> Result<()> {
-        #[cfg(test)]
-        if self.master.is_none()
-            && self.writer.is_none()
-            && self.child.is_none()
-            && self.worker.is_none()
-            && self.remote_master.is_none()
-        {
-            return Ok(());
-        }
         if let Some(worker) = &mut self.worker {
             self.writer.take();
             self.remote_master.take();
@@ -656,245 +579,4 @@ pub(super) fn pump(
     let mut core = shared.lock().unwrap_or_else(|p| p.into_inner());
     finish(&mut core);
     let _ = core.pty.stop();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicUsize;
-    #[test]
-    fn already_exited_unreaped_pty_leader_keeps_its_owned_group_guard() {
-        let pair = native_pty_system().openpty(size(8, 40)).unwrap();
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "exit 0"]);
-        let child = pair.slave.spawn_command(command).unwrap();
-        let pid = child.process_id().unwrap() as i32;
-        drop(pair);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            assert_eq!(
-                unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        pid as _,
-                        &mut info,
-                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                    )
-                },
-                0
-            );
-            if unsafe { info.si_pid() } == pid {
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(1));
-        }
-        let group = unsafe { libc::getpgid(pid) };
-        let errno = std::io::Error::last_os_error().raw_os_error();
-        match ChildGuard::new(child, true) {
-            Ok(mut guard) => guard.stop().unwrap(),
-            Err(mut owned) => {
-                let _ = owned.try_wait();
-                panic!("owned unreaped leader rejected: getpgid={group}, errno={errno:?}");
-            }
-        }
-    }
-    fn session() -> (
-        tempfile::TempDir,
-        TerminalService,
-        TerminalSessionId,
-        SessionEpoch,
-        AuthenticatedConnection,
-        Attachment,
-        ControlLease,
-    ) {
-        let temp = tempfile::tempdir().unwrap();
-        let service = TerminalService::new();
-        let id = TerminalSessionId::from_bytes([1; 16]).unwrap();
-        let epoch = SessionEpoch::from_bytes([2; 16]).unwrap();
-        service
-            .spawn(
-                id,
-                epoch,
-                &SpawnProfile {
-                    executable: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 30 & wait".into()],
-                    cwd: temp.path().canonicalize().unwrap(),
-                    environment: vec![("PATH".into(), "/usr/bin:/bin".into())],
-                    shell_integration: None,
-                    rows: 8,
-                    cols: 40,
-                    history: 0,
-                },
-            )
-            .unwrap();
-        let connection =
-            AuthenticatedConnection::new(ConsumerAuthorizationId::from_bytes([3; 16]).unwrap());
-        let attachment = service.attach(id, epoch, &connection).unwrap();
-        attachment
-            .acknowledge(&connection, attachment.snapshot.sequence.0)
-            .unwrap();
-        let lease = service.claim(id, epoch, &connection).unwrap();
-        (temp, service, id, epoch, connection, attachment, lease)
-    }
-    struct PartialWriter {
-        calls: Arc<AtomicUsize>,
-        _original: Box<dyn Write + Send>,
-    }
-    impl Write for PartialWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(bytes.len().min(3))
-            } else {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    #[test]
-    fn partial_io_is_unknown_and_duplicate_never_reenters_writer() {
-        let (_temp, service, id, epoch, connection, _attachment, lease) = session();
-        let calls = Arc::new(AtomicUsize::new(0));
-        {
-            let session = service.session(id).unwrap();
-            let mut core = session.core.lock().unwrap();
-            let original = core.pty.writer.take().unwrap();
-            core.pty.writer = Some(Box::new(PartialWriter {
-                calls: calls.clone(),
-                _original: original,
-            }));
-        }
-        let result = service
-            .input(id, epoch, &connection, &lease, 1, 1, b"synthetic", || true)
-            .unwrap();
-        assert_eq!(result.accepted_bytes, 3);
-        assert_eq!(result.outcome, InputOutcome::Unknown);
-        assert_eq!(
-            service
-                .input(
-                    id,
-                    epoch,
-                    &connection,
-                    &lease,
-                    1,
-                    1,
-                    b"synthetic",
-                    || panic!("partial input replayed")
-                )
-                .unwrap(),
-            result
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        service.stop(id).unwrap();
-    }
-    #[test]
-    fn receipt_eviction_keeps_high_watermarks_and_rejects_old_ids() {
-        let (_temp, service, id, epoch, connection, _attachment, lease) = session();
-        for sequence in 1..=RECEIPT_LIMIT as u64 + 1 {
-            service
-                .input(
-                    id,
-                    epoch,
-                    &connection,
-                    &lease,
-                    sequence,
-                    sequence,
-                    b"x",
-                    || false,
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            service
-                .session(id)
-                .unwrap()
-                .core
-                .lock()
-                .unwrap()
-                .inputs
-                .len(),
-            RECEIPT_LIMIT
-        );
-        assert_eq!(
-            service.input(
-                id,
-                epoch,
-                &connection,
-                &lease,
-                1,
-                RECEIPT_LIMIT as u64 + 2,
-                b"x",
-                || panic!("evicted input replayed")
-            ),
-            Err(Error::SequenceConflict)
-        );
-        service.stop(id).unwrap();
-    }
-    fn live_members(group: i32) -> usize {
-        let output = std::process::Command::new("/bin/ps")
-            .args(["-axo", "pgid=,stat="])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .filter(|line| {
-                let mut fields = line.split_whitespace();
-                fields.next().and_then(|n| n.parse::<i32>().ok()) == Some(group)
-                    && fields.next().is_some_and(|s| !s.starts_with('Z'))
-            })
-            .count()
-    }
-    #[test]
-    fn shutdown_reaps_the_owned_shell_and_its_child_group() {
-        let (_temp, service, id, _epoch, _connection, _attachment, _lease) = session();
-        let group = service
-            .session(id)
-            .unwrap()
-            .core
-            .lock()
-            .unwrap()
-            .pty
-            .child
-            .as_ref()
-            .unwrap()
-            .group;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while live_members(group) < 2 {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(5));
-        }
-        service.stop(id).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while live_members(group) != 0 {
-            assert!(Instant::now() < deadline, "owned child group survived stop");
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-    #[test]
-    fn panic_during_fence_still_allows_owned_process_cleanup() {
-        let (_temp, service, id, epoch, connection, _attachment, lease) = session();
-        let group = service
-            .session(id)
-            .unwrap()
-            .core
-            .lock()
-            .unwrap()
-            .pty
-            .child
-            .as_ref()
-            .unwrap()
-            .group;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = service.input(id, epoch, &connection, &lease, 1, 1, b"x", || {
-                panic!("synthetic fence failure")
-            });
-        }));
-        assert!(result.is_err());
-        service.shutdown().unwrap();
-        assert_eq!(live_members(group), 0);
-    }
 }

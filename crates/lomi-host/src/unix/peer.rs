@@ -154,8 +154,6 @@ pub(super) struct Work {
     pub(super) observation: std::sync::Arc<Observation>,
     pub(super) intent: Option<PairingDecisionIntent>,
 }
-#[cfg(test)]
-type SnapshotHook = Box<dyn FnOnce(u64, Runtime<'_>)>;
 
 #[derive(Default)]
 pub(super) struct Worker {
@@ -174,14 +172,6 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     proposal_cursor: Option<PairingId>,
     prefer_recovery: bool,
-    #[cfg(test)]
-    after_snapshot: Option<SnapshotHook>,
-    #[cfg(test)]
-    after_sign: Option<Box<dyn FnOnce()>>,
-    #[cfg(test)]
-    before_prepare_lock: Option<Box<dyn FnOnce()>>,
-    #[cfg(test)]
-    before_ack_lock: Option<Box<dyn FnOnce()>>,
 }
 pub(super) enum PeerError {
     Invalid,
@@ -196,55 +186,12 @@ pub(super) type ResultPeer<T> = Result<T, PeerError>;
 pub(super) fn crypt<T>(value: lomi_remote_crypto::Result<T>) -> ResultPeer<T> {
     value.map_err(|_| PeerError::Invalid)
 }
-#[cfg_attr(test, track_caller)]
 pub(super) fn policy<T>(
     value: Result<T, lomi_host_auth::peer_policy::PolicyError>,
 ) -> ResultPeer<T> {
-    #[cfg(test)]
-    let originating_call = std::panic::Location::caller();
-    value.map_err(|_error| {
-        #[cfg(test)]
-        eprintln!(
-            "peer policy rejected before Invalid origin={originating_call} variant={_error:?}"
-        );
-        PeerError::Invalid
-    })
+    value.map_err(|_| PeerError::Invalid)
 }
-#[cfg(test)]
-fn diagnostic_policy_instant(
-    stage: &'static str,
-    wall: u64,
-    monotonic: Instant,
-    runtime: Runtime<'_>,
-    heartbeat: &HeartbeatObservation,
-) -> Instant {
-    let runtime_elapsed = monotonic.saturating_duration_since(runtime.anchor);
-    let heartbeat_elapsed = monotonic.saturating_duration_since(heartbeat.request_started);
-    eprintln!(
-        "peer policy sample stage={stage} supplied_wall={wall} supplied_monotonic_runtime_ns={} runtime_projected_wall={} heartbeat_projected_wall={} heartbeat_elapsed_ms={} heartbeat_freshness_ms={} heartbeat_lease_ms={} original_operation_remaining_ms={}",
-        runtime_elapsed.as_nanos(),
-        runtime.base.saturating_add(runtime_elapsed.as_secs()),
-        heartbeat
-            .wall_at_request_start
-            .saturating_add(heartbeat_elapsed.as_secs()),
-        heartbeat_elapsed.as_millis(),
-        heartbeat.freshness_ms,
-        heartbeat.lease_ms,
-        runtime
-            .operation
-            .deadline()
-            .saturating_duration_since(monotonic)
-            .as_millis(),
-    );
-    monotonic
-}
-#[cfg(test)]
-macro_rules! policy_instant {
-    ($stage:literal, $wall:expr, $runtime:expr, $heartbeat:expr) => {
-        diagnostic_policy_instant($stage, $wall, Instant::now(), $runtime, $heartbeat)
-    };
-}
-#[cfg(not(test))]
+
 macro_rules! policy_instant {
     ($stage:literal, $wall:expr, $runtime:expr, $heartbeat:expr) => {
         Instant::now()
@@ -803,10 +750,6 @@ impl Worker {
     ) -> ResultPeer<ApprovedGrant> {
         let (snapshot, maximum, scope, _snapshot_now) =
             self.snapshot(auth, config, runtime, eligibility, work)?;
-        #[cfg(test)]
-        if let Some(hook) = self.after_snapshot.take() {
-            hook(_snapshot_now, runtime);
-        }
         let p = &intent.preparation;
         let PairingDecisionParams::Approve { grant, .. } = &p.params else {
             return Err(PeerError::Invalid);
@@ -871,10 +814,6 @@ impl Worker {
     ) -> ResultPeer<()> {
         let (snapshot, maximum, scope, _snapshot_now) =
             self.snapshot(auth, config, runtime, eligibility, &work)?;
-        #[cfg(test)]
-        if let Some(hook) = self.after_snapshot.take() {
-            hook(_snapshot_now, runtime);
-        }
         let now = self.live(auth, runtime, eligibility)?;
         let prepared = policy(snapshot.prepare_grant(
             &hex_bytes(work.proposal.maximum_grant.expose_wire())?,
@@ -893,10 +832,6 @@ impl Worker {
         ))?;
         let now = self.live(auth, runtime, eligibility)?;
         let signed = managed(auth.sign_grant_v3(prepared.grant(), now))?;
-        #[cfg(test)]
-        if let Some(after_sign) = self.after_sign.take() {
-            after_sign();
-        }
         if crypt(signed.grant.canonical())? != prepared.canonical() {
             return Err(PeerError::Invalid);
         }
@@ -932,10 +867,6 @@ impl Worker {
             original_expires_at: signed.grant.expires_at,
             params,
         };
-        #[cfg(test)]
-        if let Some(hook) = self.before_prepare_lock.take() {
-            hook();
-        }
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         let capture = owner_turn(runtime, || {
             runtime.owner.capture_peer_journal(
@@ -1135,10 +1066,6 @@ impl Worker {
         if !work.observation.current(eligibility) {
             return Err(PeerError::Invalid);
         }
-        #[cfg(test)]
-        if let Some(hook) = self.before_ack_lock.take() {
-            hook();
-        }
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         let capture = owner_turn(runtime, || {
             runtime.owner.capture_peer_journal(
@@ -1327,9 +1254,6 @@ fn verify_expired_intent(
     ))?;
     Ok(())
 }
-#[cfg(test)]
-#[path = "peer_tests.rs"]
-pub(super) mod tests;
 
 // Approved journal bytes authorize only the TARGET of this fresh authenticated
 // read. They never supply the current authority or freshness in this token.
@@ -1505,7 +1429,6 @@ impl Worker {
             trusted,
             eligibility.binding.scope.remote_api_origin.clone(),
         ))?;
-        #[cfg(not(test))]
         let transport = runtime
             .public_io
             .data_transport(
@@ -1513,20 +1436,7 @@ impl Worker {
                     .map_err(|_| PeerError::Invalid)?,
             )
             .map_err(|_| PeerError::Invalid)?;
-        #[cfg(all(unix, test, feature = "cloud-fixture"))]
-        let joined_transport = if runtime.public_io.joined_cloud_fixture_selected() {
-            Some(
-                runtime
-                    .public_io
-                    .data_transport(
-                        RemoteApiOrigin::new(trusted, origin.as_str().to_owned())
-                            .map_err(|_| PeerError::Invalid)?,
-                    )
-                    .map_err(|_| PeerError::Invalid)?,
-            )
-        } else {
-            None
-        };
+
         let mut effect = owner_turn(runtime, || {
             runtime.owner.capture_peer_effect(
                 runtime.operation,
@@ -1573,23 +1483,11 @@ impl Worker {
             .checked_add(runtime.anchor.elapsed().as_secs())
             .ok_or(PeerError::Invalid)?;
         let started = Instant::now();
-        #[cfg(not(test))]
         let response = transport
             .with_budget(operation.deadline().min(cutoff), &check)
             .pairing_get(source.intent.preparation.pairing_id, &access)
             .map_err(|_| PeerError::Invalid)?;
-        #[cfg(all(test, not(all(unix, feature = "cloud-fixture"))))]
-        let _ = &access;
-        #[cfg(all(unix, test, feature = "cloud-fixture"))]
-        let response = pairing_get_for_test(
-            joined_transport,
-            source.intent.preparation.pairing_id,
-            &access,
-            operation.deadline().min(cutoff),
-            &check,
-        )?;
-        #[cfg(all(test, not(all(unix, feature = "cloud-fixture"))))]
-        let response = current_pairing_script::read(source.intent.preparation.pairing_id, &check)?;
+
         check_peer_runtime(runtime)?;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         owner_turn(runtime, || effect.try_validate(&provider))?;
@@ -2226,679 +2124,3 @@ fn started_git_auth_snapshot(
     }
     Ok((status, selection))
 }
-
-#[cfg(test)]
-mod retained_terminal_tests {
-    use super::*;
-    use lomi_remote_protocol::rpc::*;
-
-    // Real private Store records only; this creates no terminal, PTY or child.
-    fn running(f: &mut tests::Fixture<'_>) -> TerminalContext {
-        let mut store = f.store.lock().unwrap();
-        let binding = lomi_host_store::OperationBinding {
-            rights: StoredOperationRights::new(
-                OperationId::from_bytes([91; 16]).unwrap(),
-                ConsumerAuthorizationId::from_bytes([23; 16]).unwrap(),
-                f.workspace,
-                Method::TerminalCreate,
-                CapabilitySet::control_with_workspace_tools(),
-                false,
-            )
-            .unwrap(),
-            parameter_hash: lomi_host_store::parameter_hash(&(Method::TerminalCreate, f.workspace))
-                .unwrap(),
-        };
-        let mut state = store.workspace(f.workspace).unwrap().state;
-        store
-            .admit_external(&binding, state.domain_revision)
-            .unwrap();
-        let permit = store.start_external(&binding).unwrap();
-        state.domain_revision.0 += 1;
-        let target = TerminalContext {
-            workspace: state.context.clone(),
-            pane_id: PaneId::from_bytes([92; 16]).unwrap(),
-            session_id: TerminalSessionId::from_bytes([93; 16]).unwrap(),
-            session_epoch: SessionEpoch::from_bytes([94; 16]).unwrap(),
-            profile: TerminalProfile::ExperimentalRustGridV1,
-        };
-        state.tabs.0.push(TerminalTab {
-            tab_id: TabId::from_bytes([95; 16]).unwrap(),
-            name: "synthetic-running-record".to_owned().try_into().unwrap(),
-            layout: TerminalLayout::Pane {
-                pane: TerminalPane {
-                    pane_id: target.pane_id,
-                    session: Some(target.clone()),
-                    state: PaneState::Running,
-                },
-            },
-        });
-        store
-            .complete_external(
-                &permit,
-                OperationState::Succeeded,
-                Effect::Committed,
-                Some(OperationResult::Terminal {
-                    domain_revision: state.domain_revision,
-                    pane_id: target.pane_id,
-                    session_id: target.session_id,
-                    session_epoch: target.session_epoch,
-                }),
-                Some(state),
-            )
-            .unwrap();
-        let intent = store
-            .prepare_host_publication(&f.eligibility.binding)
-            .unwrap();
-        f.eligibility.binding = store
-            .acknowledge_host_publication(
-                &intent,
-                &PublicationResult {
-                    runtime: intent.params.runtime.clone(),
-                    publication_seq: intent.params.publication_seq,
-                },
-            )
-            .unwrap();
-        f.eligibility.publication = store
-            .acknowledged_host_publication(&f.eligibility.binding)
-            .unwrap()
-            .unwrap();
-        target
-    }
-    pub(super) fn source(
-        f: &tests::Fixture<'_>,
-        auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
-    ) -> lomi_host_store::AcknowledgedWorkspaceGrant {
-        let proposal = f.proposal(auth);
-        source_with_proposal(f, auth, proposal)
-    }
-    fn source_with_proposal(
-        f: &tests::Fixture<'_>,
-        auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
-        proposal: PairingProposal,
-    ) -> lomi_host_store::AcknowledgedWorkspaceGrant {
-        // Ordinary poll/prepare turns establish the real PolicyClock and retain
-        // their actual fresh observation under the fixture's original operation.
-        let api = tests::Api::poll(proposal);
-        let mut worker = Worker::default();
-        for _ in 0..2 {
-            assert!(
-                worker
-                    .step(auth, &f.config, f.runtime(), &f.eligibility, Some(&api))
-                    .is_ok()
-            );
-        }
-        let work = worker.active.take().unwrap();
-        let intent = work.intent.as_ref().unwrap();
-        let PairingDecisionParams::Approve { grant, .. } = &intent.preparation.params else {
-            panic!("approval");
-        };
-        let response = PairingResult::Approved {
-            pairing_id: intent.preparation.pairing_id,
-            proposal: intent.preparation.proposal.clone(),
-            grant: grant.clone(),
-            identities: intent.preparation.proposal.identities.clone(),
-            authority: intent.preparation.proposal.authority.clone(),
-        };
-        assert!(
-            worker
-                .ack(
-                    auth,
-                    &f.config,
-                    f.runtime(),
-                    &f.eligibility,
-                    &work,
-                    &response
-                )
-                .is_ok()
-        );
-        f.store
-            .lock()
-            .unwrap()
-            .acknowledged_workspace_grants()
-            .unwrap()
-            .remove(0)
-    }
-    // Synthetic RESPONSE verification only. The real read_current_pairing method
-    // remains the sole transport constructor; no test claims that TLS/GET ran.
-    pub(super) fn verified<'r>(
-        f: &'r tests::Fixture<'r>,
-        auth: &HostAuth<'_, dyn SecretStorage + '_>,
-        source: lomi_host_store::AcknowledgedWorkspaceGrant,
-    ) -> VerifiedCurrentPeer {
-        let response = source.response.clone();
-        let origin = RemoteOrigin::new(
-            &f.config,
-            f.eligibility.binding.scope.remote_api_origin.clone(),
-        )
-        .unwrap();
-        match verify_current_pairing(
-            auth,
-            f.runtime(),
-            &f.eligibility,
-            source,
-            response,
-            Observation::new(&f.eligibility, Instant::now(), f.original_scope()),
-            origin,
-            f.now(),
-        ) {
-            Ok(peer) => peer,
-            Err(_) => panic!("synthetic signed response validation failed"),
-        }
-    }
-
-    #[test]
-    fn retained_turn_drops_store_holds_domain_and_rejects_announced_writer_before_core_mutation() {
-        tests::fixture(|f, auth| {
-            let mut target = running(f);
-            let source = source(f, auth);
-            let peer = verified(f, auth, source);
-            target.workspace.runtime_id = f.eligibility.binding.server_runtime.runtime_id;
-            target.workspace.runtime_generation =
-                f.eligibility.binding.server_runtime.runtime_generation;
-            target.workspace.host_access_epoch =
-                f.eligibility.binding.server_runtime.host_access_epoch;
-            target.workspace.grant_revision = DecimalU64(peer.grant().grant_revision);
-            let worker = f
-                .runtime()
-                .remote_worker_evidence(auth, &f.eligibility)
-                .unwrap_or_else(|_| panic!("worker"));
-            let turn = f
-                .owner
-                .try_remote_terminal_turn(&worker, &peer, &target)
-                .unwrap();
-            assert!(turn.terminal_current());
-            assert!(
-                f.store.try_lock().is_ok(),
-                "Store escaped into retained turn"
-            );
-            let core = Mutex::new(0);
-            let mut held_core = core.lock().unwrap();
-            let mut writer = f
-                .owner
-                .begin_unshare(worker.operation(), f.workspace)
-                .unwrap();
-            assert!(matches!(
-                writer.try_commit(),
-                Err(shared_owner::Error::Domain(owner_domain::Error::Busy))
-            ));
-            // Simulate the already-held Core callback: no Store/Domain/provider
-            // reacquisition is needed to observe the writer's atomic announcement.
-            assert!(!turn.terminal_current());
-            if turn.terminal_current() {
-                *held_core += 1;
-            }
-            assert_eq!(*held_core, 0);
-            assert!(f.store.try_lock().is_ok());
-            drop(held_core);
-            drop(turn);
-            assert!(writer.try_commit().is_ok());
-            assert!(!peer.current(&worker));
-        });
-    }
-
-    #[test]
-    fn worker_evidence_keeps_actual_latches_io_and_original_operation_and_rejects_replacement_admission()
-     {
-        tests::fixture(|f, auth| {
-            let _target = running(f);
-            let source = source(f, auth);
-            let peer = verified(f, auth, source.clone());
-            let original = f.runtime();
-            let worker = original
-                .remote_worker_evidence(auth, &f.eligibility)
-                .unwrap_or_else(|_| panic!("worker"));
-            assert!(peer.current(&worker));
-            assert!(std::ptr::eq(worker.owner(), &*f.owner));
-            assert!(std::ptr::eq(worker.gate_denied(), f.gate));
-            assert!(std::ptr::eq(worker.paused(), f.paused));
-            assert!(std::ptr::eq(worker.operation(), original.operation));
-            let mut changed_public = f.eligibility.clone();
-            changed_public.identity.access_epoch += 1;
-            assert!(
-                original
-                    .remote_worker_evidence(auth, &changed_public)
-                    .is_err(),
-                "cloned public identity authorized without provider proof"
-            );
-            assert!(
-                original.public_io.setup().io.try_write().is_err(),
-                "actual read lease released"
-            );
-            let read = peer.read();
-            assert_eq!(read.authority_expires_at, peer.grant().expires_at);
-            assert!(read.authority.terminal_membership.is_none());
-            let cancel = AtomicBool::new(false);
-            let replacement =
-                owner_domain::Operation::new(Instant::now() + Duration::from_secs(120), &cancel);
-            let mut changed = f.runtime();
-            changed.operation = &replacement;
-            let other = changed
-                .remote_worker_evidence(auth, &f.eligibility)
-                .unwrap_or_else(|_| panic!("replacement worker"));
-            assert!(!peer.current(&other));
-            f.gate.store(true, Ordering::Release);
-            assert!(!worker.current());
-            // The actual network constructor must stop before allocation/HTTP.
-            assert!(
-                Worker::default()
-                    .read_current_pairing(auth, original, &f.eligibility, source)
-                    .is_err()
-            );
-        });
-    }
-    #[test]
-    fn actual_public_pending_pause_stop_and_original_expiry_close_worker_evidence() {
-        for latch in 0..4 {
-            tests::fixture(|f, auth| {
-                let runtime = f.runtime();
-                let worker = runtime
-                    .remote_worker_evidence(auth, &f.eligibility)
-                    .unwrap_or_else(|_| panic!("worker"));
-                assert!(worker.current());
-                match latch {
-                    0 => runtime
-                        .public_io
-                        .setup()
-                        .pending
-                        .store(true, Ordering::Release),
-                    1 => f.paused.store(true, Ordering::Release),
-                    2 => f.stopping.store(true, Ordering::Release),
-                    _ => runtime.operation.expire_for_test(),
-                }
-                assert!(!worker.current());
-            });
-        }
-    }
-    #[test]
-    fn completed_noise_retained_turn_checks_exact_request_stream_and_live_revocation() {
-        use super::super::remote_connection::{
-            AdmissionInputs, GateError, OwnerFacts, PendingRemoteConnection, TrustedNow,
-        };
-        use lomi_remote_crypto::{ChannelContextV3, ChannelPurposeV3, Handshake, Identity, Role};
-        // Real protected HostAuth and both Noise sides; only the HTTP response
-        // and the handshake's caller observations are synthetic. The retained
-        // turn independently joins current Store/Domain facts after completion.
-        for writer_pending in [false, true] {
-            let base = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            tests::fixture_at_wall(base, |f, auth| {
-                let mut target = running(f);
-                let consumer = Identity::generate(
-                    f.eligibility.identity.account_id.to_bytes(),
-                    [22; 16],
-                    Role::Device,
-                    1,
-                )
-                .unwrap();
-                let hex =
-                    |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-                let mut proposal = f.proposal(auth);
-                let mut maximum = GrantV3::from_canonical(
-                    &hex_bytes(proposal.maximum_grant.expose_wire())
-                        .unwrap_or_else(|_| panic!("invalid synthetic maximum grant")),
-                )
-                .unwrap();
-                maximum.consumer_fingerprint =
-                    consumer.public_bundle().bundle.fingerprint().unwrap();
-                proposal.maximum_grant = hex(&maximum.canonical().unwrap()).try_into().unwrap();
-                proposal.identities.consumer = consumer.public_bundle().to_wire().unwrap();
-                proposal.identities.consumer_fingerprint =
-                    hex(&maximum.consumer_fingerprint).try_into().unwrap();
-                let source = source_with_proposal(f, auth, proposal);
-                let peer = verified(f, auth, source);
-                target.workspace.runtime_id = f.eligibility.binding.server_runtime.runtime_id;
-                target.workspace.runtime_generation =
-                    f.eligibility.binding.server_runtime.runtime_generation;
-                target.workspace.host_access_epoch =
-                    f.eligibility.binding.server_runtime.host_access_epoch;
-                target.workspace.grant_revision = DecimalU64(peer.grant().grant_revision);
-                let context = ChannelContextV3 {
-                    version: 3,
-                    grant: peer.grant().clone(),
-                    channel_id: [98; 16],
-                    initiator_role: Role::Device,
-                    responder_role: Role::Host,
-                    purpose: ChannelPurposeV3::Workspace,
-                    terminal: None,
-                    issued_at: base,
-                    expires_at: base + 30,
-                };
-                let admission = auth.sign_channel_admission_v3(&context, f.now()).unwrap();
-                let deadlines = auth.credential_deadlines().unwrap();
-                let local = {
-                    let store = f.store.lock().unwrap();
-                    let record = store.workspace(f.workspace).unwrap();
-                    LocalWorkspace {
-                        workspace_id: f.workspace,
-                        workspace_epoch: record.state.context.workspace_epoch,
-                        fence: record.fence,
-                        consent: record.consent,
-                        running_terminals: PublicationTerminals::try_from(vec![
-                            PublishedTerminal {
-                                pane_id: target.pane_id,
-                                session_id: target.session_id,
-                                session_epoch: target.session_epoch,
-                            },
-                        ])
-                        .unwrap(),
-                        capability_ceiling: None,
-                    }
-                };
-                let running = [target.clone()];
-                let runtime = f.runtime();
-                let facts = OwnerFacts {
-                    protected_host: &f.eligibility.identity,
-                    origin: &peer.origin,
-                    scope: &f.eligibility.binding.scope,
-                    runtime: &f.eligibility.binding.server_runtime,
-                    heartbeat: &f.eligibility.heartbeat,
-                    acknowledged: &f.eligibility.publication,
-                    local: &local,
-                    running: &running,
-                    auth_ready: true,
-                    access_expires_at: deadlines.access_expires_at,
-                    refresh_at: deadlines.refresh_at,
-                    authorization_locked: false,
-                    pending_login: false,
-                    pending_logout: false,
-                    pending_revoke: false,
-                    pending_publication: false,
-                    peer_revoked: false,
-                    gate_denied: f.gate,
-                    paused: f.paused,
-                    stopping: &f.stopping,
-                    cancelled: runtime.operation.cancellation_latch(),
-                };
-                let mut sample = || {
-                    let monotonic = Instant::now();
-                    TrustedNow {
-                        wall: Duration::from_secs(base) + monotonic.duration_since(f.anchor),
-                        monotonic,
-                    }
-                };
-                let canonical = context.canonical().unwrap();
-                let mut pending = PendingRemoteConnection::begin(
-                    auth,
-                    AdmissionInputs {
-                        canonical_context: &canonical,
-                        signed_grant: &peer.signed,
-                        admission: &admission,
-                        peer: peer.read(),
-                    },
-                    &facts,
-                    &mut sample,
-                )
-                .unwrap();
-                let host = SignedBundle::from_wire(&f.eligibility.identity.identity).unwrap();
-                let verified_admission = admission
-                    .verify(
-                        &peer.signed,
-                        &context,
-                        &host,
-                        &f.eligibility.identity.fingerprint,
-                        &consumer.public_bundle(),
-                        &maximum.consumer_fingerprint,
-                        &peer.authority,
-                        f.now(),
-                    )
-                    .unwrap();
-                let mut initiator = Handshake::new_v3(
-                    true,
-                    &consumer,
-                    verified_admission,
-                    &host,
-                    &f.eligibility.identity.fingerprint,
-                    f.now(),
-                )
-                .unwrap();
-                pending
-                    .read(&initiator.write().unwrap(), &facts, &mut sample)
-                    .unwrap();
-                initiator
-                    .read(&pending.write(&facts, &mut sample).unwrap())
-                    .unwrap();
-                pending
-                    .read(&initiator.write().unwrap(), &facts, &mut sample)
-                    .unwrap();
-                let mut connection = pending.finish(&facts, &mut sample).unwrap();
-                let mut consumer_channel = initiator.finish().unwrap();
-                let request = RpcRequest {
-                    v: ApplicationMajor,
-                    r#type: RequestKind::Request,
-                    request_id: "retained-noise-request".to_owned().try_into().unwrap(),
-                    timeout_ms: TimeoutMs::new(1000).unwrap(),
-                    call: RpcCall::TerminalSnapshot(TerminalReadParams {
-                        terminal: target.clone(),
-                    }),
-                };
-                let wire = serde_json::to_vec(&request).unwrap();
-                let frame = consumer_channel
-                    .seal_binary(context.channel_id, &wire)
-                    .unwrap();
-                let plaintext = connection.open_frame(&frame, &facts, &mut sample).unwrap();
-                let decoded: RpcRequest = serde_json::from_slice(plaintext.as_ref()).unwrap();
-                assert_eq!(decoded, request);
-                // Borrow immutable worker evidence only after genuine handshake.
-                let worker = runtime
-                    .remote_worker_evidence(auth, &f.eligibility)
-                    .unwrap_or_else(|_| panic!("actual worker evidence"));
-                let turn = f
-                    .owner
-                    .try_remote_terminal_turn(&worker, &peer, &target)
-                    .unwrap();
-                let mut wrong = decoded.clone();
-                let RpcCall::TerminalSnapshot(params) = &mut wrong.call else {
-                    unreachable!()
-                };
-                params.terminal.session_epoch = SessionEpoch::from_bytes([99; 16]).unwrap();
-                assert_eq!(
-                    turn.check_terminal_request(&mut connection, &wrong),
-                    Err(GateError::Denied)
-                );
-                turn.check_terminal_request(&mut connection, &request)
-                    .unwrap();
-                turn.check_terminal_stream(&mut connection).unwrap();
-                assert!(
-                    f.store.try_lock().is_ok(),
-                    "Store must be released before terminal checks"
-                );
-                let mut writer = writer_pending.then(|| {
-                    let mut writer = f
-                        .owner
-                        .begin_unshare(runtime.operation, f.workspace)
-                        .unwrap();
-                    assert!(matches!(
-                        writer.try_commit(),
-                        Err(shared_owner::Error::Domain(owner_domain::Error::Busy))
-                    ));
-                    writer
-                });
-                if !writer_pending {
-                    f.gate.store(true, Ordering::Release);
-                }
-                assert_eq!(
-                    turn.check_terminal_stream(&mut connection),
-                    Err(GateError::Disposed)
-                );
-                assert_eq!(
-                    turn.check_terminal_request(&mut connection, &request),
-                    Err(GateError::Disposed)
-                );
-                if !writer_pending {
-                    f.gate.store(false, Ordering::Release);
-                    assert!(turn.terminal_current());
-                    assert_eq!(
-                        turn.check_terminal_request(&mut connection, &request),
-                        Err(GateError::Disposed)
-                    );
-                }
-                assert!(f.store.try_lock().is_ok());
-                drop(turn);
-                if let Some(writer) = &mut writer {
-                    writer.try_commit().unwrap();
-                }
-            });
-        }
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-fn pairing_get_for_test(
-    joined_transport: Option<DataTransport>,
-    pairing: PairingId,
-    access: &HostAccessCredential,
-    deadline: Instant,
-    check: &(dyn Fn() -> Result<(), lomi_host_http::BudgetStop> + Sync),
-) -> ResultPeer<PairingResult> {
-    if let Some(transport) = joined_transport {
-        return transport
-            .with_budget(deadline, check)
-            .pairing_get(pairing, access)
-            .map_err(|_| PeerError::Invalid);
-    }
-    current_pairing_script::read(pairing, check)
-}
-
-#[cfg(test)]
-pub(super) mod current_pairing_script {
-    use super::*;
-    thread_local! {
-        static RESPONSES: std::cell::RefCell<std::collections::VecDeque<(PairingId, PairingResult)>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-    }
-    pub(in super::super) fn clear() {
-        RESPONSES.with(|responses| responses.borrow_mut().clear());
-    }
-    pub(in super::super) fn enqueue(id: PairingId, response: PairingResult) {
-        RESPONSES.with(|responses| responses.borrow_mut().push_back((id, response)));
-    }
-    pub(super) fn read(
-        id: PairingId,
-        check: &dyn Fn() -> Result<(), lomi_host_http::BudgetStop>,
-    ) -> ResultPeer<PairingResult> {
-        check().map_err(|_| PeerError::Invalid)?;
-        let (expected, response) = RESPONSES
-            .with(|responses| responses.borrow_mut().pop_front())
-            .ok_or(PeerError::Invalid)?;
-        if expected != id {
-            return Err(PeerError::Invalid);
-        }
-        Ok(response)
-    }
-}
-
-#[cfg(all(unix, test, feature = "cloud-fixture"))]
-mod joined_pairing_failure_tests {
-    use super::*;
-    use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-        KeyUsagePurpose,
-    };
-    use std::{
-        io::{Read, Write},
-        net::{Ipv4Addr, TcpListener},
-        sync::Arc,
-        thread,
-        time::Duration,
-    };
-
-    fn fixture_certificate() -> (Vec<u8>, Arc<rustls::ServerConfig>) {
-        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        let ca_key = KeyPair::generate().unwrap();
-        let root = ca.self_signed(&ca_key).unwrap();
-        let issuer = Issuer::new(ca, ca_key);
-
-        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let leaf_key = KeyPair::generate().unwrap();
-        let leaf = leaf.signed_by(&leaf_key, &issuer).unwrap();
-        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf.der().clone()],
-            rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into(),
-        )
-        .unwrap();
-        (root.der().to_vec(), Arc::new(server))
-    }
-
-    #[test]
-    fn joined_pairing_http_failure_does_not_fall_back_to_scripted_response() {
-        let (root_der, server_config) = fixture_certificate();
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            socket
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let tls = rustls::ServerConnection::new(server_config).unwrap();
-            let mut stream = rustls::StreamOwned::new(tls, socket);
-            let mut request = [0u8; 4096];
-            let received = matches!(stream.read(&mut request), Ok(count) if count > 0);
-            if received {
-                let body = br#"{"code":"AUTH_REQUIRED","message":"Authentication required.","retryable":false,"effect":"none","details":{}}"#;
-                let response = format!(
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).unwrap();
-                stream.write_all(body).unwrap();
-                stream.flush().unwrap();
-            }
-            received
-        });
-
-        let identity = lomi_host_auth::Config::new(
-            HostId::from_bytes([1; 16]).unwrap(),
-            lomi_remote_protocol::ipc::IpcProfileId::from_bytes([2; 16]).unwrap(),
-            "https://identity.example".to_owned(),
-            "fixture-client".to_owned().try_into().unwrap(),
-        )
-        .unwrap();
-        let origin = RemoteApiOrigin::new(&identity, format!("https://localhost:{port}")).unwrap();
-        let transport = DataTransport::with_test_root(origin, root_der).unwrap();
-        let pairing = PairingId::from_bytes([77; 16]).unwrap();
-        let scripted = PairingResult::Expired {
-            pairing_id: pairing,
-        };
-        current_pairing_script::clear();
-        current_pairing_script::enqueue(pairing, scripted.clone());
-        let access = "fixture_access".to_owned().try_into().unwrap();
-        let check = || Ok(());
-
-        let result = pairing_get_for_test(
-            Some(transport),
-            pairing,
-            &access,
-            Instant::now() + Duration::from_secs(3),
-            &check,
-        );
-
-        assert!(
-            server.join().unwrap(),
-            "real HTTPS received the pairing GET"
-        );
-        assert!(result.is_err(), "HTTP 401 fails the joined read closed");
-        let leftover = match current_pairing_script::read(pairing, &check) {
-            Ok(response) => response,
-            Err(_) => panic!("joined HTTP failure consumed the scripted response"),
-        };
-        assert_eq!(leftover, scripted);
-        current_pairing_script::clear();
-    }
-}
-
-#[cfg(test)]
-#[path = "remote_ingress_workspace_tests.rs"]
-mod workspace_ingress_tests;

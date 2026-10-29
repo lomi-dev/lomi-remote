@@ -7,7 +7,7 @@
 pub mod native_evidence_runtime;
 #[cfg(unix)]
 pub mod process;
-#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[cfg(target_os = "linux")]
 pub mod service_linux;
 #[cfg(target_os = "macos")]
 pub mod service_macos;
@@ -15,7 +15,7 @@ pub mod service_macos;
 pub mod unix;
 #[cfg(windows)]
 pub mod windows;
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 mod windows_login_start_policy;
 #[cfg(windows)]
 pub mod windows_password;

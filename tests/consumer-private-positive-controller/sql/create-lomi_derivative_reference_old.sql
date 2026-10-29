@@ -1,1 +1,0 @@
-CREATE DATABASE lomi_derivative_reference_old TEMPLATE template0;

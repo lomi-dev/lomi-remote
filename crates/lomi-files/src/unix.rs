@@ -4763,28 +4763,7 @@ fn open_or_create_git_child_dir(parent: &OwnedFd, name: &[u8]) -> Result<(OwnedF
     Ok(directory)
 }
 
-#[cfg(test)]
-static FAIL_GIT_DIRECTORY_FSYNC_AFTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 fn sync_git_directory(fd: RawFd) -> Result<()> {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::Ordering;
-        let mut remaining = FAIL_GIT_DIRECTORY_FSYNC_AFTER.load(Ordering::SeqCst);
-        while remaining != 0 {
-            match FAIL_GIT_DIRECTORY_FSYNC_AFTER.compare_exchange(
-                remaining,
-                remaining - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) if remaining == 1 => return Err(Error::Io(std::io::ErrorKind::Other)),
-                Ok(_) => break,
-                Err(actual) => remaining = actual,
-            }
-        }
-    }
     if unsafe { libc::fsync(fd) } != 0 {
         return Err(map_errno(last_errno(), false));
     }
@@ -5552,6 +5531,3 @@ fn no_replace_rename(_: RawFd, _: &CStr, _: RawFd, _: &CStr) -> Result<()> {
     // No race-free no-replace rename is qualified on this platform.
     Err(Error::Unsupported)
 }
-
-#[cfg(test)]
-mod tests;

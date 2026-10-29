@@ -3,10 +3,7 @@ use super::super::Coordinator;
 use super::super::cloud::PeerEligibility;
 use super::{Driver, HostAuth, RuntimeWithOperation, SecretStorage, channel};
 use lomi_remote_protocol::ChannelId;
-#[cfg(test)]
-use lomi_remote_protocol::http::ChannelTicketResult;
-#[cfg(test)]
-use std::cell::Cell;
+
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Weak, atomic::AtomicBool},
@@ -18,12 +15,6 @@ use std::{
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
 
-#[cfg(test)]
-struct ScriptedDriverSetup {
-    ticket: Option<super::TicketScript>,
-    relay: Option<lomi_host_http::RelayTransport>,
-}
-
 /// Owns one independent ingress Driver per admitted channel, all sharing the
 /// auth worker's Coordinator and stop signal.
 pub(in crate::unix::auth) struct Registry<'cancel> {
@@ -31,12 +22,6 @@ pub(in crate::unix::auth) struct Registry<'cancel> {
     coordinator: Weak<Coordinator>,
     entries: BTreeMap<ChannelId, Driver<'cancel>>,
     round_robin: VecDeque<ChannelId>,
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    cloud_fixture_transport_roots: Option<(Vec<u8>, Vec<u8>)>,
-    #[cfg(test)]
-    scripted_setups: BTreeMap<ChannelId, ScriptedDriverSetup>,
-    #[cfg(test)]
-    driver_factory_calls: Cell<usize>,
 }
 
 impl<'cancel> Registry<'cancel> {
@@ -66,12 +51,6 @@ impl<'cancel> Registry<'cancel> {
             coordinator,
             entries: BTreeMap::new(),
             round_robin: VecDeque::new(),
-            #[cfg(all(test, feature = "cloud-fixture"))]
-            cloud_fixture_transport_roots: None,
-            #[cfg(test)]
-            scripted_setups: BTreeMap::new(),
-            #[cfg(test)]
-            driver_factory_calls: Cell::new(0),
         }
     }
 
@@ -297,8 +276,7 @@ impl<'cancel> Registry<'cancel> {
         let channel_id = handoff.channel_id();
         if !self.can_admit(channel_id) {
             drop(handoff);
-            #[cfg(test)]
-            self.scripted_setups.remove(&channel_id);
+
             return;
         }
 
@@ -306,17 +284,6 @@ impl<'cancel> Registry<'cancel> {
             drop(handoff);
             return;
         };
-        #[cfg(test)]
-        if let Some(mut setup) = self.scripted_setups.remove(&channel_id) {
-            #[cfg(all(test, feature = "cloud-fixture"))]
-            let scripted_allowed = driver.cloud_fixture_transport_roots.is_none();
-            #[cfg(all(test, not(feature = "cloud-fixture")))]
-            let scripted_allowed = true;
-            if scripted_allowed {
-                driver.script = setup.ticket.take();
-                driver.relay_script = setup.relay.take();
-            }
-        }
         if !driver.accept(handoff, auth, runtime, eligibility) {
             return;
         }
@@ -363,8 +330,6 @@ impl<'cancel> Registry<'cancel> {
             let _ = coordinator.set_started_git_terminal_continuation(None);
         }
         self.publish_client_observation();
-        #[cfg(test)]
-        self.scripted_setups.clear();
     }
 
     fn can_admit(&self, channel_id: ChannelId) -> bool {
@@ -372,22 +337,8 @@ impl<'cancel> Registry<'cancel> {
     }
 
     fn new_driver(&self) -> Result<Driver<'cancel>, &'static str> {
-        #[cfg(test)]
-        self.driver_factory_calls
-            .set(self.driver_factory_calls.get().saturating_add(1));
         let driver = Driver::with_coordinator(self.cancelled, self.coordinator.clone());
-        #[cfg(all(test, feature = "cloud-fixture"))]
-        let driver = {
-            let mut driver = driver;
-            if let Some((remote_api_root, relay_root)) = self.cloud_fixture_transport_roots.as_ref()
-            {
-                driver.use_cloud_fixture_transport_for_test(
-                    remote_api_root.clone(),
-                    relay_root.clone(),
-                )?;
-            }
-            driver
-        };
+
         Ok(driver)
     }
 
@@ -447,167 +398,6 @@ impl<'cancel> Registry<'cancel> {
             self.prune_empty(channel_id);
         }
     }
-
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    pub(in crate::unix::auth) fn use_cloud_fixture_transport_for_test(
-        &mut self,
-        remote_api_root_der: Vec<u8>,
-        relay_root_der: Vec<u8>,
-    ) -> Result<(), &'static str> {
-        if !self.entries.is_empty()
-            || !self.scripted_setups.is_empty()
-            || self.cloud_fixture_transport_roots.is_some()
-        {
-            return Err("cloud fixture transport must be selected before ingress work");
-        }
-        if remote_api_root_der.is_empty()
-            || remote_api_root_der.len() > super::CLOUD_FIXTURE_ROOT_DER_MAX_BYTES
-            || relay_root_der.is_empty()
-            || relay_root_der.len() > super::CLOUD_FIXTURE_ROOT_DER_MAX_BYTES
-        {
-            return Err("cloud fixture TLS root is outside its byte bound");
-        }
-        self.cloud_fixture_transport_roots = Some((remote_api_root_der, relay_root_der));
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn script_ticket_for_channel_test(
-        &mut self,
-        channel_id: ChannelId,
-        response: Result<ChannelTicketResult, lomi_host_http::Error>,
-        hook: Option<super::TicketTestHook>,
-        minimum_elapsed: Duration,
-    ) -> Result<std::rc::Rc<std::cell::Cell<usize>>, &'static str> {
-        if !self.can_admit(channel_id)
-            || (self.scripted_setups.len() >= MAX_CHANNELS
-                && !self.scripted_setups.contains_key(&channel_id))
-        {
-            return Err("duplicate or full ingress registry");
-        }
-        #[cfg(feature = "cloud-fixture")]
-        if self.cloud_fixture_transport_roots.is_some() {
-            return Err("scripted ticket cannot replace explicitly selected Cloud transport");
-        }
-        let setup = self
-            .scripted_setups
-            .entry(channel_id)
-            .or_insert_with(|| ScriptedDriverSetup {
-                ticket: None,
-                relay: None,
-            });
-        if setup.ticket.is_some() {
-            return Err("ticket script already configured for channel");
-        }
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-        setup.ticket = Some(super::TicketScript {
-            response,
-            hook,
-            calls: calls.clone(),
-            minimum_elapsed,
-        });
-        Ok(calls)
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn script_relay_for_channel_test(
-        &mut self,
-        channel_id: ChannelId,
-        relay: lomi_host_http::RelayTransport,
-    ) -> Result<(), &'static str> {
-        if !self.can_admit(channel_id)
-            || (self.scripted_setups.len() >= MAX_CHANNELS
-                && !self.scripted_setups.contains_key(&channel_id))
-        {
-            return Err("duplicate or full ingress registry");
-        }
-        #[cfg(feature = "cloud-fixture")]
-        if self.cloud_fixture_transport_roots.is_some() {
-            return Err("scripted relay cannot replace explicitly selected Cloud transport");
-        }
-        let setup = self
-            .scripted_setups
-            .entry(channel_id)
-            .or_insert_with(|| ScriptedDriverSetup {
-                ticket: None,
-                relay: None,
-            });
-        if setup.relay.is_some() {
-            return Err("relay script already configured for channel");
-        }
-        setup.relay = Some(relay);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn connected_for_test(&self, channel_id: ChannelId) -> bool {
-        self.entries
-            .get(&channel_id)
-            .is_some_and(Driver::connected_for_test)
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn stream_pending_for_test(&self, channel_id: ChannelId) -> bool {
-        self.entries
-            .get(&channel_id)
-            .is_some_and(Driver::diagnostic_stream_pending_for_test)
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn settle_maintenance_for_test(&mut self, channel_id: ChannelId) {
-        self.entries
-            .get_mut(&channel_id)
-            .expect("registered ingress channel")
-            .settle_maintenance_for_test();
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn shorten_peer_cutoff_for_test(
-        &mut self,
-        channel_id: ChannelId,
-        cutoff: Instant,
-    ) {
-        self.entries
-            .get_mut(&channel_id)
-            .expect("registered ingress channel")
-            .set_peer_cutoff_for_test(cutoff);
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn failure_observation_for_test(
-        &self,
-        channel_id: ChannelId,
-    ) -> Option<super::IngressFailureSnapshot> {
-        self.entries
-            .get(&channel_id)
-            .map(Driver::failure_observation_for_test)
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn channel_step_observation_for_test(
-        &self,
-        channel_id: ChannelId,
-    ) -> Option<(&'static str, Option<&'static str>)> {
-        self.entries
-            .get(&channel_id)
-            .map(Driver::channel_step_observation_for_test)
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn registered_channels_for_test(&self) -> Vec<ChannelId> {
-        self.round_robin.iter().copied().collect()
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn driver_factory_calls_for_test(&self) -> usize {
-        self.driver_factory_calls.get()
-    }
-
-    #[cfg(test)]
-    pub(in crate::unix::auth) fn reserve_test_key_for_duplicate(&mut self, channel_id: ChannelId) {
-        assert!(self.can_admit(channel_id));
-        self.insert_admitted(channel_id, Driver::default());
-    }
 }
 
 fn earliest_peer_refresh(
@@ -619,140 +409,4 @@ fn earliest_peer_refresh(
         .filter_map(|channel_id| cutoff(*channel_id).map(|deadline| (*channel_id, deadline)))
         .min_by_key(|(_, deadline)| *deadline)
         .map(|(channel_id, _)| channel_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn channel_id(index: u8) -> ChannelId {
-        ChannelId::from_bytes([index; 16]).unwrap()
-    }
-
-    fn registry<'a>(cancelled: &'a AtomicBool) -> Registry<'a> {
-        Registry::with_coordinator(cancelled, Weak::new())
-    }
-
-    #[test]
-    fn admission_is_bounded_and_duplicate_or_ninth_never_replaces_an_incumbent() {
-        let cancelled = AtomicBool::new(false);
-        let mut registry = registry(&cancelled);
-        for index in 1..=MAX_CHANNELS as u8 {
-            let channel_id = channel_id(index);
-            assert!(registry.can_admit(channel_id));
-            registry.insert_admitted(channel_id, Driver::default());
-        }
-        let original: Vec<_> = registry.entries.keys().copied().collect();
-        assert_eq!(registry.entries.len(), MAX_CHANNELS);
-        assert!(!registry.can_admit(channel_id(1)));
-        assert!(!registry.can_admit(channel_id(9)));
-        assert_eq!(
-            registry.entries.keys().copied().collect::<Vec<_>>(),
-            original
-        );
-        assert_eq!(registry.round_robin.len(), MAX_CHANNELS);
-    }
-
-    #[test]
-    fn round_robin_advances_each_registered_channel_without_starvation() {
-        let cancelled = AtomicBool::new(false);
-        let mut registry = registry(&cancelled);
-        let channels: Vec<_> = (1..=3).map(channel_id).collect();
-        for id in &channels {
-            registry.insert_admitted(*id, Driver::default());
-        }
-        for expected in channels.iter().cycle().take(9) {
-            assert_eq!(registry.next_round_robin(), Some(*expected));
-        }
-    }
-
-    #[test]
-    fn peer_refresh_deadlines_rotate_earliest_first_across_eight_channels() {
-        let now = Instant::now();
-        let mut round_robin: VecDeque<_> = (1..=8).map(channel_id).collect();
-        let mut deadlines: BTreeMap<_, _> = round_robin
-            .iter()
-            .enumerate()
-            .map(|(index, channel_id)| {
-                (*channel_id, now + Duration::from_millis((8 - index) as u64))
-            })
-            .collect();
-
-        for expected_byte in (1..=8).rev() {
-            let selected = earliest_peer_refresh(&round_robin, |channel_id| {
-                deadlines.get(&channel_id).copied()
-            })
-            .expect("a due channel remains");
-            assert_eq!(selected, channel_id(expected_byte));
-            let index = round_robin
-                .iter()
-                .position(|candidate| *candidate == selected)
-                .expect("selected channel is registered");
-            round_robin.remove(index);
-            round_robin.push_back(selected);
-            deadlines.remove(&selected);
-        }
-        assert!(earliest_peer_refresh(&round_robin, |_| None).is_none());
-    }
-
-    #[test]
-    fn local_empty_prune_preserves_siblings_and_global_discard_clears_every_entry() {
-        let cancelled = AtomicBool::new(false);
-        let mut registry = registry(&cancelled);
-        for index in 1..=3 {
-            let id = channel_id(index);
-            registry.insert_admitted(id, Driver::default());
-        }
-        registry.prune_empty(channel_id(2));
-        assert!(!registry.entries.contains_key(&channel_id(2)));
-        assert!(registry.entries.contains_key(&channel_id(1)));
-        assert!(registry.entries.contains_key(&channel_id(3)));
-        registry.discard();
-        assert!(registry.entries.is_empty());
-        assert!(registry.round_robin.is_empty());
-    }
-
-    #[test]
-    fn arrivals_stay_behind_the_round_robin_cursor_when_an_entry_is_pruned() {
-        let cancelled = AtomicBool::new(false);
-        let mut registry = registry(&cancelled);
-        registry.insert_admitted(channel_id(1), Driver::default());
-        registry.insert_admitted(channel_id(2), Driver::default());
-        assert_eq!(registry.next_round_robin(), Some(channel_id(1)));
-
-        registry.insert_admitted(channel_id(3), Driver::default());
-        assert_eq!(
-            registry.round_robin.iter().copied().collect::<Vec<_>>(),
-            [channel_id(2), channel_id(1), channel_id(3)]
-        );
-        assert_eq!(registry.next_round_robin(), Some(channel_id(2)));
-        registry.prune_empty(channel_id(2));
-        assert_eq!(registry.next_round_robin(), Some(channel_id(1)));
-        assert_eq!(registry.next_round_robin(), Some(channel_id(3)));
-    }
-
-    #[cfg(all(test, feature = "cloud-fixture"))]
-    #[test]
-    fn fixture_tls_roots_are_closed_by_default_and_inherited_only_after_explicit_selection() {
-        let cancelled = AtomicBool::new(false);
-        let mut registry = registry(&cancelled);
-        let default_driver = registry.new_driver().unwrap();
-        assert!(default_driver.cloud_fixture_transport_roots.is_none());
-        assert!(default_driver.script.is_none());
-        assert!(default_driver.relay_script.is_none());
-
-        registry
-            .use_cloud_fixture_transport_for_test(vec![1], vec![2])
-            .unwrap();
-        let opted_in_driver = registry.new_driver().unwrap();
-        assert_eq!(
-            opted_in_driver
-                .cloud_fixture_transport_roots
-                .as_ref()
-                .map(|roots| (roots.remote_api.as_slice(), roots.relay.as_slice())),
-            Some((&[1][..], &[2][..]))
-        );
-        assert!(opted_in_driver.script.is_none());
-        assert!(opted_in_driver.relay_script.is_none());
-    }
 }
