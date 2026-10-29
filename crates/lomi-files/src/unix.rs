@@ -410,11 +410,11 @@ const NATIVE_XATTR_LIMIT: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
 #[link(name = "System")]
 unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
     fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
     fn acl_to_text(acl: *mut libc::c_void, length: *mut libc::ssize_t) -> *mut libc::c_char;
     fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
     fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, kind: libc::c_int) -> libc::c_int;
-    fn acl_delete_fd_np(fd: libc::c_int, kind: libc::c_int) -> libc::c_int;
     fn acl_free(value: *mut libc::c_void) -> libc::c_int;
 }
 
@@ -589,13 +589,23 @@ fn native_apply_file_security(
 #[cfg(target_os = "macos")]
 fn clear_git_new_file_acl(fd: RawFd) -> Result<()> {
     const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
-    if unsafe { acl_delete_fd_np(fd, ACL_TYPE_EXTENDED) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ENOENT) {
-            return Err(Error::Unsupported);
-        }
+    let acl = unsafe { acl_init(0) };
+    if acl.is_null() {
+        return Err(map_errno(last_errno(), false));
     }
-    Ok(())
+    let set_result = unsafe { acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) };
+    let set_error = (set_result != 0).then(last_errno);
+    let free_result = unsafe { acl_free(acl) };
+    if let Some(error) = set_error {
+        return Err(map_errno(error, false));
+    }
+    if free_result != 0 {
+        return Err(map_errno(last_errno(), false));
+    }
+    match native_acl(fd).map_err(git_native_security_error)? {
+        None => Ok(()),
+        Some(_) => Err(Error::Changed),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5530,4 +5540,35 @@ fn no_replace_rename(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> 
 fn no_replace_rename(_: RawFd, _: &CStr, _: RawFd, _: &CStr) -> Result<()> {
     // No race-free no-replace rename is qualified on this platform.
     Err(Error::Unsupported)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_acl_tests {
+    use super::*;
+    use std::fs::{self, OpenOptions};
+
+    struct TestFile(PathBuf);
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn clearing_an_absent_extended_acl_is_supported_and_verified() {
+        let path =
+            std::env::temp_dir().join(format!("lomi-native-acl-{}.tmp", uuid::Uuid::new_v4()));
+        let _cleanup = TestFile(path.clone());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+
+        assert_eq!(native_acl(file.as_raw_fd()).unwrap(), None);
+        clear_git_new_file_acl(file.as_raw_fd()).unwrap();
+        assert_eq!(native_acl(file.as_raw_fd()).unwrap(), None);
+    }
 }
