@@ -834,10 +834,18 @@ def main() -> None:
         if platform.startswith("macos-"):
             for binary in stage.iterdir():
                 if binary.is_file() and binary.name != "targets":
-                    run([
-                        "codesign", "--force", "--options", "runtime", "--timestamp",
-                        "--sign", args.macos_signing_identity, str(binary),
-                    ])
+                    original_mode = stat.S_IMODE(binary.stat().st_mode)
+                    # Script signatures use extended attributes, which require
+                    # owner write access even when Mach-O signing can replace
+                    # a read-only executable through its parent directory.
+                    os.chmod(binary, original_mode | stat.S_IWUSR)
+                    try:
+                        run([
+                            "codesign", "--force", "--options", "runtime", "--timestamp",
+                            "--sign", args.macos_signing_identity, str(binary),
+                        ])
+                    finally:
+                        os.chmod(binary, original_mode)
                     run(["codesign", "--verify", "--strict", str(binary)])
 
     target_path = stage / "targets" / target_name
