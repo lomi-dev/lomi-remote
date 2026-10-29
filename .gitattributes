@@ -1,3 +1,5 @@
 # Canonical source and generated provenance bind exact file bytes.
 # Preserve those bytes across Windows and Unix checkouts.
 * -text
+## Retain upstream license bytes, including their original line endings.
+crates/lomi-git/THIRD_PARTY_NOTICES.md -text whitespace=-blank-at-eol
