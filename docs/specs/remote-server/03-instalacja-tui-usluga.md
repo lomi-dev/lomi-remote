@@ -7,14 +7,14 @@ Wszystkie komendy i adresy instalatorów w tym dokumencie są **projektem interf
 Linux (interfejs dystrybucji; publikacja pozostaje osobnym krokiem):
 
 ```sh
-curl -fsSL https://lomi.dev/server/install.sh | sh
+curl -fsSL https://lomi.dev/remote/install.sh | sh
 lomiremote
 ```
 
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://lomi.dev/server/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -Command "irm https://lomi.dev/remote/install.ps1 | iex"
 lomiremote
 ```
 

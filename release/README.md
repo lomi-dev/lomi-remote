@@ -263,9 +263,12 @@ only inside the bundle cannot authenticate that bundle.
 
 ### Installation page input
 
-The existing `lomi-web` site now has a `/server/` route. It contains setup,
-startup, system requirements and removal guidance without advertising an
-unapproved release. The release builder writes `installation-entry.json` and
+The `lomi-web` site generates `/remote/install.sh` and `/remote/install.ps1`
+from the approved catalog described below. These stable first stages select
+the machine's platform and architecture, verify the pinned download size and
+SHA-256, then execute the existing authenticated Linux preflight or the signed
+macOS/Windows bundled installer from disk. The release builder writes
+`installation-entry.json` and
 a hash-named copy of the public TUF root beside each platform archive. Linux
 entries retain the exact generated `install-command.txt` bytes and their hash.
 The release workflow uploads these public files with the build artifacts.
@@ -305,9 +308,28 @@ the public site build argument `LOMI_REMOTE_INSTALLATION_CATALOG_JSON`, and its
 independently reviewed SHA-256 as `LOMI_REMOTE_INSTALLATION_CATALOG_SHA256`.
 The catalog file has no trailing newline; do not reformat it after approval.
 Both arguments are public metadata, never credentials. Without both inputs the
-page keeps downloads disabled. An inconsistent configured input fails the site
-build; the page never fetches install commands from the CMS or release origin.
-Enabling these inputs and deploying the site remain explicit release actions.
+stable scripts report unavailable and exit unsuccessfully. An inconsistent
+configured input fails the site build. The first stages embed reviewed asset
+pins; they never evaluate command text from the catalog or CMS. The public
+launch page is separate from these scripts. Enabling the inputs and deploying
+the site remain release actions.
+
+After the artifacts and site build are published, the entry points are:
+
+```sh
+curl -fsSL https://lomi.dev/remote/install.sh | sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://lomi.dev/remote/install.ps1 | iex"
+```
+
+The first script's trust comes from HTTPS and the site deployment. Its embedded
+hash authenticates assets from the separate release origin; it cannot protect
+against compromise of the site itself. The independently published pinned
+Linux command above remains available. See the
+[site installation guide](../../lomi-web/docs/remote-installation.md) for
+requirements, macOS account/mode selection, build arguments, and validation.
 
 ## Install and update
 
