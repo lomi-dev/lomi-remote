@@ -458,6 +458,11 @@ impl WasiGitExecutor {
             return Err(GitServiceError::ExecutorUnavailable);
         }
         let mut config = Config::new();
+        #[cfg(target_os = "macos")]
+        // Hardened Runtime cannot use Wasmtime's native JIT mappings.
+        config
+            .target("pulley64")
+            .map_err(|_| GitServiceError::ExecutorUnavailable)?;
         config
             .consume_fuel(true)
             .epoch_interruption(true)
@@ -1056,4 +1061,15 @@ pub(crate) fn run_commit(
     control: &RequestControl,
 ) -> Result<GuestMutation, GitServiceError> {
     WasiGitExecutor::embedded()?.commit(snapshot_path, message, timestamp_seconds, control)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::WasiGitExecutor;
+
+    #[test]
+    fn macos_embedded_worker_engine_and_module_load() {
+        WasiGitExecutor::load_embedded()
+            .expect("embedded WASI Git worker must compile for Pulley on macOS");
+    }
 }

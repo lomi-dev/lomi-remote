@@ -19,3 +19,6 @@ url = "=2.5.8"
 zeroize = "=1.8.2"
 wasmtime = { version = "=49.0.3", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p1"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wasmtime = { version = "=49.0.3", default-features = false, features = ["pulley"] }
