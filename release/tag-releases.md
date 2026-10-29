@@ -68,6 +68,12 @@ macOS uses the self-hosted runner `woro-lomi-remote-release`, installed at
 `~/Library/Application Support/LomiRemote/release-runner`. It runs as a login
 LaunchAgent. The Mac must be online, logged in, and able to access the signing
 key in its Keychain. Rosetta supports the Intel build on this Apple Silicon Mac.
+Its working directory is `~/.local/share/lomi-remote-runner-work`; keep this
+path free of spaces because GitHub's default Bash command does not quote its
+temporary script path.
+The LaunchAgent uses `SessionCreate=false` to inherit the GUI security session
+that owns the Data Protection Keychain notarization profile. Reinstalling the
+runner service restores its default plist; preserve this setting when doing so.
 Public pull requests do not run the tag workflow. Repository write access can
 run release code on this signing machine; restrict write access accordingly.
 
@@ -85,7 +91,7 @@ private certificate or app-specific password is uploaded to GitHub.
 
 `LOMI_WINDOWS_RELEASE_ENABLED=false` deliberately skips Windows builds. Obtain
 a code-signing certificate and provision its private key in the release user's
-Windows certificate store (`CurrentUser\\My`). Hardware-backed certificates
+Windows certificate store (`CurrentUser\My`). Hardware-backed certificates
 need their vendor's signing provider available to `signtool`. The existing
 builder signs the CLI, paired Host helper, updater and PowerShell installer,
 timestamps them and verifies Authenticode before upload.
