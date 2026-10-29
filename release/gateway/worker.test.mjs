@@ -92,6 +92,8 @@ function makeHarness({
   clock = { value: NOW },
   cache = null,
   redirectLatest = null,
+  fixedLengthStreamImpl,
+  assetResponseFactory = null,
 } = {}) {
   const calls = [];
   const assetVersions = new Map(versions);
@@ -127,11 +129,12 @@ function makeHarness({
     if (assetMatch) {
       const release = assetVersions.get(assetMatch[1]) ?? latest;
       const bytes = release?.assets.get(assetMatch[2]);
-      return bytes ? responseForBytes(bytes) : new Response("not found", { status: 404 });
+      if (!bytes) return new Response("not found", { status: 404 });
+      return assetResponseFactory ? assetResponseFactory(bytes) : responseForBytes(bytes);
     }
     return new Response("not found", { status: 404 });
   };
-  const worker = createReleaseWorker({ fetchImpl, cryptoImpl: webcrypto, cache, now: () => clock.value });
+  const worker = createReleaseWorker({ fetchImpl, cryptoImpl: webcrypto, cache, now: () => clock.value, fixedLengthStreamImpl });
   const env = { REPOSITORY, RELEASE_INDEX_PUBLIC_KEY: PUBLIC_KEY_BASE64 };
   return {
     worker,
@@ -372,6 +375,65 @@ test("streams large assets with the signed exact size and supports HEAD without 
   assert.equal(downloaded.status, 200);
   assert.equal(downloaded.headers.get("Content-Length"), String(large.byteLength));
   assert.equal((await downloaded.arrayBuffer()).byteLength, large.byteLength);
+});
+
+test("uses injected FixedLengthStream for large assets and handles pipe rejection", async () => {
+  const large = new Uint8Array(1024 * 1024 + 31).fill(0x6b);
+  const release = await makeRelease({ extraFiles: { "targets/linux/x86_64/fixed-target": large } });
+  const sizes = [];
+  class MockFixedLengthStream {
+    constructor(size) {
+      sizes.push(size);
+      const transform = new TransformStream();
+      this.readable = transform.readable;
+      this.writable = transform.writable;
+    }
+  }
+  const harness = makeHarness({
+    latest: release,
+    versions: new Map([[release.index.tag, release]]),
+    fixedLengthStreamImpl: MockFixedLengthStream,
+  });
+  const response = await request(harness.worker, harness.env, "/remote/releases/targets/linux/x86_64/fixed-target");
+  assert.equal(response.status, 200);
+  assert.deepEqual(sizes, [large.byteLength]);
+  assert.equal(response.headers.get("Content-Length"), String(large.byteLength));
+  assert.equal((await response.arrayBuffer()).byteLength, large.byteLength);
+
+  let rejectionHandled = false;
+  const harnessWithRejectedPipe = makeHarness({
+    latest: release,
+    versions: new Map([[release.index.tag, release]]),
+    fixedLengthStreamImpl: MockFixedLengthStream,
+    assetResponseFactory(bytes) {
+      const source = new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+      const rejected = Promise.reject(new Error("mock pipe failure"));
+      const nativeCatch = rejected.catch.bind(rejected);
+      rejected.catch = (handler) => {
+        rejectionHandled = true;
+        return nativeCatch(handler);
+      };
+      source.pipeTo = () => rejected;
+      return {
+        status: 200,
+        headers: new Headers({ "Content-Length": String(bytes.byteLength) }),
+        body: source,
+      };
+    },
+  });
+  const rejectedResponse = await request(
+    harnessWithRejectedPipe.worker,
+    harnessWithRejectedPipe.env,
+    "/remote/releases/targets/linux/x86_64/fixed-target",
+  );
+  assert.equal(rejectedResponse.status, 200);
+  assert.equal(rejectionHandled, true);
+  await Promise.resolve();
 });
 
 test("caches only verified latest indexes for sixty seconds and keys cache by repository and key", async () => {

@@ -582,7 +582,24 @@ function parseReleaseRoute(pathname) {
   return { tag: null, logicalPath: remaining };
 }
 
-function streamExactSize(body, expectedSize) {
+function streamExactSize(body, expectedSize, FixedLengthStreamImpl = globalThis.FixedLengthStream) {
+  if (typeof FixedLengthStreamImpl === "function") {
+    if (!body || typeof body.pipeTo !== "function") {
+      fail(502, "Release service returned an empty file.");
+    }
+    const fixedLength = new FixedLengthStreamImpl(expectedSize);
+    let pipePromise;
+    try {
+      pipePromise = body.pipeTo(fixedLength.writable);
+    } catch {
+      fail(502, "Release service could not stream the signed asset.");
+    }
+    // FixedLengthStream propagates length/source failures through its readable.
+    // Attach a rejection handler to the pipe promise so failures are not unhandled.
+    void Promise.resolve(pipePromise).catch(() => {});
+    return fixedLength.readable;
+  }
+
   const reader = body?.getReader();
   if (!reader) fail(502, "Release service returned an empty file.");
   let total = 0;
@@ -670,7 +687,7 @@ async function serveReleaseFile(route, request, config) {
     if (digest !== file.sha256) fail(502, "Signed release asset failed its digest check.");
     return response(200, bytes, contentType, bytes.length);
   }
-  return new Response(streamExactSize(fileResponse.body, file.size), {
+  return new Response(streamExactSize(fileResponse.body, file.size, config.fixedLengthStreamImpl), {
     status: 200,
     headers: headersFor(contentType, file.size),
   });
@@ -679,6 +696,7 @@ async function serveReleaseFile(route, request, config) {
 export function createReleaseWorker({
   fetchImpl = globalThis.fetch,
   cryptoImpl = globalThis.crypto,
+  fixedLengthStreamImpl = globalThis.FixedLengthStream,
   cache = globalThis.caches?.default,
   now = () => Date.now(),
 } = {}) {
@@ -755,7 +773,7 @@ export function createReleaseWorker({
       await storeCachedIndex(cache, staleLatestCacheKey, result.envelopeBytes, nowMs, expiresAt, expiresAt - nowMs);
       return result;
     };
-    return { repository, cryptoImpl, fetchImpl, loadLatest, loadVersion };
+    return { repository, cryptoImpl, fetchImpl, fixedLengthStreamImpl, loadLatest, loadVersion };
   }
 
   return async function handleRequest(request, env) {

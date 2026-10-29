@@ -134,8 +134,11 @@ existing metadata.
 Cloudflare. Its public bindings and exact routes are in `wrangler.jsonc`.
 The gateway verifies the signed index with the pinned Ed25519 public key and
 maps conventional metadata/target paths to GitHub Release assets. Small files
-are fully hashed before delivery; installers and TUF clients verify large
-downloads. GitHub asset redirects are followed internally with a host allowlist.
+are fully hashed before delivery. Large files use Cloudflare's native
+[FixedLengthStream](https://developers.cloudflare.com/workers/runtime-apis/streams/transformstream/)
+to enforce the signed size and provide Content-Length with minimal Worker CPU
+work; installers and TUF clients verify their hashes. GitHub asset redirects
+are followed internally with a host allowlist.
 The update client itself receives files directly from its pinned HTTPS origin.
 
 Installed binaries use `https://lomi.dev/remote/releases/` to track latest.
