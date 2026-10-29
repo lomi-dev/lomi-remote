@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - lomi-release
+    - windows-x86_64
+    - windows-aarch64

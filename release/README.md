@@ -1,8 +1,14 @@
 # Lomi Remote release and update path
 
-The release path packages platform signed executables around the bounded TUF
-verifier in `lomi-update-trust`. The build does not create a trust root, sign
-TUF metadata, upload a public release, or deploy an application.
+The tag workflow builds platform signed Host bundles, signs TUF metadata and
+publishes a GitHub Release. The public installer and installed updater resolve
+the latest release through the Cloudflare gateway. Start with the
+[tag release runbook](tag-releases.md) for installation, publication, runner
+setup, trust keys and the remaining Windows signing step.
+
+The sections below describe the underlying bundle lifecycle and the separate
+manual coordinated release process. The whole-product release manifest is
+used by `manual-release.yml`; it is not an input to the Host tag workflow.
 
 ## Whole-release manifest
 
@@ -107,7 +113,7 @@ See the [Desktop publication runbook](../../lomi/docs/releases.md#publishing).
 
 ## Release build inputs
 
-The Host artifact workflow also requires `LOMI_RELEASE_SET_MANIFEST_FILE` on its
+The manual Host artifact workflow also requires `LOMI_RELEASE_SET_MANIFEST_FILE` on its
 runner and the independent `release_set_sha256` workflow input. It snapshots the
 bounded public input, checks its digest, and runs preparation validation with an
 exact clean Host source mapping before building. The canonical declaration is
@@ -165,7 +171,7 @@ build requires:
   `build-manifest.json` includes the complete `tufTargetCustom` declaration for
   the metadata operator; the builder does not sign or publish TUF metadata.
 
-The workflow is manual and runs only on the dedicated `lomi-release` runners.
+The coordinated workflow is manual and runs only on dedicated `lomi-release` runners.
 Every runner needs Bash because the workflow assembles argument arrays in Bash;
 the Windows runner also needs PowerShell, the Windows SDK signing tools and the
 MSVC build toolchain.
@@ -560,11 +566,11 @@ its embedded public root.
 
 ## Current release boundary
 
-This code prepares the signed build/install/update/uninstall path. No production
-public root, private signing identity, notarization credential, signed TUF
-metadata, or deployed service is included in this repository. A release runner
-must be provisioned and the signed target metadata must be created and reviewed
-before any generated bundle can update a user installation. Runtime acceptance
-on Linux, macOS, Windows x64/ARM64, interruption injection, and rollback against
-schema migration remain operator acceptance work; no acceptance is claimed by
-this build code alone.
+The repository includes the pinned public root and automated Host publication
+path. Private keys and Apple credentials remain outside source control.
+Windows publication stays disabled until its native runner and Authenticode
+certificate are provisioned. Tag publication does not certify the separate
+Desktop, mobile or cloud services; their coordinated qualification remains a
+separate process. Runtime acceptance across service modes, interruption
+injection and rollback against schema migration remains operator acceptance
+work.

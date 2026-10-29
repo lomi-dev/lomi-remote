@@ -1,0 +1,243 @@
+#!/bin/sh
+# First-stage installer for the public `curl | sh` entry point.
+# Keep all executable logic inside this function. The final invocation is
+# deliberately the last line so a truncated download cannot run a partial
+# first stage.
+
+lomi_remote_install_main() {
+    set -eu
+    umask 077
+
+    RELEASE_VERSION=@@RELEASE_VERSION_SH@@
+
+    fail() {
+        printf '%s\n' "Lomi Remote installer: $1" >&2
+        exit 1
+    }
+
+    usage() {
+        cat <<EOF
+Usage: sh -s [install|uninstall] [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-path]
+
+Install or uninstall the pinned Lomi Remote release for this machine.
+On macOS, set LOMI_REMOTE_ACCOUNT to select an account and
+LOMI_REMOTE_HOST_MODE to choose manual, login, or boot (default: boot).
+Use --version with the exact pinned version to require that release, or use
+--version by itself to print the pinned version.
+EOF
+    }
+
+    require_command() {
+        if ! command -v "$1" >/dev/null 2>&1; then
+            fail "required command '$1' was not found; install it and retry"
+        fi
+    }
+
+    for argument do
+        case "$argument" in
+            --help|-h)
+                usage
+                return 0
+                ;;
+        esac
+    done
+    if [ "$#" -eq 1 ] && [ "${1-}" = --version ]; then
+        printf '%s\n' "$RELEASE_VERSION"
+        return 0
+    fi
+
+    # A version option pins the already embedded release. Reject a mismatch
+    # before platform checks, dependency checks, or network access.
+    version_seen=0
+    expect_version=0
+    for argument do
+        if [ "$expect_version" -eq 1 ]; then
+            [ "$argument" = "$RELEASE_VERSION" ] \
+                || fail 'requested version differs from this pinned installer'
+            expect_version=0
+            version_seen=1
+        else
+            case "$argument" in
+                --version)
+                    [ "$version_seen" -eq 0 ] \
+                        || fail 'use --version VERSION at most once'
+                    expect_version=1
+                    ;;
+            esac
+        fi
+    done
+    [ "$expect_version" -eq 0 ] || fail '--version requires the pinned version'
+
+    require_command uname
+    host_os=$(uname -s) || fail 'could not identify this operating system'
+    host_arch=$(uname -m) || fail 'could not identify this machine architecture'
+    case "$host_os" in
+        Linux) platform_os=linux ;;
+        Darwin) platform_os=macos ;;
+        *) fail "unsupported operating system '$host_os'; supported systems are Linux and macOS" ;;
+    esac
+    # uname reports the emulated process architecture under Rosetta.
+    if [ "$platform_os:$host_arch" = macos:x86_64 ] && command -v sysctl >/dev/null 2>&1; then
+        if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || :)" = 1 ]; then
+            host_arch=arm64
+        fi
+    fi
+    if [ "$platform_os" = linux ] && command -v ldd >/dev/null 2>&1; then
+        ldd_version=$(ldd --version 2>&1 || :)
+        case "$ldd_version" in
+            *musl*) fail 'this release requires GNU/glibc Linux; musl/Alpine is not supported' ;;
+        esac
+    fi
+    case "$platform_os:$host_arch" in
+        linux:x86_64|linux:aarch64) platform=$platform_os-$host_arch ;;
+        macos:x86_64) platform=macos-x86_64 ;;
+        macos:arm64|macos:aarch64) platform=macos-aarch64 ;;
+        *) fail "unsupported architecture '$host_arch' on $host_os; supported architectures are x86_64 and arm64/aarch64" ;;
+    esac
+
+    case "$platform" in
+@@TARGETS_SH@@
+        *) fail "no pinned release is available for $platform" ;;
+    esac
+
+    case "$asset_url" in
+        https://?*) ;;
+        *) fail 'pinned release URL is not HTTPS' ;;
+    esac
+    case "$asset_sha256" in
+        ''|*[!0123456789abcdef]*) fail 'pinned release SHA-256 is invalid' ;;
+    esac
+    [ "${#asset_sha256}" -eq 64 ] || fail 'pinned release SHA-256 is invalid'
+    case "$asset_size" in
+        ''|*[!0123456789]*) fail 'pinned release size is invalid' ;;
+    esac
+    while [ "${asset_size#0}" != "$asset_size" ]; do
+        asset_size=${asset_size#0}
+    done
+    [ -n "$asset_size" ] || asset_size=0
+    [ "$asset_size" -gt 0 ] 2>/dev/null \
+        || fail 'pinned release size must be a positive integer'
+    [ "${#asset_size}" -le 10 ] \
+        || fail 'pinned release exceeds the 1 GiB download limit'
+    [ "$asset_size" -le 1073741824 ] 2>/dev/null \
+        || fail 'pinned release exceeds the 1 GiB download limit'
+
+    require_command curl
+    require_command mktemp
+    require_command wc
+    require_command tr
+    require_command head
+    case "$platform_os" in
+        linux)
+            require_command sha256sum
+            ;;
+        macos)
+            require_command shasum
+            require_command ditto
+            require_command codesign
+            require_command sudo
+            require_command id
+            ;;
+    esac
+
+    macos_mode=admin-install
+    macos_account=
+    macos_host_mode=${LOMI_REMOTE_HOST_MODE:-boot}
+    if [ "$platform_os" = macos ]; then
+        case "$macos_host_mode" in
+            manual|login|boot) ;;
+            *) fail 'LOMI_REMOTE_HOST_MODE must be manual, login, or boot' ;;
+        esac
+
+        if [ "${1-}" = uninstall ]; then
+            macos_mode=admin-uninstall
+            shift
+        elif [ "${1-}" = install ]; then
+            shift
+        fi
+
+        if [ -n "${LOMI_REMOTE_ACCOUNT:-}" ]; then
+            macos_account=$LOMI_REMOTE_ACCOUNT
+        else
+            macos_uid=$(id -u) || fail 'could not identify the invoking account'
+            if [ "$macos_uid" -eq 0 ] 2>/dev/null; then
+                [ -n "${SUDO_USER:-}" ] \
+                    || fail 'root must set LOMI_REMOTE_ACCOUNT or invoke through sudo from the selected account'
+                macos_account=$SUDO_USER
+            else
+                macos_account=$(id -un) \
+                    || fail 'could not identify the invoking account; set LOMI_REMOTE_ACCOUNT explicitly'
+            fi
+        fi
+        [ -n "$macos_account" ] \
+            || fail 'LOMI_REMOTE_ACCOUNT must name the account to manage'
+    fi
+
+    work=$(mktemp -d "${TMPDIR:-/tmp}/lomi-remote-install.XXXXXXXX") \
+        || fail 'could not create a private temporary directory'
+    trap 'rm -rf "$work"' 0
+    trap 'exit 1' HUP INT TERM
+
+    artifact="$work/release-asset"
+    # Older curl versions enforce --max-filesize only for a known Content-Length.
+    # Bound the stream too, and retain curl's status without requiring pipefail.
+    (
+        set +e
+        curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --connect-timeout 20 --max-time 600 --max-filesize "$asset_size" \
+            "$asset_url"
+        curl_result=$?
+        printf '%s\n' "$curl_result" > "$work/download-status"
+    ) | head -c "$((asset_size + 1))" > "$artifact" \
+        || fail 'could not write the bounded release download'
+    IFS= read -r curl_result < "$work/download-status" \
+        || fail 'could not read the release download status'
+    [ "$curl_result" = 0 ] || fail 'pinned release download failed'
+
+    actual_size=$(LC_ALL=C wc -c < "$artifact" | tr -d '[:space:]') \
+        || fail 'could not measure the downloaded release'
+    [ "$actual_size" = "$asset_size" ] \
+        || fail 'download size did not match the pinned release'
+    case "$platform_os" in
+        linux)
+            actual_sha256=$(sha256sum "$artifact") \
+                || fail 'could not hash the downloaded Linux preflight'
+            ;;
+        macos)
+            actual_sha256=$(shasum -a 256 "$artifact") \
+                || fail 'could not hash the downloaded macOS bundle'
+            ;;
+    esac
+    actual_sha256=${actual_sha256%% *}
+    [ "$actual_sha256" = "$asset_sha256" ] \
+        || fail 'download digest did not match the pinned release'
+
+    case "$platform_os" in
+        linux)
+            # The generated preflight performs its own Ed25519 verification
+            # before it fetches or executes the larger Linux release bundle.
+            /bin/sh "$artifact" "$@" </dev/null
+            ;;
+        macos)
+            extracted="$work/extracted"
+            mkdir "$extracted" || fail 'could not prepare a private extraction directory'
+            ditto -x -k "$artifact" "$extracted" \
+                || fail 'could not extract the pinned macOS release bundle'
+            bundle="$extracted/bundle"
+            installer="$bundle/install.sh"
+            updater="$bundle/lomi-update-trust"
+            [ -f "$installer" ] && [ ! -L "$installer" ] \
+                || fail 'pinned macOS bundle does not contain a regular install.sh'
+            [ -f "$updater" ] && [ ! -L "$updater" ] \
+                || fail 'pinned macOS bundle does not contain a regular updater'
+            codesign --verify --strict "$installer" >/dev/null 2>&1 \
+                || fail 'macOS installer code signature is invalid'
+            codesign --verify --strict "$updater" >/dev/null 2>&1 \
+                || fail 'macOS updater code signature is invalid'
+            sudo /bin/sh "$installer" "$macos_mode" "$macos_account" \
+                "$macos_host_mode" "$@" </dev/null
+            ;;
+    esac
+}
+
+lomi_remote_install_main "$@"

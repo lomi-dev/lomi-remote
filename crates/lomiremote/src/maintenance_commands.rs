@@ -14,6 +14,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod update_check;
+
 #[cfg(target_os = "macos")]
 mod macos_uninstall;
 
@@ -88,6 +90,9 @@ impl Failure {
 }
 
 pub fn run(profile: &Path, name: &str, args: &ArgMatches) -> u8 {
+    if is_update_check(name, args) {
+        return update_check::run(args.get_flag("json"));
+    }
     #[cfg(target_os = "macos")]
     if matches!(name, "update" | "uninstall")
         && let Some(code) = run_macos_protected(name, profile, args)
@@ -106,6 +111,10 @@ pub fn run(profile: &Path, name: &str, args: &ArgMatches) -> u8 {
         "maintenance" => run_maintenance_status(profile, args),
         _ => 2,
     }
+}
+
+fn is_update_check(name: &str, args: &ArgMatches) -> bool {
+    name == "update" && args.get_flag("check")
 }
 
 /// Internal maintenance dispatch runs before the ordinary activation startup

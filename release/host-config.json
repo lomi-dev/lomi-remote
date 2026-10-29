@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "minimumProfileSchema": 14,
+  "bootstrap": {
+    "LOMI_HOST_IDENTITY_ORIGIN": "https://auth.lomi.dev",
+    "LOMI_HOST_REMOTE_API_ORIGIN": "https://remote.lomi.dev",
+    "LOMI_HOST_RELAY_ENDPOINT": "wss://relay.lomi.dev/v2/relay",
+    "LOMI_HOST_CLIENT_ID": "lomi-desktop",
+    "LOMI_HOST_REMOTE_WEB_ORIGIN": "https://remote.lomi.dev"
+  }
+}

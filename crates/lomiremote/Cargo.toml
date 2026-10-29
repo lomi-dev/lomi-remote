@@ -21,6 +21,7 @@ lomi-host = { path = "../lomi-host" }
 lomi-platform = { path = "../lomi-platform" }
 lomi-remote-protocol = { path = "../lomi-remote-protocol" }
 serde_json = "=1.0.151"
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 lomi-terminal-state = { path = "../lomi-terminal-state" }
 uuid = { version = "=1.26.1", features = ["v4"] }
 

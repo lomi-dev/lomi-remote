@@ -39,6 +39,8 @@ pub fn command() -> Command {
         .subcommand(Command::new("update").about("Update this signed installation")
             .arg(Arg::new("release-version").long("version").value_name("X.Y.Z")
                 .help("Require this exact version in signed release metadata"))
+            .arg(Arg::new("check").long("check").help("Check the latest release without changing this installation")
+                .action(ArgAction::SetTrue).conflicts_with_all(["release-version", "confirm"]))
             .arg(confirm_flag()).arg(json_flag()))
         .subcommand(Command::new("uninstall").about("Stop and remove this signed installation")
             .arg(Arg::new("purge").long("purge").help("Also clear allowlisted mutable Host settings and Git credentials after cloud revoke is acknowledged")
@@ -316,4 +318,30 @@ fn terminal_command() -> Command {
                         .action(ArgAction::SetTrue),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command;
+
+    #[test]
+    fn update_check_is_read_only_and_excludes_maintenance_options() {
+        let matches = command()
+            .try_get_matches_from(["lomiremote", "update", "--check", "--json"])
+            .unwrap();
+        let (_, update) = matches.subcommand().unwrap();
+        assert!(update.get_flag("check"));
+        assert!(update.get_flag("json"));
+
+        assert!(
+            command()
+                .try_get_matches_from(["lomiremote", "update", "--check", "--version", "1.2.3",])
+                .is_err()
+        );
+        assert!(
+            command()
+                .try_get_matches_from(["lomiremote", "update", "--check", "--confirm"])
+                .is_err()
+        );
+    }
 }

@@ -12,6 +12,26 @@ update, and uninstall procedures are in [`release/README.md`](release/README.md)
 
 ## Build and run
 
+Install the latest published release on Linux or macOS:
+
+```sh
+curl -fsSL https://lomi.dev/remote/install.sh | sh
+```
+
+Check and apply updates to an existing installation:
+
+```sh
+lomiremote update --check
+lomiremote update --confirm
+```
+
+The updater verifies signed TUF metadata and preserves the existing service and
+profile. macOS requests administrator access. Windows publication requires an
+Authenticode certificate; its installer is prepared but Windows packages are
+not yet published. See the [tag release runbook](release/tag-releases.md).
+
+## Build from source
+
 Use the pinned Rust toolchain and workspace lockfile:
 
 ```sh
@@ -21,7 +41,7 @@ cargo run --locked -p lomiremote -- --help
 
 Release-specific target requirements and bundle preparation are documented in
 [`release/README.md`](release/README.md). The release workflow builds signed
-bundles from the checked release set and offline public trust root.
+bundles from tagged source and the pinned public trust root.
 
 ## Canonical contracts and consumer snapshots
 

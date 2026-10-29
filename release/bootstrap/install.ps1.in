@@ -1,0 +1,404 @@
+& {
+    param([object[]] $BootstrapArguments)
+
+    $ErrorActionPreference = 'Stop'
+    $ReleaseVersion = @@RELEASE_VERSION_PS@@
+    $Targets = @{
+@@TARGETS_PS@@
+    }
+
+    $MaximumArchiveBytes = [long]1073741824
+    $DownloadTimeoutMilliseconds = 120000
+    $StagingDirectory = $null
+    $PreviousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+    $PreviousLastExitCode = $null
+    $LastExitCodeWasReset = $false
+    $BundledInstallerExitCode = $null
+
+    function Stop-Bootstrap([string] $Message) {
+        throw [System.InvalidOperationException]::new($Message)
+    }
+
+    function Get-NativeArchitecture {
+        $architecture = $null
+        try {
+            $runtimeInformation = [Type]::GetType(
+                'System.Runtime.InteropServices.RuntimeInformation, System.Runtime.InteropServices.RuntimeInformation',
+                $false
+            )
+            if ($null -eq $runtimeInformation) {
+                $runtimeInformation = [Type]::GetType(
+                    'System.Runtime.InteropServices.RuntimeInformation',
+                    $false
+                )
+            }
+            if ($null -ne $runtimeInformation) {
+                $property = $runtimeInformation.GetProperty('OSArchitecture')
+                if ($null -ne $property) {
+                    $architecture = [string]$property.GetValue($null, $null)
+                }
+            }
+        } catch {
+            $architecture = $null
+        }
+
+        if ([string]::IsNullOrWhiteSpace($architecture)) {
+            # Windows sets PROCESSOR_ARCHITEW6432 for 32-bit processes running
+            # on a different native architecture. PROCESSOR_ARCHITECTURE is
+            # the fallback for native processes and older PowerShell runtimes.
+            $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITEW6432')
+            if ([string]::IsNullOrWhiteSpace($architecture)) {
+                $architecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE')
+            }
+        }
+
+        switch -Regex ($architecture) {
+            '^(?i:X64|AMD64)$' { return 'x86_64' }
+            '^(?i:ARM64|AARCH64)$' { return 'aarch64' }
+            '^(?i:X86|I[3-6]86)$' { return 'x86' }
+            default { return $null }
+        }
+    }
+
+    function Set-PrivateDirectoryAcl([string] $Path) {
+        $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($null -eq $userSid) { Stop-Bootstrap 'could not identify the current Windows user' }
+
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetOwner($userSid)
+        $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $userSid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+    }
+
+    function New-PrivateStagingDirectory {
+        $temporaryRoot = [IO.Path]::GetTempPath()
+        for ($attempt = 0; $attempt -lt 5; $attempt++) {
+            $candidate = Join-Path $temporaryRoot ('lomi-remote-' + [Guid]::NewGuid().ToString('N'))
+            if ([IO.Directory]::Exists($candidate) -or [IO.File]::Exists($candidate)) { continue }
+            [void][IO.Directory]::CreateDirectory($candidate)
+            try {
+                Set-PrivateDirectoryAcl $candidate
+                return $candidate
+            } catch {
+                try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop } catch { }
+                throw
+            }
+        }
+        Stop-Bootstrap 'could not create a private staging directory'
+    }
+
+    function Get-VerifiedArchive([string] $Architecture, [string] $Destination) {
+        if (-not $Targets.ContainsKey($Architecture)) {
+            Stop-Bootstrap "no approved Windows release is available for $Architecture"
+        }
+        $artifact = $Targets[$Architecture]
+        if ($null -eq $artifact -or
+            [string]::IsNullOrWhiteSpace([string]$artifact.Url) -or
+            [string]$artifact.Sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            [long]$artifact.Size -lt 1 -or
+            [long]$artifact.Size -gt $MaximumArchiveBytes) {
+            Stop-Bootstrap 'embedded Windows release metadata is invalid'
+        }
+
+        $uri = $null
+        if (-not [Uri]::TryCreate([string]$artifact.Url, [UriKind]::Absolute, [ref]$uri) -or
+            $uri.Scheme -cne [Uri]::UriSchemeHttps -or
+            -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+            -not [string]::IsNullOrEmpty($uri.Fragment)) {
+            Stop-Bootstrap 'approved release URL is not a valid HTTPS URL'
+        }
+
+        $request = [Net.HttpWebRequest]([Net.WebRequest]::Create($uri))
+        $request.Method = 'GET'
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = 20000
+        $request.ReadWriteTimeout = 20000
+        $request.KeepAlive = $false
+        $request.Accept = 'application/zip, application/octet-stream'
+
+        $response = $null
+        $input = $null
+        $output = $null
+        try {
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            $response = [Net.HttpWebResponse]$request.GetResponse()
+            if ($response.StatusCode -ne [Net.HttpStatusCode]::OK) {
+                Stop-Bootstrap 'approved release download returned an unexpected HTTP status'
+            }
+            if ($response.ContentLength -ge 0 -and $response.ContentLength -ne [long]$artifact.Size) {
+                Stop-Bootstrap 'approved release download has an unexpected size'
+            }
+
+            $input = $response.GetResponseStream()
+            $output = [IO.File]::Open(
+                $Destination,
+                [IO.FileMode]::CreateNew,
+                [IO.FileAccess]::Write,
+                [IO.FileShare]::None
+            )
+            $buffer = New-Object byte[] 65536
+            [long]$downloaded = 0
+            while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                if ($timer.ElapsedMilliseconds -gt $DownloadTimeoutMilliseconds) {
+                    Stop-Bootstrap 'approved release download exceeded its time limit'
+                }
+                if ($downloaded + $read -gt [long]$artifact.Size) {
+                    Stop-Bootstrap 'approved release download exceeded its pinned size'
+                }
+                $output.Write($buffer, 0, $read)
+                $downloaded += $read
+            }
+            if ($timer.ElapsedMilliseconds -gt $DownloadTimeoutMilliseconds) {
+                Stop-Bootstrap 'approved release download exceeded its time limit'
+            }
+            [void]$output.Flush()
+            if ($downloaded -ne [long]$artifact.Size) {
+                Stop-Bootstrap 'approved release download is incomplete'
+            }
+        } finally {
+            if ($null -ne $output) { $output.Dispose() }
+            if ($null -ne $input) { $input.Dispose() }
+            if ($null -ne $response) { $response.Dispose() }
+        }
+
+        $file = $null
+        $sha256 = $null
+        try {
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            $file = [IO.File]::OpenRead($Destination)
+            $actualDigest = [BitConverter]::ToString($sha256.ComputeHash($file)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            if ($null -ne $file) { $file.Dispose() }
+            if ($null -ne $sha256) { $sha256.Dispose() }
+        }
+        if ($actualDigest -cne ([string]$artifact.Sha256).ToLowerInvariant()) {
+            Stop-Bootstrap 'approved release download failed its SHA-256 check'
+        }
+    }
+
+    function Expand-VerifiedArchive([string] $ArchivePath, [string] $DestinationRoot) {
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        $archiveStream = $null
+        $zip = $null
+        try {
+            $archiveStream = [IO.File]::OpenRead($ArchivePath)
+            $zip = [IO.Compression.ZipArchive]::new(
+                $archiveStream,
+                [IO.Compression.ZipArchiveMode]::Read,
+                $false
+            )
+            if ($zip.Entries.Count -gt 20000) { Stop-Bootstrap 'release archive has too many entries' }
+
+            $root = [IO.Path]::GetFullPath($DestinationRoot)
+            if (-not $root.EndsWith([IO.Path]::DirectorySeparatorChar.ToString())) {
+                $root += [IO.Path]::DirectorySeparatorChar
+            }
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            [long]$expandedBytes = 0
+            foreach ($entry in $zip.Entries) {
+                $name = [string]$entry.FullName
+                if ([string]::IsNullOrEmpty($name) -or $name -match '[\x00-\x1f\x7f]') {
+                    Stop-Bootstrap 'release archive contains an invalid entry path'
+                }
+
+                $unixType = ($entry.ExternalAttributes -shr 16) -band 0xF000
+                if ($unixType -ne 0 -and $unixType -ne 0x8000 -and $unixType -ne 0x4000) {
+                    Stop-Bootstrap 'release archive contains a symlink or special file'
+                }
+                if (($entry.ExternalAttributes -band 0x0400) -ne 0) {
+                    Stop-Bootstrap 'release archive contains a reparse-point entry'
+                }
+
+                $normalized = $name.Replace('\', '/')
+                if ($normalized.StartsWith('/') -or $normalized -match '^[A-Za-z]:' -or $normalized.Contains(':')) {
+                    Stop-Bootstrap 'release archive contains a rooted or alternate-stream path'
+                }
+                $directoryByName = $normalized.EndsWith('/')
+                if ($directoryByName) { $normalized = $normalized.Substring(0, $normalized.Length - 1) }
+                if ([string]::IsNullOrEmpty($normalized)) { Stop-Bootstrap 'release archive contains an empty entry path' }
+
+                $parts = $normalized.Split('/')
+                foreach ($part in $parts) {
+                    if ([string]::IsNullOrEmpty($part) -or $part -ceq '.' -or $part -ceq '..' -or
+                        $part.EndsWith('.') -or $part.EndsWith(' ')) {
+                        Stop-Bootstrap 'release archive contains a traversal or invalid path component'
+                    }
+                    $deviceName = $part.Split('.')[0]
+                    if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+                        Stop-Bootstrap 'release archive contains a reserved Windows file name'
+                    }
+                }
+                if (-not $seen.Add($normalized)) {
+                    Stop-Bootstrap 'release archive contains duplicate paths'
+                }
+
+                $unixDirectory = $unixType -eq 0x4000
+                $isDirectory = $directoryByName -or $unixDirectory
+                if ($directoryByName -and $unixType -eq 0x8000) {
+                    Stop-Bootstrap 'release archive entry has conflicting file attributes'
+                }
+                if ($isDirectory -and $entry.Length -ne 0) {
+                    Stop-Bootstrap 'release archive contains data in a directory entry'
+                }
+
+                $relativePath = $normalized.Replace('/', [IO.Path]::DirectorySeparatorChar)
+                $destination = [IO.Path]::GetFullPath((Join-Path $DestinationRoot $relativePath))
+                if (-not $destination.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                    Stop-Bootstrap 'release archive entry escapes its staging directory'
+                }
+                for ($index = 1; $index -lt $parts.Length; $index++) {
+                    $parentRelative = ($parts[0..($index - 1)] -join [IO.Path]::DirectorySeparatorChar)
+                    $parentPath = Join-Path $DestinationRoot $parentRelative
+                    if ([IO.File]::Exists($parentPath)) {
+                        Stop-Bootstrap 'release archive contains a file-directory path conflict'
+                    }
+                }
+
+                if ($isDirectory) {
+                    if ([IO.File]::Exists($destination)) {
+                        Stop-Bootstrap 'release archive contains a file-directory path conflict'
+                    }
+                    [void][IO.Directory]::CreateDirectory($destination)
+                    continue
+                }
+                if ([IO.Directory]::Exists($destination)) {
+                    Stop-Bootstrap 'release archive contains a file-directory path conflict'
+                }
+                $expandedBytes += [long]$entry.Length
+                if ($expandedBytes -gt [long]4294967296) {
+                    Stop-Bootstrap 'release archive expands beyond the supported size limit'
+                }
+
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+                $entryStream = $null
+                $fileStream = $null
+                try {
+                    $entryStream = $entry.Open()
+                    $fileStream = [IO.File]::Open(
+                        $destination,
+                        [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::None
+                    )
+                    $buffer = New-Object byte[] 65536
+                    [long]$written = 0
+                    while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $written += $read
+                        if ($written -gt [long]$entry.Length) {
+                            Stop-Bootstrap 'release archive entry exceeds its declared size'
+                        }
+                        $fileStream.Write($buffer, 0, $read)
+                    }
+                    if ($written -ne [long]$entry.Length) {
+                        Stop-Bootstrap 'release archive entry is incomplete'
+                    }
+                } finally {
+                    if ($null -ne $fileStream) { $fileStream.Dispose() }
+                    if ($null -ne $entryStream) { $entryStream.Dispose() }
+                }
+            }
+        } finally {
+            if ($null -ne $zip) { $zip.Dispose() }
+            if ($null -ne $archiveStream) { $archiveStream.Dispose() }
+        }
+    }
+
+    if ($null -eq $BootstrapArguments) { $BootstrapArguments = @() }
+    $BootstrapArguments = @($BootstrapArguments | ForEach-Object { [string]$_ })
+    if ($BootstrapArguments -contains '--help' -or $BootstrapArguments -contains '-h') {
+        [Console]::Out.WriteLine('Usage: install.ps1 [install|uninstall] [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-path] [--purge]')
+        [Console]::Out.WriteLine('Use host-service install|update|start|stop|restart|status|recover|rollback|uninstall for service operations.')
+        return
+    }
+
+    try {
+        $forwardedArguments = @($BootstrapArguments)
+        $versionSeen = $false
+        for ($index = 0; $index -lt $forwardedArguments.Count; $index++) {
+            if ($forwardedArguments[$index] -ceq '--version') {
+                if ($versionSeen -or ($index + 1) -ge $forwardedArguments.Count) {
+                    Stop-Bootstrap 'use --version VERSION no more than once'
+                }
+                $index++
+                if ($forwardedArguments[$index] -cne $ReleaseVersion) {
+                    Stop-Bootstrap 'requested version differs from this approved bootstrap release'
+                }
+                $versionSeen = $true
+            }
+        }
+
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+            Stop-Bootstrap 'this installer runs only on Windows'
+        }
+
+        $architecture = Get-NativeArchitecture
+        if ($architecture -ceq 'x86') { Stop-Bootstrap '32-bit Windows is not supported' }
+        if ([string]::IsNullOrWhiteSpace($architecture)) {
+            Stop-Bootstrap 'could not determine the native Windows architecture'
+        }
+        if (-not $Targets.ContainsKey($architecture)) {
+            Stop-Bootstrap "no approved Windows release is available for native architecture $architecture"
+        }
+
+        $StagingDirectory = New-PrivateStagingDirectory
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $archivePath = Join-Path $StagingDirectory 'release.zip'
+        Get-VerifiedArchive $architecture $archivePath
+        Expand-VerifiedArchive $archivePath $StagingDirectory
+
+        $installerPath = Join-Path $StagingDirectory 'install.ps1'
+        if (-not [IO.File]::Exists($installerPath)) {
+            Stop-Bootstrap 'approved release archive does not contain its root installer'
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $signature.SignerCertificate) {
+            Stop-Bootstrap 'bundled installer has an invalid Authenticode signature'
+        }
+
+        # Invoke the verified on-disk script so its own signature check sees
+        # the real MyInvocation.MyCommand.Path value.
+        $PreviousLastExitCode = $global:LASTEXITCODE
+        $global:LASTEXITCODE = $null
+        $LastExitCodeWasReset = $true
+        & $installerPath @forwardedArguments
+        if (-not $?) {
+            $BundledInstallerExitCode = 1
+            if ($null -ne $global:LASTEXITCODE) {
+                $BundledInstallerExitCode = [int]$global:LASTEXITCODE
+            }
+        }
+    } catch {
+        [Console]::Error.WriteLine('Lomi Remote bootstrap failed: ' + $_.Exception.Message)
+        throw
+    } finally {
+        if ($null -ne $StagingDirectory -and [IO.Directory]::Exists($StagingDirectory)) {
+            try {
+                Remove-Item -LiteralPath $StagingDirectory -Recurse -Force -ErrorAction Stop
+            } catch {
+                [Console]::Error.WriteLine('Lomi Remote bootstrap could not remove its private staging directory.')
+            }
+        }
+        if ($LastExitCodeWasReset) {
+            $global:LASTEXITCODE = $PreviousLastExitCode
+        }
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = $PreviousSecurityProtocol
+        } catch {
+            [Console]::Error.WriteLine('Lomi Remote bootstrap could not restore the previous TLS settings.')
+        }
+    }
+    if ($null -ne $BundledInstallerExitCode) {
+        exit ([int]$BundledInstallerExitCode)
+    }
+} -BootstrapArguments $args

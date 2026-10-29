@@ -564,7 +564,15 @@ def product_metadata(binary: Path, target: str) -> tuple[str, int]:
         None,
     )
     if host != target:
-        fail("release packaging must run the built product metadata command on a matching native target")
+        # Apple Silicon can execute an Intel build through Rosetta. Read the
+        # identity from that actual executable rather than editing Cargo.toml
+        # or guessing its schema/version from a cross-compilation manifest.
+        rosetta = host == "aarch64-apple-darwin" and target == "x86_64-apple-darwin"
+        if not rosetta or subprocess.run(
+            ["arch", "-x86_64", "/usr/bin/true"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+        ).returncode:
+            fail("release packaging must execute its built metadata command natively or through verified Rosetta support")
 
     # This command is deliberately available before profile resolution and
     # does not open the host database. Do not pass CI/signing credentials.
@@ -615,6 +623,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
     parser.add_argument("--release-origin", required=True)
+    parser.add_argument("--artifact-origin", help="Versioned bootstrap and initial-install origin; updates retain --release-origin")
     parser.add_argument("--target-name", required=True)
     parser.add_argument("--companion-target-name")
     parser.add_argument("--minimum-profile-schema", required=True, type=int)
@@ -635,6 +644,7 @@ def main() -> None:
     platform = args.platform
     target = PLATFORMS[platform]
     origin = require_origin(args.release_origin)
+    artifact_origin = require_origin(args.artifact_origin) if args.artifact_origin else origin
     target_name = require_target(args.target_name)
     companion_target_name = (
         require_target(args.companion_target_name)
@@ -785,7 +795,10 @@ def main() -> None:
         app_build.extend(["--bin", "lomiremote-host"])
     run(app_build, env=env)
     suffix = ".exe" if platform.startswith("windows-") else ""
-    built = ROOT / "target" / target / "release"
+    target_directory = Path(env.get("CARGO_TARGET_DIR", str(ROOT / "target")))
+    if not target_directory.is_absolute():
+        target_directory = ROOT / target_directory
+    built = target_directory / target / "release"
     product_binary = built / f"lomiremote{suffix}"
     release_version, maximum_profile_schema = product_metadata(product_binary, target)
     if args.minimum_profile_schema > maximum_profile_schema:
@@ -812,13 +825,13 @@ def main() -> None:
     expected_team = args.macos_team_id or ""
     expected_thumbprint = (args.windows_signer_thumbprint or "").replace(" ", "").upper()
     replacements = {
-        "@@RELEASE_ORIGIN_SHELL@@": shlex.quote(origin),
+        "@@RELEASE_ORIGIN_SHELL@@": shlex.quote(artifact_origin),
         "@@TARGET_NAME_SHELL@@": shlex.quote(target_name),
         "@@PLATFORM_SHELL@@": shlex.quote(platform),
         "@@VERSION_SHELL@@": shlex.quote(release_version),
         "@@ROOT_SHA256_SHELL@@": shlex.quote(root_pin),
         "@@TEAM_ID_SHELL@@": shlex.quote(expected_team),
-        "@@RELEASE_ORIGIN_PS@@": json.dumps(origin),
+        "@@RELEASE_ORIGIN_PS@@": json.dumps(artifact_origin),
         "@@TARGET_NAME_PS@@": json.dumps(target_name),
         "@@COMPANION_TARGET_NAME_PS@@": json.dumps(companion_target_name or ""),
         "@@PLATFORM_PS@@": json.dumps(platform),
@@ -874,6 +887,7 @@ def main() -> None:
         "platform": platform,
         "version": release_version,
         "releaseOrigin": origin,
+        "artifactOrigin": artifact_origin,
         "tufTargetName": target_name,
         "tufCompanionTargetName": companion_target_name,
         "profileSchema": {
@@ -929,13 +943,13 @@ def main() -> None:
             target_name=target_name,
             version=release_version,
             root_sha256=root_pin,
-            release_origin=origin,
+            release_origin=artifact_origin,
             public_key=linux_bootstrap_public_key,
             public_key_sha256=linux_bootstrap_key_sha256,
             signing_key_path=linux_bootstrap_signing_key,
             signing_key_passphrase=linux_bootstrap_key_passphrase,
         )
-    create_installation_entry(output, archive, platform, release_version, origin, root_path, root_pin)
+    create_installation_entry(output, archive, platform, release_version, artifact_origin, root_path, root_pin)
     print(f"Built {archive}")
     if platform.startswith("linux-"):
         print(f"Linux bootstrap manifest: {archive.with_suffix('.bootstrap-manifest')}")

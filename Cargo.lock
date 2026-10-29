@@ -2234,6 +2234,7 @@ dependencies = [
  "lomi-update-trust",
  "ratatui",
  "serde_json",
+ "ureq",
  "uuid",
 ]
 

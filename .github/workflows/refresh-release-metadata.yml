@@ -1,0 +1,31 @@
+name: Refresh signed Remote update metadata
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lomi-remote-release-publication
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Refresh only authenticated metadata for the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOMI_TUF_TARGETS_KEY: ${{ secrets.LOMI_TUF_TARGETS_KEY }}
+          LOMI_TUF_SNAPSHOT_KEY: ${{ secrets.LOMI_TUF_SNAPSHOT_KEY }}
+          LOMI_TUF_TIMESTAMP_KEY: ${{ secrets.LOMI_TUF_TIMESTAMP_KEY }}
+          LOMI_RELEASE_INDEX_KEY: ${{ secrets.LOMI_RELEASE_INDEX_KEY }}
+        run: |
+          tag=$(gh release view --repo lomi-dev/lomi-remote --json tagName --jq .tagName) || exit 0
+          python3 release/ci_publish.py refresh --tag "$tag" --output "$RUNNER_TEMP/refreshed-metadata"

@@ -1,210 +1,205 @@
-name: Build signed Lomi Remote release bundle
+name: Release Lomi Remote
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      platform:
-        description: Target platform and architecture
+      tag:
+        description: Existing stable tag matching Cargo.toml (vX.Y.Z)
         required: true
-        type: choice
-        options:
-          - linux-x86_64
-          - linux-aarch64
-          - macos-x86_64
-          - macos-aarch64
-          - windows-x86_64
-          - windows-aarch64
-      release_origin:
-        description: Canonical HTTPS TUF directory URL ending in /
-        required: true
-        type: string
-      target_name:
-        description: TUF target name for lomiremote
-        required: true
-        type: string
-      companion_target_name:
-        description: Required Windows TUF target name for lomiremote-host.exe
-        required: false
-        type: string
-      minimum_profile_schema:
-        description: Minimum existing profile schema supported by the built product
-        required: true
-        type: string
-      public_root_sha256:
-        description: Independent SHA-256 digest for the offline public TUF root on the runner
-        required: true
-        type: string
-      release_set_sha256:
-        description: Independent SHA-256 digest for the offline release-set manifest on the runner
-        required: true
-        type: string
-      linux_bootstrap_key_sha256:
-        description: Independent SHA-256 pin of the Linux Ed25519 public DER key (required for Linux)
-        required: false
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: lomi-remote-release-publication
+  cancel-in-progress: false
+
 jobs:
-  build:
-    # Release runners hold the offline public root and OS signing identities.
-    # No signing key material is supplied as workflow input or printed.
-    runs-on: [self-hosted, lomi-release, "${{ inputs.platform }}"]
-    environment: lomi-release
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      revision: ${{ steps.tag.outputs.revision }}
+      platforms: ${{ steps.tag.outputs.platforms }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           persist-credentials: false
-      - name: Verify macOS signing and notarization credentials
-        if: startsWith(inputs.platform, 'macos-')
-        shell: bash
+      - name: Validate stable tag and public update root
+        id: tag
         env:
-          LOMI_MACOS_SIGNING_IDENTITY: ${{ vars.LOMI_MACOS_SIGNING_IDENTITY || secrets.LOMI_MACOS_SIGNING_IDENTITY }}
-          LOMI_MACOS_TEAM_ID: ${{ vars.LOMI_MACOS_TEAM_ID }}
-          LOMI_MACOS_NOTARY_PROFILE: ${{ vars.LOMI_MACOS_NOTARY_PROFILE || 'lomi-remote-notarization' }}
-          LOMI_MACOS_KEYCHAIN: ${{ vars.LOMI_MACOS_KEYCHAIN }}
-        run: python3 release/macos_signing.py check
-      - name: Verify pinned toolchain and offline release root
-        shell: bash
-        env:
-          LOMI_UPDATE_ROOT_FILE: ${{ vars.LOMI_UPDATE_ROOT_FILE }}
-          EXPECTED_ROOT_SHA256: ${{ inputs.public_root_sha256 }}
-          LOMI_HOST_IDENTITY_ORIGIN: ${{ vars.LOMI_HOST_IDENTITY_ORIGIN }}
-          LOMI_HOST_REMOTE_API_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_API_ORIGIN }}
-          LOMI_HOST_RELAY_ENDPOINT: ${{ vars.LOMI_HOST_RELAY_ENDPOINT }}
-          LOMI_HOST_CLIENT_ID: ${{ vars.LOMI_HOST_CLIENT_ID }}
-          LOMI_HOST_REMOTE_WEB_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_WEB_ORIGIN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          MACOS_ENABLED: ${{ vars.LOMI_MACOS_RELEASE_ENABLED }}
+          WINDOWS_ENABLED: ${{ vars.LOMI_WINDOWS_RELEASE_ENABLED }}
         run: |
-          test -n "$LOMI_UPDATE_ROOT_FILE"
-          test -f "$LOMI_UPDATE_ROOT_FILE"
-          test -n "$LOMI_HOST_IDENTITY_ORIGIN"
-          test -n "$LOMI_HOST_REMOTE_API_ORIGIN"
-          test -n "$LOMI_HOST_RELAY_ENDPOINT"
-          test -n "$LOMI_HOST_CLIENT_ID"
-          test -n "$LOMI_HOST_REMOTE_WEB_ORIGIN"
-          python3 - "$LOMI_UPDATE_ROOT_FILE" "$EXPECTED_ROOT_SHA256" <<'PY'
-          import hashlib, pathlib, sys
-          data = pathlib.Path(sys.argv[1]).read_bytes()
-          if not data or len(data) > 1024 * 1024:
-              raise SystemExit("public root exceeds the supported size")
-          if hashlib.sha256(data).hexdigest() != sys.argv[2].lower():
-              raise SystemExit("offline public root digest mismatch")
-          PY
-          rustup show active-toolchain
-      - name: Pin release-set declarations and Host source revision
-        shell: bash
-        env:
-          LOMI_RELEASE_SET_MANIFEST_FILE: ${{ vars.LOMI_RELEASE_SET_MANIFEST_FILE }}
-          EXPECTED_RELEASE_SET_SHA256: ${{ inputs.release_set_sha256 }}
-        run: |
+          python3 release/ci_build.py --tag "$RELEASE_TAG" --check
           python3 - <<'PY'
-          import hashlib, os, pathlib, re, subprocess, sys, tempfile
-          source = os.environ.get("LOMI_RELEASE_SET_MANIFEST_FILE", "")
-          expected = os.environ["EXPECTED_RELEASE_SET_SHA256"]
-          if not source or not re.fullmatch(r"[0-9a-f]{64}", expected):
-              raise SystemExit("a public release-set manifest and independent digest pin are required")
-          with pathlib.Path(source).open("rb") as stream:
-              data = stream.read(1024 * 1024 + 1)
-          if not data or len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
-              raise SystemExit("release-set input is oversized or does not match its digest pin")
-          directory = pathlib.Path(tempfile.mkdtemp(prefix="lomi-release-set-", dir=os.environ["RUNNER_TEMP"]))
-          snapshot = directory / "input.json"
-          canonical = directory / "canonical.json"
-          snapshot.write_bytes(data)
-          subprocess.run([
-              sys.executable, "release/release_set.py", "validate", str(snapshot),
-              "--mode", "preparation", "--source", "host=" + os.environ["GITHUB_WORKSPACE"],
-              "--canonical-out", str(canonical),
-          ], check=True)
-          if any(ord(character) < 32 for character in str(canonical)):
-              raise SystemExit("release-set output path is invalid")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
-              output.write("LOMI_RELEASE_SET_CANONICAL_PATH=" + str(canonical) + "\n")
+          import os, subprocess
+          platforms = ['linux-x86_64', 'linux-aarch64']
+          if os.environ.get('MACOS_ENABLED') == 'true':
+              platforms += ['macos-x86_64', 'macos-aarch64']
+          if os.environ.get('WINDOWS_ENABLED') == 'true':
+              platforms += ['windows-x86_64', 'windows-aarch64']
+          revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('tag=' + os.environ['RELEASE_TAG'] + '\n')
+              output.write('revision=' + revision + '\n')
+              output.write('platforms=' + ','.join(platforms) + '\n')
           PY
-      - name: Build, sign, and package without publishing
-        shell: bash
-        env:
-          RELEASE_PLATFORM: ${{ inputs.platform }}
-          RELEASE_ORIGIN: ${{ inputs.release_origin }}
-          TARGET_NAME: ${{ inputs.target_name }}
-          COMPANION_TARGET_NAME: ${{ inputs.companion_target_name }}
-          MIN_PROFILE_SCHEMA: ${{ inputs.minimum_profile_schema }}
-          LOMI_UPDATE_ROOT_FILE: ${{ vars.LOMI_UPDATE_ROOT_FILE }}
-          LOMI_UPDATE_ROOT_SHA256: ${{ inputs.public_root_sha256 }}
-          MACOS_SIGNING_IDENTITY: ${{ vars.LOMI_MACOS_SIGNING_IDENTITY || secrets.LOMI_MACOS_SIGNING_IDENTITY }}
-          MACOS_TEAM_ID: ${{ vars.LOMI_MACOS_TEAM_ID }}
-          MACOS_NOTARY_PROFILE: ${{ vars.LOMI_MACOS_NOTARY_PROFILE }}
-          MACOS_KEYCHAIN: ${{ vars.LOMI_MACOS_KEYCHAIN }}
-          WINDOWS_SIGNER_THUMBPRINT: ${{ vars.LOMI_WINDOWS_SIGNER_THUMBPRINT }}
-          LINUX_BOOTSTRAP_PUBLIC_KEY_FILE: ${{ vars.LOMI_LINUX_BOOTSTRAP_PUBLIC_KEY_FILE }}
-          LINUX_BOOTSTRAP_SIGNING_KEY_FILE: ${{ vars.LOMI_LINUX_BOOTSTRAP_SIGNING_KEY_FILE }}
-          LINUX_BOOTSTRAP_KEY_SHA256: ${{ inputs.linux_bootstrap_key_sha256 }}
-          LOMI_LINUX_BOOTSTRAP_KEY_PASSPHRASE: ${{ secrets.LOMI_LINUX_BOOTSTRAP_KEY_PASSPHRASE }}
-          LOMI_HOST_IDENTITY_ORIGIN: ${{ vars.LOMI_HOST_IDENTITY_ORIGIN }}
-          LOMI_HOST_REMOTE_API_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_API_ORIGIN }}
-          LOMI_HOST_RELAY_ENDPOINT: ${{ vars.LOMI_HOST_RELAY_ENDPOINT }}
-          LOMI_HOST_CLIENT_ID: ${{ vars.LOMI_HOST_CLIENT_ID }}
-          LOMI_HOST_REMOTE_WEB_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_WEB_ORIGIN }}
-        run: |
-          args=(
-            --platform "$RELEASE_PLATFORM"
-            --release-origin "$RELEASE_ORIGIN"
-            --target-name "$TARGET_NAME"
-            --minimum-profile-schema "$MIN_PROFILE_SCHEMA"
-            --public-root "$LOMI_UPDATE_ROOT_FILE"
-            --public-root-sha256 "$LOMI_UPDATE_ROOT_SHA256"
-            --output "$RUNNER_TEMP/lomi-release-output"
-          )
-          if [[ "$RELEASE_PLATFORM" == windows-* ]]; then
-            args+=(--companion-target-name "$COMPANION_TARGET_NAME")
-            args+=(--windows-signer-thumbprint "$WINDOWS_SIGNER_THUMBPRINT")
-          fi
-          if [[ "$RELEASE_PLATFORM" == linux-* ]]; then
-            args+=(--linux-bootstrap-public-key "$LINUX_BOOTSTRAP_PUBLIC_KEY_FILE")
-            args+=(--linux-bootstrap-key-sha256 "$LINUX_BOOTSTRAP_KEY_SHA256")
-            args+=(--linux-bootstrap-signing-key "$LINUX_BOOTSTRAP_SIGNING_KEY_FILE")
-          fi
-          if [[ "$RELEASE_PLATFORM" == macos-* ]]; then
-            if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
-              args+=(--macos-signing-identity "$MACOS_SIGNING_IDENTITY")
-            fi
-            if [[ -n "$MACOS_TEAM_ID" ]]; then
-              args+=(--macos-team-id "$MACOS_TEAM_ID")
-            fi
-            if [[ -n "$MACOS_NOTARY_PROFILE" ]]; then
-              args+=(--macos-notary-profile "$MACOS_NOTARY_PROFILE")
-            fi
-            if [[ -n "$MACOS_KEYCHAIN" ]]; then
-              args+=(--macos-keychain "$MACOS_KEYCHAIN")
-            fi
-          fi
-          python3 release/build_release.py "${args[@]}"
-      - name: Retain failed macOS notarization diagnostics
-        if: failure() && startsWith(inputs.platform, 'macos-')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Check tag tooling and release signatures
+        run: python3 -m unittest discover -s release -p 'test_*.py'
+      - name: Check release gateway and installer rendering
+        run: node --test release/gateway/worker.test.mjs release/bootstrap/render.test.mjs
+
+  linux:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          name: lomi-remote-${{ inputs.platform }}-notarization-failure-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/lomi-release-output/*.notarization.json
-            ${{ runner.temp }}/lomi-release-output/*.notarization-log.json
-            ${{ runner.temp }}/lomi-release-output/*.notarization.pending
-          if-no-files-found: ignore
-          retention-days: 30
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev clang cmake
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Build authenticated Linux bundle
+        env:
+          LOMI_LINUX_BOOTSTRAP_KEY: ${{ secrets.LOMI_LINUX_BOOTSTRAP_KEY }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: python3 release/ci_build.py --tag "$RELEASE_TAG" --platform "$RELEASE_PLATFORM" --output "$RUNNER_TEMP/bundle-output"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: lomi-remote-${{ inputs.platform }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/lomi-release-output/*.zip
-            ${{ runner.temp }}/lomi-release-output/*.notarization.json
-            ${{ runner.temp }}/lomi-release-output/*.notarization-log.json
-            ${{ runner.temp }}/lomi-release-output/*.bootstrap-manifest
-            ${{ runner.temp }}/lomi-release-output/*.sig
-            ${{ runner.temp }}/lomi-release-output/*.der
-            ${{ runner.temp }}/lomi-release-output/*.install.sh
-            ${{ runner.temp }}/lomi-release-output/install-command.txt
-            ${{ runner.temp }}/lomi-release-output/installation-entry.json
-            ${{ runner.temp }}/lomi-release-output/release-root-*.json
-            ${{ env.LOMI_RELEASE_SET_CANONICAL_PATH }}
+          name: release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/bundle-output/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
+
+  macos:
+    needs: validate
+    if: vars.LOMI_MACOS_RELEASE_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        platform: [macos-aarch64, macos-x86_64]
+    # This runner uses the already provisioned Developer ID and Keychain
+    # profile. Public PRs never execute this workflow or use this runner.
+    runs-on: [self-hosted, lomi-release, macOS]
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      LOMI_MACOS_SIGNING_IDENTITY: ${{ vars.LOMI_MACOS_SIGNING_IDENTITY }}
+      LOMI_MACOS_TEAM_ID: ${{ vars.LOMI_MACOS_TEAM_ID }}
+      LOMI_MACOS_NOTARY_PROFILE: ${{ vars.LOMI_MACOS_NOTARY_PROFILE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - name: Verify Developer ID and notarization access
+        run: python3 release/macos_signing.py check
+      - name: Build, sign and notarize macOS bundle
+        env:
+          CARGO_TARGET_DIR: ${{ runner.tool_cache }}/lomi-remote-target
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: python3 release/ci_build.py --tag "$RELEASE_TAG" --platform "$RELEASE_PLATFORM" --output "$RUNNER_TEMP/bundle-output"
+      - name: Keep notarization diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notarization-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/bundle-output/*.notarization.json
+            ${{ runner.temp }}/bundle-output/*.notarization-log.json
+            ${{ runner.temp }}/bundle-output/*.notarization.pending
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/bundle-output/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    needs: validate
+    if: vars.LOMI_WINDOWS_RELEASE_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-x86_64, windows-aarch64]
+    # Enable only after a native Windows runner has its Authenticode key.
+    runs-on: [self-hosted, lomi-release, '${{ matrix.platform }}']
+    env:
+      LOMI_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.LOMI_WINDOWS_SIGNER_THUMBPRINT }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Build and Authenticode-sign paired Windows executables
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: python3 release/ci_build.py --tag "$RELEASE_TAG" --platform "$RELEASE_PLATFORM" --output "$RUNNER_TEMP/bundle-output"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/bundle-output/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [validate, linux, macos, windows]
+    if: >-
+      always() && needs.validate.result == 'success' && needs.linux.result == 'success' &&
+      (needs.macos.result == 'success' || needs.macos.result == 'skipped') &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/bundles
+      - name: Verify all bundles and sign release metadata
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+          REQUIRED_PLATFORMS: ${{ needs.validate.outputs.platforms }}
+          LOMI_TUF_TARGETS_KEY: ${{ secrets.LOMI_TUF_TARGETS_KEY }}
+          LOMI_TUF_SNAPSHOT_KEY: ${{ secrets.LOMI_TUF_SNAPSHOT_KEY }}
+          LOMI_TUF_TIMESTAMP_KEY: ${{ secrets.LOMI_TUF_TIMESTAMP_KEY }}
+          LOMI_RELEASE_INDEX_KEY: ${{ secrets.LOMI_RELEASE_INDEX_KEY }}
+        run: python3 release/ci_publish.py assemble --tag "$RELEASE_TAG" --revision "$RELEASE_REVISION" --platforms "$REQUIRED_PLATFORMS" --bundles "$RUNNER_TEMP/bundles" --output "$RUNNER_TEMP/publication"
+      - name: Publish the complete GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: python3 release/publish_release.py upload --tag "$RELEASE_TAG" --output "$RUNNER_TEMP/publication"

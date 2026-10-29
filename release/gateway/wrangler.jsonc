@@ -1,0 +1,16 @@
+{
+  "name": "lomi-remote-release-gateway",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-29",
+  "account_id": "1a3301d65800761b4981d79faf55de6a",
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "lomi.dev/remote/install.sh", "zone_name": "lomi.dev" },
+    { "pattern": "lomi.dev/remote/install.ps1", "zone_name": "lomi.dev" },
+    { "pattern": "lomi.dev/remote/releases/*", "zone_name": "lomi.dev" }
+  ],
+  "vars": {
+    "REPOSITORY": "lomi-dev/lomi-remote",
+    "RELEASE_INDEX_PUBLIC_KEY": "HLn1vA7Kg/L7gMAWaQ0PrA4g7mmxgT5rRUoZpNl+1ZA="
+  }
+}
