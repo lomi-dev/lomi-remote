@@ -24,6 +24,14 @@ import urllib.parse
 import zipfile
 from typing import NoReturn
 
+from macos_signing import (
+    MacOSSigningError,
+    load_config as load_macos_signing_config,
+    notarize_archive as notarize_macos_archive,
+    preflight as check_macos_signing,
+    sign_file as sign_macos_file,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = {
@@ -616,6 +624,7 @@ def main() -> None:
     parser.add_argument("--macos-signing-identity")
     parser.add_argument("--macos-team-id")
     parser.add_argument("--macos-notary-profile")
+    parser.add_argument("--macos-keychain", type=Path)
     parser.add_argument("--windows-signer-thumbprint")
     parser.add_argument("--windows-timestamp-url", default="https://timestamp.digicert.com")
     parser.add_argument("--linux-bootstrap-public-key", type=Path)
@@ -677,6 +686,19 @@ def main() -> None:
     elif any(value is not None for value in linux_bootstrap_options):
         fail("Linux bootstrap signing options are supported only for Linux releases")
 
+    macos_config = None
+    if platform.startswith("macos-"):
+        macos_config = load_macos_signing_config(
+            identity=args.macos_signing_identity,
+            team_id=args.macos_team_id,
+            notary_profile=args.macos_notary_profile,
+            keychain=args.macos_keychain,
+        )
+        check_macos_signing(macos_config)
+        args.macos_signing_identity = macos_config.identity
+        args.macos_team_id = macos_config.team_id
+        args.macos_notary_profile = macos_config.notary_profile
+
     root_path = args.public_root.resolve(strict=True)
     if not root_path.is_file() or root_path.stat().st_size > 1024 * 1024:
         fail("operator-supplied public root must be a regular file no larger than 1 MiB")
@@ -685,11 +707,6 @@ def main() -> None:
         fail("operator-supplied public root does not match its independent digest")
     bootstrap_pins = public_host_bootstrap_pins()
 
-    if platform.startswith("macos-"):
-        if not all((args.macos_signing_identity, args.macos_team_id, args.macos_notary_profile)):
-            fail("macOS release requires a Developer ID identity, team ID, and notarization profile")
-        if not re.fullmatch(r"[A-Z0-9]{10}", args.macos_team_id):
-            fail("macOS team ID is invalid")
     if platform.startswith("windows-"):
         if not args.windows_signer_thumbprint or not re.fullmatch(r"[A-Fa-f0-9]{40}", args.windows_signer_thumbprint):
             fail("Windows release requires a certificate thumbprint in the current-user store")
@@ -832,21 +849,10 @@ def main() -> None:
                {key: value for key, value in replacements.items() if key.endswith("_SHELL@@")})
         os.chmod(stage / "install.sh", 0o500)
         if platform.startswith("macos-"):
+            assert macos_config is not None
             for binary in stage.iterdir():
                 if binary.is_file() and binary.name != "targets":
-                    original_mode = stat.S_IMODE(binary.stat().st_mode)
-                    # Script signatures use extended attributes, which require
-                    # owner write access even when Mach-O signing can replace
-                    # a read-only executable through its parent directory.
-                    os.chmod(binary, original_mode | stat.S_IWUSR)
-                    try:
-                        run([
-                            "codesign", "--force", "--options", "runtime", "--timestamp",
-                            "--sign", args.macos_signing_identity, str(binary),
-                        ])
-                    finally:
-                        os.chmod(binary, original_mode)
-                    run(["codesign", "--verify", "--strict", str(binary)])
+                    sign_macos_file(binary, macos_config)
 
     target_path = stage / "targets" / target_name
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -905,7 +911,8 @@ def main() -> None:
         # Preserve the extended-attribute code signatures on the shell
         # installer as well as the embedded Mach-O signatures.
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(stage), str(archive)])
-        run(["xcrun", "notarytool", "submit", str(archive), "--keychain-profile", args.macos_notary_profile, "--wait"])
+        assert macos_config is not None
+        notarize_macos_archive(archive, macos_config)
     else:
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
             for path in sorted(stage.rglob("*")):
@@ -942,4 +949,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except MacOSSigningError as error:
+        fail(str(error))

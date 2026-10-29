@@ -56,6 +56,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Verify macOS signing and notarization credentials
+        if: startsWith(inputs.platform, 'macos-')
+        shell: bash
+        env:
+          LOMI_MACOS_SIGNING_IDENTITY: ${{ vars.LOMI_MACOS_SIGNING_IDENTITY || secrets.LOMI_MACOS_SIGNING_IDENTITY }}
+          LOMI_MACOS_TEAM_ID: ${{ vars.LOMI_MACOS_TEAM_ID }}
+          LOMI_MACOS_NOTARY_PROFILE: ${{ vars.LOMI_MACOS_NOTARY_PROFILE || 'lomi-remote-notarization' }}
+          LOMI_MACOS_KEYCHAIN: ${{ vars.LOMI_MACOS_KEYCHAIN }}
+        run: python3 release/macos_signing.py check
       - name: Verify pinned toolchain and offline release root
         shell: bash
         env:
@@ -123,9 +132,10 @@ jobs:
           MIN_PROFILE_SCHEMA: ${{ inputs.minimum_profile_schema }}
           LOMI_UPDATE_ROOT_FILE: ${{ vars.LOMI_UPDATE_ROOT_FILE }}
           LOMI_UPDATE_ROOT_SHA256: ${{ inputs.public_root_sha256 }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.LOMI_MACOS_SIGNING_IDENTITY }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.LOMI_MACOS_SIGNING_IDENTITY || secrets.LOMI_MACOS_SIGNING_IDENTITY }}
           MACOS_TEAM_ID: ${{ vars.LOMI_MACOS_TEAM_ID }}
           MACOS_NOTARY_PROFILE: ${{ vars.LOMI_MACOS_NOTARY_PROFILE }}
+          MACOS_KEYCHAIN: ${{ vars.LOMI_MACOS_KEYCHAIN }}
           WINDOWS_SIGNER_THUMBPRINT: ${{ vars.LOMI_WINDOWS_SIGNER_THUMBPRINT }}
           LINUX_BOOTSTRAP_PUBLIC_KEY_FILE: ${{ vars.LOMI_LINUX_BOOTSTRAP_PUBLIC_KEY_FILE }}
           LINUX_BOOTSTRAP_SIGNING_KEY_FILE: ${{ vars.LOMI_LINUX_BOOTSTRAP_SIGNING_KEY_FILE }}
@@ -156,16 +166,38 @@ jobs:
             args+=(--linux-bootstrap-signing-key "$LINUX_BOOTSTRAP_SIGNING_KEY_FILE")
           fi
           if [[ "$RELEASE_PLATFORM" == macos-* ]]; then
-            args+=(--macos-signing-identity "$MACOS_SIGNING_IDENTITY")
-            args+=(--macos-team-id "$MACOS_TEAM_ID")
-            args+=(--macos-notary-profile "$MACOS_NOTARY_PROFILE")
+            if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
+              args+=(--macos-signing-identity "$MACOS_SIGNING_IDENTITY")
+            fi
+            if [[ -n "$MACOS_TEAM_ID" ]]; then
+              args+=(--macos-team-id "$MACOS_TEAM_ID")
+            fi
+            if [[ -n "$MACOS_NOTARY_PROFILE" ]]; then
+              args+=(--macos-notary-profile "$MACOS_NOTARY_PROFILE")
+            fi
+            if [[ -n "$MACOS_KEYCHAIN" ]]; then
+              args+=(--macos-keychain "$MACOS_KEYCHAIN")
+            fi
           fi
           python3 release/build_release.py "${args[@]}"
+      - name: Retain failed macOS notarization diagnostics
+        if: failure() && startsWith(inputs.platform, 'macos-')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lomi-remote-${{ inputs.platform }}-notarization-failure-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/lomi-release-output/*.notarization.json
+            ${{ runner.temp }}/lomi-release-output/*.notarization-log.json
+            ${{ runner.temp }}/lomi-release-output/*.notarization.pending
+          if-no-files-found: ignore
+          retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lomi-remote-${{ inputs.platform }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/lomi-release-output/*.zip
+            ${{ runner.temp }}/lomi-release-output/*.notarization.json
+            ${{ runner.temp }}/lomi-release-output/*.notarization-log.json
             ${{ runner.temp }}/lomi-release-output/*.bootstrap-manifest
             ${{ runner.temp }}/lomi-release-output/*.sig
             ${{ runner.temp }}/lomi-release-output/*.der

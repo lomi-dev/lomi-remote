@@ -149,7 +149,12 @@ build requires:
 
 - For macOS, a Developer ID signing identity, its ten character Team ID, and
   an existing `notarytool` keychain profile. The build signs the CLI, updater,
-  shell installer and then submits the archive for notarization.
+  shell installer and then submits the archive for notarization. The checked-in
+  [macOS signing configuration](macos-signing.md) selects Team ID `C9JMAQ7GG3`
+  and profile `lomi-remote-notarization`. Run
+  `python3 release/macos_signing.py check` to verify local signing and Apple
+  credentials. The build requires Apple's explicit `Accepted` result and saves
+  a receipt that binds the submission to the archive's exact SHA-256.
 - For Windows, a signing certificate with its private key already available
   in the current user's certificate store, the certificate thumbprint, and an
   HTTPS timestamp service. The build signs all executables and the generated
@@ -190,13 +195,12 @@ python3 release/build_release.py \
   --minimum-profile-schema 4 \
   --public-root /offline/release-root.json \
   --public-root-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  --macos-signing-identity 'Developer ID Application: Lomi (ABCDEFGHIJ)' \
-  --macos-team-id ABCDEFGHIJ \
-  --macos-notary-profile lomi-release \
+  --macos-notary-profile lomi-remote-notarization \
   --output dist/macos-aarch64
 ```
 
-The example URL, digest, signing identity and paths are placeholders. Product
+The example URL, digest and paths are placeholders. The Developer ID identity
+and Team ID come from the public macOS signing configuration. Product
 version and maximum schema come from the compiled binary.
 The build rejects a missing root, mismatched digest, missing signing identity,
 unlocked dependencies, unsupported target name or incompatible schema range.
