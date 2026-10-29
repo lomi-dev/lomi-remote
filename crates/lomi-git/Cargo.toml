@@ -1,0 +1,23 @@
+[package]
+name = "lomi-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lomi-files = { path = "../lomi-files" }
+lomi-remote-protocol = { path = "../lomi-remote-protocol" }
+base64 = "=0.22.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+tempfile = "=3.27.0"
+anyhow = "=1.0.104"
+git2 = { version = "=0.21.0", default-features = false, features = ["https", "vendored-libgit2", "vendored-openssl"] }
+url = "=2.5.8"
+zeroize = "=1.8.2"
+wasmtime = { version = "=49.0.3", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p1"] }
+
+[dev-dependencies]

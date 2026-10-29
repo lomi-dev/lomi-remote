@@ -1,0 +1,39 @@
+__LOMI_HOST_ZDOTDIR=${__LOMI_HOST_ZDOTDIR:-$ZDOTDIR}
+LOMI_ZDOTDIR=${LOMI_ZDOTDIR:-$HOME}
+ZDOTDIR=$LOMI_ZDOTDIR
+if [[ -f "$LOMI_ZDOTDIR/.zshrc" ]]; then
+  source "$LOMI_ZDOTDIR/.zshrc"
+fi
+if [[ -n ${ZDOTDIR:-} && $ZDOTDIR != $__LOMI_HOST_ZDOTDIR ]]; then
+  LOMI_ZDOTDIR=$ZDOTDIR
+fi
+ZDOTDIR=$LOMI_ZDOTDIR
+
+autoload -Uz add-zsh-hook
+__lomi_preexec() { printf '\033]133;C\007'; }
+__lomi_file_uri_path() {
+  emulate -L zsh
+  local LC_ALL=C
+  local input=$1 encoded='' character byte
+  local index
+  for (( index = 1; index <= ${#input}; index++ )); do
+    character=$input[index]
+    case "$character" in
+      [a-zA-Z0-9._~/-]) encoded+=$character ;;
+      *)
+        printf -v byte '%%%02X' "'$character"
+        encoded+=$byte
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+__lomi_precmd() {
+  local exit_code=$?
+  local directory
+  directory=$(__lomi_file_uri_path "$PWD")
+  printf '\033]133;D;%s\007\033]7;file://localhost%s\007' "$exit_code" "$directory"
+}
+add-zsh-hook preexec __lomi_preexec
+add-zsh-hook precmd __lomi_precmd
+PROMPT=$'%{\e]133;A\a%}'"$PROMPT"$'%{\e]133;B\a%}'

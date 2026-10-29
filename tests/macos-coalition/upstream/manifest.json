@@ -1,0 +1,44 @@
+{
+  "repository": "https://github.com/apple-oss-distributions/xnu",
+  "commit": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+  "license": "APSL-2.0",
+  "experimentalPrivateAbiOnly": true,
+  "files": {
+    "proc_info_private.h": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/proc_info_private.h",
+      "sha256": "ccc01e88d5bf47bc9c3f5ba3a25c3e6202bbcd7b86aa967af31d714657571c3b"
+    },
+    "coalition.h": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/coalition.h",
+      "sha256": "d0bf59956b735fb239b26f4a9aabc2640951259564dba9b0dd0eb0d329bca754"
+    },
+    "APPLE_LICENSE": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/APPLE_LICENSE",
+      "sha256": "e5881019d8766c1e88a5fe1dbca4ba40c78011d41fcb18f6e9f50df60182685b"
+    },
+    "bsd_coalition.h": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/coalition.h",
+      "sha256": "3df5cdf3fcb5f662437e694b2450b688672bcafbbdd0a867fae7253c05ca434c"
+    },
+    "coalition_wrapper.c": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/wrappers/coalition.c",
+      "sha256": "5ffb12265c7110d5a895a6f93bef02e04c5a5d48b63d00935f2fabc61d0acaf6"
+    },
+    "sys_coalition.c": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sys_coalition.c",
+      "sha256": "1f252b9329751286f670a8d6824117c2712b4bf20bbf82376fe12c3d39835545"
+    },
+    "kern_coalition.c": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/coalition.c",
+      "sha256": "244a162e8d29296b766c4dae07f7c8072bf67a742d8be5f233c71dae8e247976"
+    },
+    "kern_exec.c": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_exec.c",
+      "sha256": "89531d33618b8361064236189212c3c96be1b32e098690b17802b6b15d932d1a"
+    },
+    "kern_proc.c": {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_proc.c",
+      "sha256": "34f745a213769ffa47b4edace6e3e158f654075def1b0fe50edf97f9bf53589d"
+    }
+  }
+}

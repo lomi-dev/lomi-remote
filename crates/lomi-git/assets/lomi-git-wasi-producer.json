@@ -1,0 +1,32 @@
+{
+  "format": "lomi-wasi-producer-v1",
+  "artifact": "../guest/target/wasm32-wasip1/release/lomi-git-wasi-guest.wasm",
+  "artifactSha256": "4f8641721722b1f56ed4453c3f67369c2e7ec1abd3c602c0ee3578275b9ab0e4",
+  "artifactBytes": 2411577,
+  "embedded": true,
+  "embeddedArtifact": "lomi-git-read-worker.wasm",
+  "embeddedSha256": "4f8641721722b1f56ed4453c3f67369c2e7ec1abd3c602c0ee3578275b9ab0e4",
+  "embeddedBytes": 2411577,
+  "source": {
+    "guestMainSha256": "aeb436ee9c1915abe670d1e751638a39736f142e3f4c32ca54f1db5ce44a70ec",
+    "guestManifestSha256": "6dc30ceca6bfad5fbd2f3c759da1bdaebaa96dd96e36c0828901fcf5543119f7",
+    "guestLockSha256": "9630ba83b690bfe61a7c7ebf71f0119c1781d7bc4b227f2b6960e128fa7c98fd",
+    "vendorFiletimeWasiSha256": "9b0f7e31ae3c58bb5dce1bb5e6aef2d48208d48686e6d055ed095151357e5841",
+    "vendorMemmap2WasiSha256": "f6caaabbb725223504453b871544a71ec30ecba3afc1242836624a97dcbd6d9a"
+  },
+  "producer": {
+    "target": "wasm32-wasip1",
+    "profile": "release",
+    "command": "cargo build --manifest-path crates/lomi-git/guest/Cargo.toml --locked --offline --release --target wasm32-wasip1",
+    "environment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_RELEASE_DEBUG": "0",
+      "CARGO_BUILD_JOBS": "2"
+    },
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "finishedAtUtc": "2026-10-28T02:48:58Z",
+    "result": "passed"
+  },
+  "runtimeValidation": "not run per user instruction (tests prohibited)"
+}

@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lomi.dev/schemas/release-set-v1.json",
+  "title": "Lomi Remote immutable release-set manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "release_id", "components"],
+  "properties": {
+    "format": {"type": "integer", "const": 1},
+    "release_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {"$ref": "#/$defs/component"},
+        "api": {"$ref": "#/$defs/component"},
+        "identity": {"$ref": "#/$defs/component"},
+        "relay": {"$ref": "#/$defs/component"},
+        "web": {"$ref": "#/$defs/component"},
+        "desktop": {"$ref": "#/$defs/component"},
+        "mobile": {"$ref": "#/$defs/component"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "http",
+        "rpc",
+        "ipc",
+        "grant",
+        "context",
+        "terminal_profile",
+        "contracts_sha256",
+        "fixtures_sha256"
+      ],
+      "properties": {
+        "http": {"$ref": "#/$defs/version"},
+        "rpc": {"$ref": "#/$defs/version"},
+        "ipc": {"$ref": "#/$defs/version"},
+        "grant": {"$ref": "#/$defs/version"},
+        "context": {"$ref": "#/$defs/version"},
+        "terminal_profile": {"$ref": "#/$defs/version"},
+        "contracts_sha256": {"$ref": "#/$defs/sha256"},
+        "fixtures_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sqlite", "prisma_migrations_sha256"],
+      "properties": {
+        "sqlite": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["current", "rollback_min", "rollback_max"],
+          "properties": {
+            "current": {"type": "integer", "minimum": 0},
+            "rollback_min": {"type": "integer", "minimum": 0},
+            "rollback_max": {"type": "integer", "minimum": 0}
+          }
+        },
+        "prisma_migrations_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "update_trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["public_tuf_root", "policy"],
+      "properties": {
+        "public_tuf_root": {"$ref": "#/$defs/trust_record"},
+        "policy": {"$ref": "#/$defs/trust_record"}
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "date", "environment", "reports", "known_limitations"],
+      "properties": {
+        "state": {"$ref": "#/$defs/qualification_state"},
+        "date": {"type": "string", "format": "date"},
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "architecture", "runner", "toolchain"],
+          "properties": {
+            "os": {"$ref": "#/$defs/slug"},
+            "architecture": {"$ref": "#/$defs/slug"},
+            "runner": {"$ref": "#/$defs/safe_text"},
+            "toolchain": {"$ref": "#/$defs/safe_text"}
+          }
+        },
+        "reports": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/qualification_report"}
+        },
+        "known_limitations": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/safe_text"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+:/@(),;'&-]{0,1023}$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$"
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_revision": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[!-~]+$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["git_commit", "git_tree", "clean"],
+      "properties": {
+        "git_commit": {"$ref": "#/$defs/git_revision"},
+        "git_tree": {"$ref": "#/$defs/git_revision"},
+        "clean": {"type": "boolean"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "sha256"],
+      "properties": {
+        "reference": {"$ref": "#/$defs/reference"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reference"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["pending", "passed", "failed", "not_applicable"]
+        },
+        "reference": {"$ref": "#/$defs/reference"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "sha256",
+        "size_bytes",
+        "target",
+        "toolchain",
+        "runtime_dependencies",
+        "sbom",
+        "licenses",
+        "signature",
+        "notarization"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/slug"},
+        "kind": {
+          "type": "string",
+          "enum": ["binary", "container", "web_bundle", "desktop_bundle", "mobile_package", "wasm", "native_mobile", "update_metadata", "installer_metadata"]
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "architecture", "abi"],
+          "properties": {
+            "os": {
+              "type": "string",
+              "enum": ["android", "ios", "linux", "macos", "web", "windows"]
+            },
+            "architecture": {
+              "type": "string",
+              "enum": [
+                "aarch64",
+                "arm64-v8a",
+                "armeabi-v7a",
+                "universal",
+                "wasm32",
+                "x86",
+                "x86_64"
+              ]
+            },
+            "abi": {"$ref": "#/$defs/version"}
+          }
+        },
+        "toolchain": {"$ref": "#/$defs/safe_text"},
+        "runtime_dependencies": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/safe_text"}
+        },
+        "sbom": {"$ref": "#/$defs/evidence"},
+        "licenses": {"$ref": "#/$defs/evidence"},
+        "signature": {"$ref": "#/$defs/attestation"},
+        "notarization": {"$ref": "#/$defs/attestation"}
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_version", "source"],
+      "properties": {
+        "product_version": {"$ref": "#/$defs/version"},
+        "source": {"$ref": "#/$defs/source"},
+        "artifacts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/artifact"}
+        }
+      }
+    },
+    "trust_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "sha256", "reference"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/trust_revision"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "reference": {"$ref": "#/$defs/reference"}
+      }
+    },
+    "trust_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "qualification_state": {
+      "type": "string",
+      "enum": ["pending", "passed", "failed"]
+    },
+    "qualification_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state", "reference", "sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/slug"},
+        "state": {"$ref": "#/$defs/qualification_state"},
+        "reference": {"$ref": "#/$defs/reference"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "status": "SOURCE_ONLY_NOT_RUN",
+  "remainingConstructibleCount": 4,
+  "remainingConstructible": [
+    "extra clientClass-only other-target FK",
+    "extra originId-only other-target FK",
+    "permuted protected triple other-target FK",
+    "class FK alternative typed target"
+  ],
+  "reason": "Pending separate exact CTAS full-row/OID/ACL/type/index model; no CTAS in this18",
+  "prior10": "ACCEPTED_INDEPENDENT_NOT_REEXECUTED",
+  "modelOnlyUncounted": [
+    "Unproven impossible enforcement/inheritance/parent/period states",
+    "Unproven invalid/unready/nonlive referenced index states"
+  ],
+  "fullS5Qualified": false,
+  "businessAndLifecycle": false,
+  "S3": "NOT_RUN",
+  "S4": "NOT_RUN",
+  "S6": "NOT_RUN"
+}

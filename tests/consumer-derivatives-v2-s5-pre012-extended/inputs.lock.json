@@ -1,0 +1,30 @@
+{
+  "status": "SOURCE_ONLY_NOT_RUN",
+  "accepted10Receipt": "artifacts/consumer-derivatives-v2-s5-pre012-root-review/b292f699-fa92-4805-b073-8f976ead1bfc/receipt.json",
+  "referenceRawCapture": "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/pre012-baseline-lomi_derivative_reference_old.json",
+  "dependenciesSha256": {
+    "tests/consumer-derivatives-v2-s5-pre012/prefix.py": "07387ee163ab126f594708f15a3745b0c5c39a2495c818a74d7ab4d5473cc6e5",
+    "tests/consumer-derivatives-v2-s5-pre012/s5.py": "38683cb07f647663d1496dfbcaebc4328ce75c596322c9e6fbf03c03e623d6ae",
+    "tests/consumer-derivatives-v2-s5-pre012/inputs.lock.json": "96fa40e9855f3ef714be24782dfbb9f88bc3e2a159a776dd4698c1729f0c75a8",
+    "tests/consumer-derivatives-v2-s5-pre012/cases.py": "45b338d0366340fcd0c81fef4e403897f3675d4ff3ef02bd412930fc85958b16",
+    "tests/consumer-derivatives-v2-s5-pre012/README.md": "9d0eeb6d54c28086a95bfa0a873ab8ed1e4d786cd37e547e338cbadd9a456e32",
+    "tests/consumer-derivatives-v2-s5-pre012/raw-capture.sql": "f02407bb59dc4bf5237e3252359978bc1d5708fa6a25ee258c88c7ff66dcd868",
+    "tests/consumer-derivatives-v2-s5-pre012/pre012.test.py": "c70fee0f962aea59209f0db156be45eb711ca014a76100ae54f113559be58f40",
+    "tests/consumer-derivatives-v2-s5-pre012/excluded.json": "861f48984ca61e790f0d1fcff1a2843cc5bf7e0ab64d30258d98d180f0568281",
+    "artifacts/consumer-derivatives-v2-s5-pre012-root-review/b292f699-fa92-4805-b073-8f976ead1bfc/receipt.json": "66d6791d98ab3a1af4f5d860c3a6531bbe75cb1c319b9fa907122f3e0dd88153",
+    "artifacts/consumer-derivatives-v2-s5-pre012-actual/ffb9a174-0769-4881-8a60-d9e91c388ad7/independent-outer-tool-receipt.json": "363326429a7b35a577e9ba496fbc9fe99b2159b1db38643421d8b642debcba06",
+    "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/transition-manifest.json": "c51743468c468b8ae6b35d143d6e08a231fb9138109287bd5a04bd1f79155117",
+    "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/completion-receipt.json": "c9d0c7472e264eb29f51f893c0bd7a36328cda85f29492070a38b78d9338d1e9",
+    "artifacts/consumer-derivatives-v2-s5-pre012-actual/ffb9a174-0769-4881-8a60-d9e91c388ad7/controller-envelope.json": "a84d4a578726871d510fa10edbd4a70dbd0604aa335771ac7cd2e64e0366a4a2",
+    "artifacts/consumer-derivatives-v2-s5-pre012-actual/ffb9a174-0769-4881-8a60-d9e91c388ad7/controller.py": "29c31ab8540c0b9f7bb9e833e4694e75ce88632710f69b8a02289ae14e26495d",
+    "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/pre012-baseline-lomi_derivative_reference_old.json": "1e776349c218770e771c31b4fd47dfadade0910da86e5b28b1425d9b23e94c81"
+  },
+  "localSha256": {
+    "cases.py": "9362945e547eeed818b2f30df55aff9036823ceae40dcd957bf4ec95c5dab20d",
+    "extended.test.py": "976351c76da8ac622053eb93d952b7fc526f8cd6249f3768aa40c82ebfb9822a",
+    "excluded.json": "ca38cde838a09358d4a841e9a581a8271b5d12daba9b8ffa7e049c9bab5fa27d",
+    "builtin-trigger-identities.sql": "bb02218ffd56dd461517170a9493c36589ae069f47821ef07a433746007dddf8"
+  },
+  "prior10Reexecuted": false,
+  "fullS5Qualified": false
+}

@@ -1,0 +1,11 @@
+/target/
+**/target/
+**/node_modules/
+/artifacts/
+/staging/
+**/.ctas-runner-view-*/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store
+__pycache__/

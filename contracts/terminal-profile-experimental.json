@@ -1,0 +1,47 @@
+{
+  "profile": "lomi-rust-grid-v1-experimental",
+  "version": 1,
+  "qualified": false,
+  "advertisedAsProductionSupported": false,
+  "outputInterpreter": "single authoritative Rust Alacritty/VTE owner",
+  "clientProjection": "structured state; raw PTY bytes never enter xterm parser",
+  "hostRestart": "lost session; no parser/process restoration or input replay",
+  "engine": {
+    "alacrittyTerminal": "0.26.0",
+    "vte": "0.15.0",
+    "localPatches": "vendor/provenance.json"
+  },
+  "renderer": {
+    "xterm": "6.0.0",
+    "privateApi": true,
+    "source": "packages/terminal-renderer"
+  },
+  "limits": {
+    "rows": { "min": 2, "max": 256 },
+    "columns": { "min": 2, "max": 512 },
+    "historyRows": 4096,
+    "totalRetainedCells": 32768,
+    "outputChunkBytes": 65536,
+    "snapshotBytes": 8388608,
+    "replyMessages": 64,
+    "replyBytes": 8192,
+    "synchronizedUpdateBytes": 2097152,
+    "synchronizedUpdateTimeoutMs": 150,
+    "oscBytes": 65536,
+    "titleBytes": 4096,
+    "titleStackEntries": 64,
+    "hyperlinkUriBytes": 2048,
+    "explicitHyperlinkIdBytes": 256,
+    "combiningMarksPerCell": 64,
+    "projectedCellTextUtf16Units": 128
+  },
+  "normalization": {
+    "text": "remove C0/C1; trim trailing cell scalars to UTF-16 limit without splitting scalars",
+    "links": "only bounded valid HTTP/HTTPS/mailto metadata; otherwise preserve cells and omit link",
+    "oscOverflow": "discard entire OSC through its terminator",
+    "replyOverflow": "drop replies and increment payload-free counter"
+  },
+  "disabled": ["OSC52 clipboard", "kitty keyboard"],
+  "knownUnsupported": ["DEC private modes 47/1047/1048", "DCS query replies", "palette slots 259..268"],
+  "requiredQualification": ["interactive CLI suite", "multi-hour soak", "all platform PTYs", "production atomic attach and streams", "all client adapters"]
+}

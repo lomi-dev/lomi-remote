@@ -1,0 +1,34 @@
+{
+  "status": "NOT_RUN",
+  "fullS5Qualified": false,
+  "implementedHere": "16 declared mixed/function/body-owner authority operator faults only; 202 earlier accepted checks preserved separately, not rerun before target-old helper faults",
+  "excludedVariants": [
+    "other helper/root choices for every body/config/owner/ACL case",
+    "two-of-three new roots and reverse one-of-two helper variants",
+    "helper SECURITY DEFINER drift variant",
+    "body-owner role login/inherit/config/missing-role variants",
+    "other protected prerequisite drifts",
+    "unknown role/default/column admission negatives",
+    "pristine-pre012 CHECK/FK/reapply branches",
+    "positive valid-principal/credential business calls",
+    "S6+ lifecycle/planner/concurrency",
+    "HTTP/BetterAuth/UI/Prisma/production"
+  ],
+  "nextSourceGroups": [
+    {
+      "id": "admission-negative",
+      "status": "NOT_RUN",
+      "contract": "Frozen acceptance default-unknown requires external admission rejection before pins, not operatorP0001. Separate actual fixture/category; no operator successor needed for this bounded acceptance requirement."
+    },
+    {
+      "id": "pristine-pre012",
+      "status": "NOT_RUN",
+      "contract": "New branch frozen24+emptyledger+ops+approval-intent before012/core/bootstrap/seal. Legal CHECK/FK mutations require55000/exactguard/allcatalogrollback; second012 uses distinct post-first012 baseline."
+    },
+    {
+      "id": "positive-business",
+      "status": "NOT_RUN",
+      "contract": "Real valid principal/credential/assertion source fixture required; invalid/NULL calls and bypass bodies are not positive business proof."
+    }
+  ]
+}

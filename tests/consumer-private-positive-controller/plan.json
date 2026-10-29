@@ -1,0 +1,152 @@
+{
+  "S6": "NOT_RUN",
+  "S7": "NOT_RUN",
+  "actualCallsExecuted": 0,
+  "actualCases": "NOT_RUN",
+  "admissionSchema": {
+    "exactKeys": [
+      "schemaVersion",
+      "scope",
+      "freezeSha256",
+      "rootReviewed",
+      "controllerSha256",
+      "launcherSha256"
+    ],
+    "schemaVersion": 1,
+    "freezeSha256": "exact new freeze.json SHA256",
+    "controllerSha256": "must equal freeze.sourceSha256.controller.py and exact controller.py bytes",
+    "rootReviewed": "literal True only",
+    "scope": "private-positive-auth-eleven-only",
+    "launcherSha256": "must be strict lowercase SHA256 of exact installed launcher.py bytes"
+  },
+  "bounds": {
+    "cleanup960": 960,
+    "cleanupReservedBytes": 134217728,
+    "compactEvidenceBytes": 268435456,
+    "coreDumpBytes": 0,
+    "dataDisposalDepth": 32,
+    "dataDisposalEntries": 32768,
+    "deadlineRenewal": false,
+    "externalTimeoutKill": false,
+    "hardPerFileBytes": 33554432,
+    "maxConnections": 2,
+    "minimumFreeBytes": 2147483648,
+    "monitoredOwnedWorkBytes": 2147483648,
+    "oneOriginalStart": true,
+    "privateClientSeconds": 60,
+    "qualification900": 900,
+    "readBytes": 256,
+    "sharedRawReservationBytes": 536870912,
+    "socketOnly": true,
+    "unresolvedOwnership": "inherited owner retained indefinitely; no drop or external hard kill",
+    "work840": 840
+  },
+  "declaredCallChecks": 11,
+  "entrypoint": [
+    "/Library/PrivilegedHelperTools/Lomi/private-positive-eleven/bootstrap"
+  ],
+  "launcherPrerequisite": {
+    "prototype": "trusted_bootstrap.c + trusted_launcher.py",
+    "contract": "fixed root-owned native bootstrap with no argv extras and the exact controller environment allowlist; no-follow checks trusted-root, HOME/TMPDIR, and pinned interpreter paths; rejects extended ACLs on every trust path; verifies the full pinned Python framework signature against PSF Developer ID across all architectures, nested code, and sealed resources; verifies root-owned read-only admission/freeze/controller/launcher files and binds freeze.sourceSha256.controller.py to admission/controller bytes before execve of pinned Python 3.14 with -I -S -B and the same validated launcher fd at /dev/fd/N; production updater must serialize interpreter replacement with bootstrap use",
+    "installationPath": "NOT_STAGED_NON_RUNNABLE",
+    "preExecutionTrust": "C prototype verifies exact launcher bytes before Python interprets them; source/behavior tests do not establish trust in an installed binary; require independently reviewed root-owned immutable bootstrap installation",
+    "runningLauncherAuthenticated": false,
+    "defaultInvocation": "prints PREPARED_NOT_EXECUTED and exits 0",
+    "sourceAdmission": "not created; the fixed production contract will bind raw freezeSha256 and exact installed launcherSha256",
+    "runAdmission": {
+      "status": "NOT_STAGED",
+      "exactKeys": [
+        "schemaVersion",
+        "scope",
+        "freezeSha256",
+        "rootReviewed",
+        "controllerSha256",
+        "executeController",
+        "nativeAdmissionPath"
+      ],
+      "nativeAdmissionPath": "/private/var/db/lomi/consumer-private-eleven-root-admission/<lowercase-uuid>/native-admission.json",
+      "defaultInvocation": "prints PREPARED_NOT_EXECUTED and exits 0"
+    },
+    "projectClosureInstalled": false,
+    "rootAdmissionEnabled": false,
+    "prototypeTest": {
+      "source": "trusted_bootstrap.c",
+      "test": "trusted_bootstrap.test.py",
+      "result": "14 focused macOS compile/behavior tests passed, including ACL rejection, freeze/controller binding, and invalid-JSON rejection",
+      "installation": "NOT_INSTALLED",
+      "admission": "NOT_CREATED",
+      "controllerOrDatabaseExecution": false
+    },
+    "pythonRuntimeSignature": {
+      "requirement": "anchor apple generic and identifier org.python.python and Developer ID Team ID BMM5U3QVKW",
+      "verification": "strict; all architectures; nested code; sealed resources",
+      "currentLab": "REJECTED: strict signature check reports added unsealed files; install a pristine signed framework before any production bootstrap use"
+    }
+  },
+  "exclusions": [
+    "fullS5",
+    "derivative issuance/approval crypto",
+    "populated host/pair/channel operations",
+    "broader faults",
+    "S6 lifecycle/planner/concurrency",
+    "S7",
+    "HTTP/BetterAuth/Prisma/production"
+  ],
+  "externalActualOwnerExit": "PENDING_ROOT_RECEIPT",
+  "fakeNativeProvenance": false,
+  "fullS5Qualified": false,
+  "nativeAdmission": "NOT_GRANTED",
+  "orderedNoticeCount": 13,
+  "parentEnvironment": {
+    "HOME": "fresh absolute resolved owned0700",
+    "LANG_LC_ALL": "C if present",
+    "LC_CTYPE": "C/C.UTF-8/UTF-8 only",
+    "PATH": "/usr/bin:/bin",
+    "TMPDIR": "fresh absolute resolved owned0700",
+    "TZ": "UTC if present",
+    "__CF_USER_TEXT_ENCODING": "if present exact ASCII f'0x{os.getuid():X}:0x0:0x0'; root sets explicitly; no ambient forwarding",
+    "otherInheritedKeys": "reject before any child"
+  },
+  "prerequisites": [
+    "independent accepted root six benign native PIPE/GUC probe result",
+    "independent review of this entire new source freeze, silent wrapper SQL and owned data disposal",
+    "separate root runtime/resource appointment and independently retained outer actual exit0 under original900"
+  ],
+  "privacy": {
+    "dataLease": "before any credentials; original work/data/root marker/device/inode/UID/modes/ancestor/socket bindings and separate PGdata marker",
+    "disposal": "only after finish_owner normalPG0/status0-stop0-status3/all retained reaped/groupquiet/PID absent/socketempty; bounded no-follow fd-relative metadata preflight and deletion of only original owned private PGdata",
+    "disposalFailure": "fixed unqualified privacy gap, no new-root/retry blessing; other fixture/user paths untouched",
+    "historicalPidScope": "retained group quiet at owner reap only; never future signal/currentownership authority",
+    "noGuardianCallsAfterDisposal": true,
+    "postgresDataOrWalArchived": false,
+    "publicLogs": "only before credentials; consumed via unchanged authority and retired by exact original inode+raw digest; failure prevents phase advance",
+    "rootRecheck": "bind exact locator/runId/markerhash/inode/UID; independently check original work marker, socket/data/PID absence; no broad filesystem scan",
+    "server": "foreground stdout/stderr DEVNULL from first spawn; actual fixed GUC gate after public retirement and before any credential"
+  },
+  "privateSql": {
+    "file": "private-positive-driver.sql",
+    "includedSha256": "1fe715e2245f05b372cb2dd8904d3dee08aeed893ae75f8f367a996df1c375c8",
+    "literalInclude": "\\ir positive-auth.sql",
+    "nativeRouting": "binary anonymous PIPE from before Popen; original retained registration/hooks/pump; exact256 reads; bothEOF+retained reap before finish",
+    "parser": "unchanged pinned closed per-byte parser",
+    "postconditions": "in-server exact bytea equality of whole27 catalog/fullmetadata/sixcounts across unchanged ROLLBACK; no retained raw snapshots; current/session e2_owner and cleared local hash GUC; no root-stored snapshot comparison claim",
+    "sha256": "993372a18c72c6649c4e8a14ce4a869828727a0a85b316424c496cb9ae9d8110",
+    "stderr": "exact original13 ordered unique NOTICE envelopes only",
+    "stdout": "empty"
+  },
+  "reviewStatus": "PENDING_ROOT_INDEPENDENT_REVIEW",
+  "schemaVersion": 1,
+  "scope": "private-positive-auth-eleven-only",
+  "sourceConstruction": {
+    "all11ProductionAdapterSourcesUnchanged": true,
+    "authorityComparison": "unchanged reviewed Python module, independent old/new references; exact raw public result inode+digest retirement before private latch",
+    "freshNodeExecuted": false,
+    "immutableTranscriptSha256": "df12fac4ab1e0a156c47354f7d33e3203f058e5c975b278953aaf060abe943a5",
+    "newSteps": 37,
+    "oldSteps": 36,
+    "publicOrderedOperations": 134,
+    "publicRegistryScripts": 46
+  },
+  "sqlParsedOrExecuted": false,
+  "status": "SOURCE_ONLY_NOT_RUN"
+}

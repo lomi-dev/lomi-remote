@@ -1,0 +1,15 @@
+--- a/src/term/cell.rs
++++ b/src/term/cell.rs
+@@ -163,7 +163,11 @@
+     #[inline]
+     pub fn push_zerowidth(&mut self, character: char) {
+         let extra = self.extra.get_or_insert(Default::default());
+-        Arc::make_mut(extra).zerowidth.push(character);
++        // A malformed output stream must not allocate unbounded combining marks
++        // in one cell even after scrollback and raw replay have been bounded.
++        if extra.zerowidth.len() < 64 {
++            Arc::make_mut(extra).zerowidth.push(character);
++        }
+     }
+ 
+     /// Remove all wide char data from a cell.

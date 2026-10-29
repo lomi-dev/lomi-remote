@@ -1,0 +1,26 @@
+{
+  "name": "@lomi/remote-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./generated/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./rpc-client": "./src/rpc-client.ts",
+    "./fixtures/rust-codec.json": "./fixtures/rust-codec.json"
+  },
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "check": "node scripts/generate.mjs --check",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit --strict --module nodenext --target es2022 test/types.ts"
+  },
+  "devDependencies": {
+    "ajv": "8.18.0",
+    "esbuild": "0.28.2",
+    "json-schema-to-typescript": "16.0.0",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "auditRevision": "2cef452c39eb8b455c8d2ae1251310dc870c50bb",
+  "purpose": "macOS native E0 private-editor retention and observer projection fixture",
+  "sources": {
+    "tests/desktop-e0/patches/desktop.patch": "146a75f1d65540b2cc7e253ce15bacb1e21bc09419de0dcb8e7000d3f1437f2a",
+    "tests/desktop-e0/probe.ts": "8b06e5a5aba951413c0df13425d06042aefaadc101952e24741d717362467bd9",
+    "tests/desktop-e0/support.rs": "fdb82a6fd1b8d9a8cbda14863e9f609a42452e4a7f42a5f8c33e9598f90274aa",
+    "tests/desktop-e0/host/Cargo.toml": "1a8746f25fbef7464354f6cfbb5bd80efbcaf6bdbfa66a8ab5d600ce0319031b",
+    "tests/desktop-e0/host/Cargo.lock": "b7aa711cb539f2e494ed2d64f70aff9a3b0e71cee521a9848f0d059226a5cc34",
+    "tests/desktop-e0/host/src/main.rs": "464cb36a5186bdec85a6098d8e90b87e31d3925da1cca1e8bc6ec189c374fe5c",
+    "tests/desktop-e0/README.md": "bca53eb495b266f7bfc1b3249e864f575b9c25cfae2ad3dcfe7e2dcaff46cb6e",
+    "tests/desktop-e0/host/.gitignore": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368",
+    "tools/run_desktop_e0.py": "ba23df7a9e12407fbc057bd2c02e70158e50458bf4f47a17b1eb82df41211178",
+    "tests/desktop-e0/build_receipt.py": "568ba3894870523491c2c2bebceeb3a67c104e1f0a02d7672b0cc3f5a1fcf277",
+    "tests/desktop-e0/test_runner.py": "d07f94a311900248fdd6193a6e08a7a6ef5dc5f0f38161a6af7d60ab22cd06c5",
+    "tools/owned_process.py": "213fe0e0630ff163bcefc819e797911e2a685ad0a47446c0594574151ffeefed"
+  },
+  "limitations": [
+    "Canonical domain is synthetic E0 HostDomain, not product host",
+    "PTYs remain Tauri-owned; only observer attach allocation is tested",
+    "Observer is fixture-only projection, not full Workbench",
+    "No admission or native execution/MCP qualification in this fixture"
+  ],
+  "patchReplay": {
+    "passed": true,
+    "reconstructedFiles": [
+      "src-tauri/Cargo.toml",
+      "src-tauri/build.rs",
+      "src-tauri/src/lib.rs",
+      "src-tauri/src/terminal.rs",
+      "src/Workbench.tsx",
+      "src/main.tsx",
+      "src/e0-desktop-probe.ts",
+      "tests/native/e0-desktop-support.rs"
+    ]
+  },
+  "nativeEvidence": {
+    "path": "artifacts/desktop-e0/run-frfm69gx/result.json",
+    "sha256": "8ef0204a363ca6af4a6c02185e707a2f984c65886717d9c21f9c69e8bc62a835",
+    "screenshotsVisuallyInspected": true,
+    "qualification": "historical only; predates review fixes and has no controlled build receipt"
+  },
+  "currentSourceNativeQualified": false,
+  "currentSourceChange": "Standalone child-ownership initialization and bound shared process helper; frozen historical native receipts do not qualify these later runner sources.",
+  "previousSourceRegistry": {
+    "path": "artifacts/desktop-e0/provenance-before-child-ownership.json",
+    "sha256": "8524aa9293dd789acc93e432bc6acbddc7df23691eec692fd154b928d99d67ab"
+  }
+}

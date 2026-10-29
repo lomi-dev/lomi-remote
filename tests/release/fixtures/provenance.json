@@ -1,0 +1,54 @@
+{
+  "upstream": "awslabs/tough",
+  "tag": "tough-v0.24.0",
+  "commit": "98d8eb8b2ce63515d9b4981c938ef6453c5b5771",
+  "license": "MIT OR Apache-2.0",
+  "warning": "Published upstream test-only signing key. Never use for release or trust.",
+  "files": [
+    {
+      "path": "fixtures/root.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/simple-rsa/root.json",
+      "sha256": "4fb870c642c7b794638d712c95f2159bf749d2599fcce3ff7dad9014346da07d"
+    },
+    {
+      "path": "fixtures/snakeoil.pem",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/snakeoil.pem",
+      "sha256": "eaf88d6e338cebaa0a97c6b82dec4e934616a8fee32df298c7a6258bcb2c81e4"
+    },
+    {
+      "path": "fixtures/rotated-root/1.root.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/rotated-root/1.root.json",
+      "sha256": "738a135c9c169c25331fce64ff79839c440433edde4f57de3a93ec4017a184f8"
+    },
+    {
+      "path": "fixtures/rotated-root/1.snapshot.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/rotated-root/1.snapshot.json",
+      "sha256": "e97d5909dc6bf8173ab108986fc21ae8ff3b833f69129a2e36220c5d732b4317"
+    },
+    {
+      "path": "fixtures/rotated-root/1.targets.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/rotated-root/1.targets.json",
+      "sha256": "ef01a50f2d7e28b0e6278ed17657a5963a555e068e29bbb7003710608d40c1cd"
+    },
+    {
+      "path": "fixtures/rotated-root/2.root.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/rotated-root/2.root.json",
+      "sha256": "8a2543538a412f98e3157b8ec69a5838ed20391586ea7c3483fe1b77b2f55e48"
+    },
+    {
+      "path": "fixtures/rotated-root/timestamp.json",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/tough/tests/data/rotated-root/timestamp.json",
+      "sha256": "9ae2908d20986b51f0d02754609437815a76cdc49790d1b898931eb57b22ea94"
+    },
+    {
+      "path": "fixtures/LICENSE-MIT",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/LICENSE-MIT",
+      "sha256": "90c9a2570c64c62f9c8886afa65afdaf7759a05dae507fc2d38ea43bfc851a00"
+    },
+    {
+      "path": "fixtures/LICENSE-APACHE",
+      "source": "https://raw.githubusercontent.com/awslabs/tough/98d8eb8b2ce63515d9b4981c938ef6453c5b5771/LICENSE-APACHE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  ]
+}

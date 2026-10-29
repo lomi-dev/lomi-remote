@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "status": "PREPARED_NOT_ADMITTED",
+  "admission": null,
+  "productionQualified": false,
+  "qualification": "NOT_RUN",
+  "postgresTarget": "18.6",
+  "bunTarget": "1.4.2",
+  "executionBoundary": "SEPARATE_ROOT_AND_INDEPENDENT_REVIEW_RECEIPTS_REQUIRED",
+  "sourceOnlyProhibition": {
+    "postgresInvocations": 0,
+    "sqlInvocations": 0,
+    "databaseConnections": 0,
+    "bunInvocations": 0,
+    "operatorInvocations": 0,
+    "candidateBuilderInvocations": 0,
+    "networkInvocations": 0
+  },
+  "s7GrowthPolicy": {
+    "version": 2,
+    "unit": "unrelated-issued-principal-rows-per-kind",
+    "targets": [
+      1000,
+      10000
+    ],
+    "kinds": [
+      "remote_web",
+      "mobile"
+    ],
+    "dedicatedFixturesExcluded": 8,
+    "minimumRelationRowsByTarget": {
+      "1000": {
+        "consumer_approval_intent": 2000,
+        "consumer_derivative_consent": 2000,
+        "remote_service_authorization": 2000,
+        "remote_web_session": 1000,
+        "mobile_session": 1000
+      },
+      "10000": {
+        "consumer_approval_intent": 20000,
+        "consumer_derivative_consent": 20000,
+        "remote_service_authorization": 20000,
+        "remote_web_session": 10000,
+        "mobile_session": 10000
+      }
+    }
+  },
+  "stages": [
+    { "id": "S0", "status": "NOT_RUN", "purpose": "Verify exact source closure, Homebrew PostgreSQL 18.6 and Bun dependency hashes/versions after two distinct source-bound receipts; establish marked private work and original deadline." },
+    { "id": "S1", "status": "NOT_RUN", "purpose": "Run pinned Prisma 7.10 migrate deploy against each private database, verify every private ledger row/checksum against pinned migration bytes, apply active operations, then compare exact old-source captures. This private fixture ledger is not production migration-history qualification." },
+    { "id": "S2", "status": "NOT_RUN", "purpose": "Install literal Consumer v3 sources in the target and source-derived new reference in reviewed order." },
+    { "id": "S3", "status": "NOT_RUN", "purpose": "Measure old/new root, helper, typed wrapper and product-channel catalogs from independent references; fill NULL spans only in private operator copies." },
+    { "id": "S4", "status": "NOT_RUN", "purpose": "Run helper seal, three-root and product-channel operators through all-old/all-new idempotency, mixed-state and drift-denial checks. Helper and root operators must reject real authentication-bypassing pg_proc body changes by exact P0001 guard reason and restore the complete catalog before positive controls. Run each owner-state subset at its measured phase; compare final target to reference-new." },
+    { "id": "S5", "status": "NOT_RUN", "purpose": "Measure effective role ACL positives/denials, exact host preservation and nine reviewed Exchange parent column grants. Require eighty sealed-helper denials as actual nonoperator logins, plus all twenty-eight owner-state rejection attempts executed at each operator's exact S4 phase after genuine positive controls; bound transcripts and complete catalog/role rollback must validate before PASS." },
+    { "id": "S6", "status": "NOT_RUN", "purpose": "Run pinned actual issuance/lifecycle/inventory/ACL and signed Host/Pairing/Channel/Ticket handler transactions with four explicit private URLs and four max-2 pools. Require both derivative kinds, fifteen typed overloads, owned heartbeat drain, exact operation recovery after lost ACK, uncertain ticket outcome without replay, and direct retained-key cleanup proof." },
+    { "id": "S7", "status": "NOT_RUN", "purpose": "Build unrelated issued principal rows through actual production flow primitives at T=1000 and T=10000: T remote-web plus T mobile rows (2T total) at each target, using the existing four private role pools. Require at least T in each kind-specific remote_web_session and mobile_session relation, and 2T in each shared consumer_approval_intent, consumer_derivative_consent, and remote_service_authorization relation. Add eight dedicated fixtures (two live pending plus six controls/tombstones) outside those unrelated populations. Require seven leading cascade lookup plans and three pending principal absence plans at both target sizes, five actual rollback DELETE/RI-trigger measurements at each target (ten total), two source-TTL deletion measurements retaining proof/consent/C and canonical liveness, real logout tombstones, unrelated controls, exact private receipt and raw-plan validation, and verified cleanup. This private stage does not qualify a real relay or physical phone/mobile/desktop clients." }
+  ],
+  "bounds": {
+    "originalDeadlineSeconds": 900,
+    "workDeadlineSeconds": 840,
+    "cleanupDeadlineSeconds": 60,
+    "postgresMaximumConnections": 16,
+    "realRolePools": 4,
+    "maximumConnectionsPerRolePool": 2,
+    "stdoutBytesPerProcess": 1048576,
+    "stderrBytesPerProcess": 1048576,
+    "sqlCaptureBytes": 67108864,
+    "bunEvidenceBytes": 1048576,
+    "s7PrivateEvidenceBytes": 33554432,
+    "s7DriverDeadlineSeconds": 360,
+    "postgresSingleFileBytes": 67108864,
+    "noTcpListeners": true,
+    "productionQualifiedAlwaysFalse": true
+  },
+  "limits": [
+    "No production connection or custom target option exists.",
+    "The frozen v2 PostgreSQL runner and sealing runner are not imported or executed.",
+    "S5 cannot pass from partial owner-state evidence, generic operator errors, absent positive controls or missing rollback/catalog preservation.",
+    "S6 proves private handler transactions, not real relay or physical browser/mobile/desktop product acceptance.",
+    "Any missing stage evidence remains NOT_RUN or FAILED and cannot produce PASS.",
+    "A complete private run never authorizes deployment or production qualification."
+  ]
+}

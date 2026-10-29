@@ -1,0 +1,38 @@
+name: E0 regression probes
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probes:
+    name: Regression probes (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.3'
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --no-self-update --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+      - name: Prepare the pinned development WASM tooling
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.126 --locked
+          cargo fetch --locked --target wasm32-unknown-unknown
+      - name: Install pinned contract and browser development dependencies
+        run: |
+          npm ci --prefix packages/remote-contracts --ignore-scripts --no-audit --no-fund
+          npm ci --prefix packages/terminal-renderer --ignore-scripts --no-audit --no-fund
+          node packages/terminal-renderer/node_modules/playwright/cli.js install --with-deps chromium
+      - name: Reproduce E0 observations
+        run: python3 tools/check.py
+      # A green workflow means regressions match expected observations. E0 stays
+      # unqualified; this workflow never packages, signs, deploys or publishes.

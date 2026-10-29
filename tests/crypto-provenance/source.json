@@ -1,0 +1,655 @@
+{
+  "format": 1,
+  "source_repository": "lomi",
+  "source_commit": "2cef452c39eb8b455c8d2ae1251310dc870c50bb",
+  "source_prefix": "src-tauri/crates/lomi-remote-crypto/",
+  "files": [
+    {
+      "source_path": ".gitignore",
+      "destination_path": ".gitignore",
+      "source_sha256": "0013c9fb76b8728f13ada5de1d5c76b5734468f5bc2f5f905c0d7185ce9cdd76",
+      "imported_sha256": "0013c9fb76b8728f13ada5de1d5c76b5734468f5bc2f5f905c0d7185ce9cdd76",
+      "changes": "none"
+    },
+    {
+      "source_path": "Cargo.toml",
+      "destination_path": "Cargo.toml",
+      "source_sha256": "f8d9e573644c224aa5ea29dfa68cfaee5ecdb07cde2fb7ab1dacc61b67616a5f",
+      "imported_sha256": "2e2af01887b3c4b06a10b98146b8864db92273f608986baf962d9def8d683220",
+      "changes": "Pin serde =1.0.229 and serde_json =1.0.151 to the new root workspace versions; add local protocol dependency for validated CapabilitySet and isolated grant_v3 integration test target; preserve patched Snow and remaining audited pins."
+    },
+    {
+      "source_path": "README.md",
+      "destination_path": "README.upstream.md",
+      "source_sha256": "41038193d00adc1ad49341d53a551d0e7fb0f2bb10e308d63b80d2ef1a9c38c5",
+      "imported_sha256": "41038193d00adc1ad49341d53a551d0e7fb0f2bb10e308d63b80d2ef1a9c38c5",
+      "changes": "Relocated historical README"
+    },
+    {
+      "source_path": "examples/interoperability.rs",
+      "destination_path": "examples/interoperability.rs",
+      "source_sha256": "12d27adc186b34bfa3878fc049bf12d746cf80631693189929f9658e73d80f9b",
+      "imported_sha256": "12d27adc186b34bfa3878fc049bf12d746cf80631693189929f9658e73d80f9b",
+      "changes": "none"
+    },
+    {
+      "source_path": "examples/live_interoperability.rs",
+      "destination_path": "examples/live_interoperability.rs",
+      "source_sha256": "fb312a3a9e79397739e04d679b80502deaa402e29d9b54a262587d204ec2c56d",
+      "imported_sha256": "fb312a3a9e79397739e04d679b80502deaa402e29d9b54a262587d204ec2c56d",
+      "changes": "none"
+    },
+    {
+      "source_path": "examples/workspace_interoperability.rs",
+      "destination_path": "examples/workspace_interoperability.rs",
+      "source_sha256": "38ed7ccb063105ca0c69ff0db567c824940454400297b2fbbb9a3ad18885fce5",
+      "imported_sha256": "38ed7ccb063105ca0c69ff0db567c824940454400297b2fbbb9a3ad18885fce5",
+      "changes": "none"
+    },
+    {
+      "source_path": "src/approval.rs",
+      "destination_path": "src/approval.rs",
+      "source_sha256": "4cb3e48e79ca4c309eb87fda1cbde1191c6609f0802bfa2c89245684d51c9c05",
+      "imported_sha256": "4cb3e48e79ca4c309eb87fda1cbde1191c6609f0802bfa2c89245684d51c9c05",
+      "changes": "none"
+    },
+    {
+      "source_path": "src/browser.rs",
+      "destination_path": "src/browser.rs",
+      "source_sha256": "0f44c66123d76aee607a2affae9c3a052933852a4c60266dfe3ca84ea45cb593",
+      "imported_sha256": "f5cacbcc1eeaa1cb7282aeccb179123242de1a77d1b42479032109261aa609df",
+      "changes": "Label historical browser API and expose crate-private identity/channel/JSON helpers for the separate verified v3 bridge; legacy algorithms and exports retained. Add public canonical identity wire and strict native consumer-window challenge signing methods; no private key export."
+    },
+    {
+      "source_path": "src/channel.rs",
+      "destination_path": "src/channel.rs",
+      "source_sha256": "1a3ce5882cd8bab7b0bd8da0729b2f4c3b3dd24dce453e4556096b35d7f7968f",
+      "imported_sha256": "ca13482c9e88cf81dfe2db7d02243a17310d6b7a72a4d0ac418a1ef635fd3fdc",
+      "changes": "Extract existing Snow builder into private shared helper; add validated-token-only v3 constructor binding full context and both endpoint fingerprints, with role/pin/expiry checks. Reuse historical handshake, transport, limits and zeroization unchanged."
+    },
+    {
+      "source_path": "src/identity.rs",
+      "destination_path": "src/identity.rs",
+      "source_sha256": "50091680dc015184e4c78270eb27a2c97f80364e490ff977edf21c74d6046258",
+      "imported_sha256": "912127e83846a2bb2daa0141761f444bb4d1921be61959cda99c637c5723d620",
+      "changes": "Add restricted native crate-private pending-host seed import calling unchanged original key derivation with forced zero-account Host context; preserve all historical public APIs, algorithms, zeroization and vectors."
+    },
+    {
+      "source_path": "src/lib.rs",
+      "destination_path": "src/lib.rs",
+      "source_sha256": "053231448bfc2f0064148fa719daafcc52ea111d89aea5147ae3c8cec72233e9",
+      "imported_sha256": "7adb77df2878e07fbd6e4ec6edb805f8d3122fc22bef34b28d27a261646f3ddb",
+      "changes": "Expose canonical enrollment, committed-host, domain-separated host refresh and wire-verification modules alongside isolated grant/context v3 and browser adapters; preserve imported live APIs. Export strict public identity/window/v3 canonical adapters and guarded public authority WASM module."
+    },
+    {
+      "source_path": "src/mailbox.rs",
+      "destination_path": "src/mailbox.rs",
+      "source_sha256": "b0ecca54ed3ebc0db2598b3169f288310492e65f141aeb71c96c895b063e16ce",
+      "imported_sha256": "b0ecca54ed3ebc0db2598b3169f288310492e65f141aeb71c96c895b063e16ce",
+      "changes": "none"
+    },
+    {
+      "source_path": "src/wire.rs",
+      "destination_path": "src/wire.rs",
+      "source_sha256": "29d17bcd7b8445df296adbf2bdcc70a95b517e9bee87dd67ab18731344085dac",
+      "imported_sha256": "29d17bcd7b8445df296adbf2bdcc70a95b517e9bee87dd67ab18731344085dac",
+      "changes": "none"
+    },
+    {
+      "source_path": "tests/browser.mjs",
+      "destination_path": "tests/browser.mjs",
+      "source_sha256": "7db42b9092b4f56c1f4f28b47459033b44277e476c9a3bad1472be8edb176724",
+      "imported_sha256": "7db42b9092b4f56c1f4f28b47459033b44277e476c9a3bad1472be8edb176724",
+      "changes": "none"
+    },
+    {
+      "source_path": "tests/crypto.rs",
+      "destination_path": "tests/crypto.rs",
+      "source_sha256": "84106a70ee94eff82914d689ea81981f2641725cc03d3e7944584b00f13526c1",
+      "imported_sha256": "84106a70ee94eff82914d689ea81981f2641725cc03d3e7944584b00f13526c1",
+      "changes": "none"
+    },
+    {
+      "source_path": "tests/fixtures/legacy-v1.json",
+      "destination_path": "tests/fixtures/legacy-v1.json",
+      "source_sha256": "f6f0d23587068654b67e8bae23ddf4b2dab13372c9f8c1a6bea7b17ce916fc10",
+      "imported_sha256": "f6f0d23587068654b67e8bae23ddf4b2dab13372c9f8c1a6bea7b17ce916fc10",
+      "changes": "none"
+    },
+    {
+      "source_path": "tests/fixtures/workspace-v2.json",
+      "destination_path": "tests/fixtures/workspace-v2.json",
+      "source_sha256": "c01862d2e434e66d8ca6eebb852474a519e3d03d834be782a66df3f1866b2df8",
+      "imported_sha256": "c01862d2e434e66d8ca6eebb852474a519e3d03d834be782a66df3f1866b2df8",
+      "changes": "none"
+    },
+    {
+      "source_path": "tests/workspace.rs",
+      "destination_path": "tests/workspace.rs",
+      "source_sha256": "02bb378560ab045cef9b3e48426ff04b6825edbc98e7fb94591fce5f87fda806",
+      "imported_sha256": "02bb378560ab045cef9b3e48426ff04b6825edbc98e7fb94591fce5f87fda806",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/.cargo-ok",
+      "destination_path": "vendor/snow/.cargo-ok",
+      "source_sha256": "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91",
+      "imported_sha256": "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/.cargo_vcs_info.json",
+      "destination_path": "vendor/snow/.cargo_vcs_info.json",
+      "source_sha256": "578601cdbcbfc80a81be8d3afbc2a02818bf684168747785322c947192baf0a2",
+      "imported_sha256": "578601cdbcbfc80a81be8d3afbc2a02818bf684168747785322c947192baf0a2",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/.github/dependabot.yml",
+      "destination_path": "vendor/snow/.github/dependabot.yml",
+      "source_sha256": "0d74e21633346a5e7d157257cc84a4abc2413149bcd08250b98bfd922ff09724",
+      "imported_sha256": "0d74e21633346a5e7d157257cc84a4abc2413149bcd08250b98bfd922ff09724",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/.github/workflows/rust.yml",
+      "destination_path": "vendor/snow/.github/workflows/rust.yml",
+      "source_sha256": "cea5c47dbcfaf2881f9f3f3efab9ecdae7004c62260bd51ec96b5f803263688a",
+      "imported_sha256": "cea5c47dbcfaf2881f9f3f3efab9ecdae7004c62260bd51ec96b5f803263688a",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/.gitignore",
+      "destination_path": "vendor/snow/.gitignore",
+      "source_sha256": "df04ee06b80fedf7231ea17002d321e15373476a5f8289ec22ff41dabcadf022",
+      "imported_sha256": "df04ee06b80fedf7231ea17002d321e15373476a5f8289ec22ff41dabcadf022",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/Cargo.toml",
+      "destination_path": "vendor/snow/Cargo.toml",
+      "source_sha256": "3d366decd8240eb15435940b08efb8089c75840d24abb85d1c6dd264aa9fc59e",
+      "imported_sha256": "3d366decd8240eb15435940b08efb8089c75840d24abb85d1c6dd264aa9fc59e",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/Cargo.toml.orig",
+      "destination_path": "vendor/snow/Cargo.toml.orig",
+      "source_sha256": "cba070bdfd0689374f1cc0f1ca635a679909eb7f972cef59dae4cb061078ffab",
+      "imported_sha256": "cba070bdfd0689374f1cc0f1ca635a679909eb7f972cef59dae4cb061078ffab",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/LICENSE-APACHE",
+      "destination_path": "vendor/snow/LICENSE-APACHE",
+      "source_sha256": "25a9014ab0838dec94e22f7598e115e9e55b8360044ef6e30dcda5679d268275",
+      "imported_sha256": "25a9014ab0838dec94e22f7598e115e9e55b8360044ef6e30dcda5679d268275",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/LICENSE-MIT",
+      "destination_path": "vendor/snow/LICENSE-MIT",
+      "source_sha256": "dd6a6177e441f98b36c8e0e92e399a90e94fe09c3fed92d8bf21fe00a840a6ed",
+      "imported_sha256": "dd6a6177e441f98b36c8e0e92e399a90e94fe09c3fed92d8bf21fe00a840a6ed",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/README.md",
+      "destination_path": "vendor/snow/README.md",
+      "source_sha256": "1dee90bd792743af290d527f44a53ed4e583f797bb7abf9dbd7f32f19706b50c",
+      "imported_sha256": "1dee90bd792743af290d527f44a53ed4e583f797bb7abf9dbd7f32f19706b50c",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/SECURITY.md",
+      "destination_path": "vendor/snow/SECURITY.md",
+      "source_sha256": "c26d76470f38ecc1e103fba24af146078ae0d75df785c5149181727c9f21c7d1",
+      "imported_sha256": "c26d76470f38ecc1e103fba24af146078ae0d75df785c5149181727c9f21c7d1",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/UPSTREAM-SHA256.json",
+      "destination_path": "vendor/snow/UPSTREAM-SHA256.json",
+      "source_sha256": "c4b65dde4ceb832cc82a4c5b0730815d57372992ca62dd5c941d5d333f7e1707",
+      "imported_sha256": "c4b65dde4ceb832cc82a4c5b0730815d57372992ca62dd5c941d5d333f7e1707",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/UPSTREAM.md",
+      "destination_path": "vendor/snow/UPSTREAM.md",
+      "source_sha256": "9f56b88c030075f1aa9d9da8a5f6725a115069bf578c82d7b647dd693a7a2771",
+      "imported_sha256": "9f56b88c030075f1aa9d9da8a5f6725a115069bf578c82d7b647dd693a7a2771",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/benches/benches.rs",
+      "destination_path": "vendor/snow/benches/benches.rs",
+      "source_sha256": "16537b6e16d15c4751275591a53949addcedf565765e2d40108a26e84a985add",
+      "imported_sha256": "16537b6e16d15c4751275591a53949addcedf565765e2d40108a26e84a985add",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/build.rs",
+      "destination_path": "vendor/snow/build.rs",
+      "source_sha256": "67c1ae504636fd1c367634efc9fc35a3eddd5b227d4ed7dc461a7f361c7c5fb9",
+      "imported_sha256": "67c1ae504636fd1c367634efc9fc35a3eddd5b227d4ed7dc461a7f361c7c5fb9",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/ci-tests.sh",
+      "destination_path": "vendor/snow/ci-tests.sh",
+      "source_sha256": "8a653a75e24a304d8699fe516297f8d5e80085465a91eb32f0b39d25bc2662c4",
+      "imported_sha256": "8a653a75e24a304d8699fe516297f8d5e80085465a91eb32f0b39d25bc2662c4",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/clippy.toml",
+      "destination_path": "vendor/snow/clippy.toml",
+      "source_sha256": "c89b3efeb595fed56a4f0ee76c911ea6b9d4881ca06cbfc2f6701c9de0535edc",
+      "imported_sha256": "c89b3efeb595fed56a4f0ee76c911ea6b9d4881ca06cbfc2f6701c9de0535edc",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/docs/CNAME",
+      "destination_path": "vendor/snow/docs/CNAME",
+      "source_sha256": "f72744c6a2f958bf7b903b9f1765185b110f5482485411728d21b21a5a5a4608",
+      "imported_sha256": "f72744c6a2f958bf7b903b9f1765185b110f5482485411728d21b21a5a5a4608",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/docs/index.html",
+      "destination_path": "vendor/snow/docs/index.html",
+      "source_sha256": "4cf7dccbfc48d28a52fec3f0fb83a98c97006987d6a7146a0b1c65f84332ddc0",
+      "imported_sha256": "4cf7dccbfc48d28a52fec3f0fb83a98c97006987d6a7146a0b1c65f84332ddc0",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/examples/oneway.rs",
+      "destination_path": "vendor/snow/examples/oneway.rs",
+      "source_sha256": "d13b11616ca9b98e29aebb622528c2498f4f89d023e4bff52a9ce03a50578d3a",
+      "imported_sha256": "d13b11616ca9b98e29aebb622528c2498f4f89d023e4bff52a9ce03a50578d3a",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/examples/simple.rs",
+      "destination_path": "vendor/snow/examples/simple.rs",
+      "source_sha256": "ad4ebc182cf545051742b9ad138388f896977af623a37765b4f4cdb534ec761d",
+      "imported_sha256": "ad4ebc182cf545051742b9ad138388f896977af623a37765b4f4cdb534ec761d",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/rustfmt.toml",
+      "destination_path": "vendor/snow/rustfmt.toml",
+      "source_sha256": "6f27a4b7b3e6608644e20fafdf847c4a055b332a44c5fc90058533d9529d1ae1",
+      "imported_sha256": "6f27a4b7b3e6608644e20fafdf847c4a055b332a44c5fc90058533d9529d1ae1",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/builder.rs",
+      "destination_path": "vendor/snow/src/builder.rs",
+      "source_sha256": "5ba207d41fcffeb24727d6fac464dadeb6e17a8b894fe139a0d7b76066c66a4a",
+      "imported_sha256": "5ba207d41fcffeb24727d6fac464dadeb6e17a8b894fe139a0d7b76066c66a4a",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/cipherstate.rs",
+      "destination_path": "vendor/snow/src/cipherstate.rs",
+      "source_sha256": "808884608a9fcbca5e13174045feb0f85c0ccaf54b0b74123da49b136a01b0f5",
+      "imported_sha256": "808884608a9fcbca5e13174045feb0f85c0ccaf54b0b74123da49b136a01b0f5",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/constants.rs",
+      "destination_path": "vendor/snow/src/constants.rs",
+      "source_sha256": "3cc49383d715be9711c5f05df096fb97787524f3af5c3ae9e30b16d1c56e0a90",
+      "imported_sha256": "3cc49383d715be9711c5f05df096fb97787524f3af5c3ae9e30b16d1c56e0a90",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/error.rs",
+      "destination_path": "vendor/snow/src/error.rs",
+      "source_sha256": "694b8e143f8ff38da90f387c131a9b0d6595aa26042024f24d7dd1fa15fc27a1",
+      "imported_sha256": "694b8e143f8ff38da90f387c131a9b0d6595aa26042024f24d7dd1fa15fc27a1",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/handshakestate.rs",
+      "destination_path": "vendor/snow/src/handshakestate.rs",
+      "source_sha256": "52b4b0996b67f0b14abbfc6a90ba6ebd11e7eb84926a7de6d8031781f1f725e8",
+      "imported_sha256": "52b4b0996b67f0b14abbfc6a90ba6ebd11e7eb84926a7de6d8031781f1f725e8",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/lib.rs",
+      "destination_path": "vendor/snow/src/lib.rs",
+      "source_sha256": "410b2563cdfec773d9a6b77ff5ea106f669a535b469324196f22f4f18b3fd0af",
+      "imported_sha256": "410b2563cdfec773d9a6b77ff5ea106f669a535b469324196f22f4f18b3fd0af",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/params/mod.rs",
+      "destination_path": "vendor/snow/src/params/mod.rs",
+      "source_sha256": "824a1a4fd8c49b60e26ba569f11b15942a68ce6b056ff0ea670a0d542717a619",
+      "imported_sha256": "824a1a4fd8c49b60e26ba569f11b15942a68ce6b056ff0ea670a0d542717a619",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/params/patterns.rs",
+      "destination_path": "vendor/snow/src/params/patterns.rs",
+      "source_sha256": "6297fb84454ef6699edf61679be10da78f5ff31cc163e1b0c69005b14b23d9a2",
+      "imported_sha256": "6297fb84454ef6699edf61679be10da78f5ff31cc163e1b0c69005b14b23d9a2",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/resolvers/default.rs",
+      "destination_path": "vendor/snow/src/resolvers/default.rs",
+      "source_sha256": "b2e349c9951cafd497d0e6db144f0df7f73b71fc9634354d6decfab98ef17693",
+      "imported_sha256": "b2e349c9951cafd497d0e6db144f0df7f73b71fc9634354d6decfab98ef17693",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/resolvers/mod.rs",
+      "destination_path": "vendor/snow/src/resolvers/mod.rs",
+      "source_sha256": "4050150d34b543a2d576b9f20f487e6594a6e922cb82a2d0dd6f5430c23025a5",
+      "imported_sha256": "4050150d34b543a2d576b9f20f487e6594a6e922cb82a2d0dd6f5430c23025a5",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/resolvers/ring.rs",
+      "destination_path": "vendor/snow/src/resolvers/ring.rs",
+      "source_sha256": "d435f1e60ebb012bc01eb63a61ab50c07d18578a5c266651c1227259d5081bd6",
+      "imported_sha256": "d435f1e60ebb012bc01eb63a61ab50c07d18578a5c266651c1227259d5081bd6",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/stateless_transportstate.rs",
+      "destination_path": "vendor/snow/src/stateless_transportstate.rs",
+      "source_sha256": "052772c0913d05805e337b7dfab3caaf12ec03b7f34bf30ae7bc767b14f5f56f",
+      "imported_sha256": "052772c0913d05805e337b7dfab3caaf12ec03b7f34bf30ae7bc767b14f5f56f",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/symmetricstate.rs",
+      "destination_path": "vendor/snow/src/symmetricstate.rs",
+      "source_sha256": "b28169bdc954338e5110aa0e41cc80b495416de18c8017931b41efa45b108620",
+      "imported_sha256": "b28169bdc954338e5110aa0e41cc80b495416de18c8017931b41efa45b108620",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/transportstate.rs",
+      "destination_path": "vendor/snow/src/transportstate.rs",
+      "source_sha256": "c12729609dfbcc7f391984121ddce6e2b04965057c7fc6e318dff5710dab33b1",
+      "imported_sha256": "c12729609dfbcc7f391984121ddce6e2b04965057c7fc6e318dff5710dab33b1",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/types.rs",
+      "destination_path": "vendor/snow/src/types.rs",
+      "source_sha256": "b10495a9fe3316a73ec3005290bb67c7fa9ff59261743a1d6dee49015d91fc40",
+      "imported_sha256": "b10495a9fe3316a73ec3005290bb67c7fa9ff59261743a1d6dee49015d91fc40",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/src/utils.rs",
+      "destination_path": "vendor/snow/src/utils.rs",
+      "source_sha256": "30a92969e50932949f02daf63e6919de39d21a2f68d4966bfafef664183ce4ae",
+      "imported_sha256": "30a92969e50932949f02daf63e6919de39d21a2f68d4966bfafef664183ce4ae",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/tests/general.rs",
+      "destination_path": "vendor/snow/tests/general.rs",
+      "source_sha256": "f776335aecb3e9abb5e523d0d3d5c762bb5ffe40a5fd37f4ad3f166d8b3855fc",
+      "imported_sha256": "f776335aecb3e9abb5e523d0d3d5c762bb5ffe40a5fd37f4ad3f166d8b3855fc",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/tests/vectors.rs",
+      "destination_path": "vendor/snow/tests/vectors.rs",
+      "source_sha256": "04d0354bef0f16b6557b16921b18b1cd61aabf582a21cbb24b70fc3f1ae7e396",
+      "imported_sha256": "04d0354bef0f16b6557b16921b18b1cd61aabf582a21cbb24b70fc3f1ae7e396",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/tests/vectors/cacophony.txt",
+      "destination_path": "vendor/snow/tests/vectors/cacophony.txt",
+      "source_sha256": "3bde7c09a6f349ee11c825c50fcc02649f8f02a47c857a459206b357f9386cae",
+      "imported_sha256": "3bde7c09a6f349ee11c825c50fcc02649f8f02a47c857a459206b357f9386cae",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/tests/vectors/snow-extended.txt",
+      "destination_path": "vendor/snow/tests/vectors/snow-extended.txt",
+      "source_sha256": "c14e284c79c07023e6ddb79c2cf4f73598278de982c0e97689dc2bd86abe4334",
+      "imported_sha256": "c14e284c79c07023e6ddb79c2cf4f73598278de982c0e97689dc2bd86abe4334",
+      "changes": "none"
+    },
+    {
+      "source_path": "vendor/snow/tests/vectors/snow.txt",
+      "destination_path": "vendor/snow/tests/vectors/snow.txt",
+      "source_sha256": "69da433305fd045f6c9f01b656662a389d022688986fd39fbe7af009cd402fd3",
+      "imported_sha256": "69da433305fd045f6c9f01b656662a389d022688986fd39fbe7af009cd402fd3",
+      "changes": "none"
+    }
+  ],
+  "excluded": [
+    {
+      "source_path": "Cargo.lock",
+      "source_sha256": "c074747678ff2081fe6af98b82677815308c8542a0ca0db15b812ed3098ab338",
+      "reason": "Use the new repository workspace lockfile; no nested lockfile."
+    }
+  ],
+  "added_files": [
+    {
+      "destination_path": "README.md",
+      "sha256": "bd2664991d60b9eaf066241f668bbe3e148b5bcda4f54a0d3e870e91b1051e78"
+    },
+    {
+      "destination_path": "examples/v3_browser_interop.rs",
+      "sha256": "9e22e7f300c023924b1b492b8a69f688024fd677a1979bab74d2f831ad7d4850"
+    },
+    {
+      "destination_path": "src/browser_authority.rs",
+      "sha256": "9108b7c235b75f38e47150eaa01bd7d2bc95db02d30b2545ceeb293c606e4b2c"
+    },
+    {
+      "destination_path": "src/browser_authority_v3.rs",
+      "sha256": "28ebbc93efeeb6643a13172aa9d4fc1810a39f47a4bd239e2dad38cd96103856"
+    },
+    {
+      "destination_path": "src/browser_v3.rs",
+      "sha256": "ea736a5888757ab2362e3a1f40e7359c9bfd09e2923824fb00550af5a25c4a17"
+    },
+    {
+      "destination_path": "src/consumer_window.rs",
+      "sha256": "96d871c05d9836f77cbd096ada671b4c7df792f1c93eeb306480ea129af58276"
+    },
+    {
+      "destination_path": "src/enrollment.rs",
+      "sha256": "fb59cce6826bbbaca9c93ec83c5ece2c86a0c7bfd371dea2d6a413fe0953af4b"
+    },
+    {
+      "destination_path": "src/enrollment_wire.rs",
+      "sha256": "17f11a06e805cb07e5df03df307de2d1a69c5a55f80915eb91e8accf975e49ce"
+    },
+    {
+      "destination_path": "src/grant_v3.rs",
+      "sha256": "b698ec3ee7b9d2fea9f363aee15cef159d842bd12cb2d58fed4a6471dae0d809"
+    },
+    {
+      "destination_path": "src/grant_v3_wire.rs",
+      "sha256": "15124f260579ee903dc4c09b58125a659c2c0d36cc3fc5b00b26e71556342d66"
+    },
+    {
+      "destination_path": "src/host_key_enrollment.rs",
+      "sha256": "0a907f0343c4d705daae834a2f7b833274f64df3ae0fae5beaeca9696157863b"
+    },
+    {
+      "destination_path": "src/host_refresh.rs",
+      "sha256": "531618205c29855b313e0069b78f0355bd202d9c6b1bb5bc312cc7f731826a9b"
+    },
+    {
+      "destination_path": "src/public_identity_wire.rs",
+      "sha256": "e71f5cb1641cfe93d879f05d82d4331c1d017ce538fd4255ec2fc7f79c2e4487"
+    },
+    {
+      "destination_path": "tests/consumer_window.rs",
+      "sha256": "9bc74e49f1411d32c89d6b3147efc2354c108f444d73de45f16dc9a501c41c0a"
+    },
+    {
+      "destination_path": "tests/enrollment.rs",
+      "sha256": "8ee415cf0fabdb6fec16ac3941a8da7847e0be89c0a942f329e931f1f49007a0"
+    },
+    {
+      "destination_path": "tests/enrollment_wire.rs",
+      "sha256": "c3cfe2413929b30d010ab63f6cb15e53c378d1f0d7a565d966cbdd37d9dbc36b"
+    },
+    {
+      "destination_path": "tests/fixtures/enrollment-wire-v1.json",
+      "sha256": "3ba997bf09898136ca46bef27ff51d28dd3dd2357b39c0769de7269816890258"
+    },
+    {
+      "destination_path": "tests/fixtures/host-key-commitment-v1.json",
+      "sha256": "7418c45b0c00ec36e21b61a87e1772c9166c75fc97379752b038162288717892"
+    },
+    {
+      "destination_path": "tests/fixtures/host-refresh-v1.json",
+      "sha256": "998d98e234c94c10455a1978f5a75066d6a71a0797bcc652ae8e9700a6b2f3de"
+    },
+    {
+      "destination_path": "tests/grant_v3_wire.rs",
+      "sha256": "52b7acf5c420045103f32cabbc2282f59079cc42c2733802e51172aeff4a9934"
+    },
+    {
+      "destination_path": "tests/host_key_enrollment.rs",
+      "sha256": "994bde92eb69af6d79af0e51c49f1fef344b6beb54d921c4cee074bdcceaacb1"
+    },
+    {
+      "destination_path": "tests/host_refresh.rs",
+      "sha256": "fd7df04ca187bf940a01f326cc6bc0433bb0d2ebff4fdf9ecfd80e5acecb1b11"
+    },
+    {
+      "destination_path": "tests/public_identity_wire.rs",
+      "sha256": "6d5729c61e19a16e1a2d7abb6d18ba72a6d2301566bb6240aec7075fa78b9922"
+    }
+  ],
+  "proof_files": [
+    {
+      "destination_path": "docs/implementation/grant-context-v3.md",
+      "sha256": "33ccadc64413a71f41bbbd84022eab25024256dfda39c0f20b47d8ea0a7e093e"
+    },
+    {
+      "destination_path": "docs/implementation/host-key-enrollment.md",
+      "sha256": "73d166dfe71841e37baef597a3fbc7c6d04283bf17e3f290b1b81245e6302aa5"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/README.md",
+      "sha256": "61e8a737cc0f075ce87b3371f2d83b8b2f66ae577299fc0204b91844d18c7b35"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/THIRD_PARTY_NOTICES.json",
+      "sha256": "bb875d5cb46b5fa459fda09ff8da05ceedd40788fbd7af781f8c9706fbca2fc1"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/package.json",
+      "sha256": "b87bf26063db08d615236c6a8243af945dfc940a516f7c23441dd58a76bcd5bb"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/scripts/build.mjs",
+      "sha256": "0ddab0c76a420ad75676cb96f96005ad14fb72f9f1bf8939bb27abc99e196458"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/src/index.d.ts",
+      "sha256": "47b75ec2e81de1dcc7c23bd07e1b6ed35b433e127cc4034e88025d54dfa2e949"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/src/index.mjs",
+      "sha256": "a5cd6608b1fe944ce9d4217a011c224ef282e35576b78affd4d3ef51dff5bd70"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/authority-v3.test.mjs",
+      "sha256": "c120abca3355feaeb07d4571033e9925e509a7f6ebe39061e9354b070cbdb6d8"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/authority.test.mjs",
+      "sha256": "703d08dadaa8c7222287b14c074323c8beb2200ab403f520b9328e9f6c24cd67"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/fixtures/authority-v3-public.json",
+      "sha256": "45e12cc7d2d3c8ede8912cbc5ebb374099183c1fff4f93dedd0d9cd1f259e75a"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/fixtures/registered-host-public.json",
+      "sha256": "bb2bc2eafc29920d33c9ab10644689a186a5b769221a36e8ed035d4772a8b6fc"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/types.ts",
+      "sha256": "08501e70cf47d1ae07ba6decff4998d03370a480d6a9273a862db2e7e1d593fd"
+    },
+    {
+      "destination_path": "packages/authority-crypto-wasm/test/window-identity.test.mjs",
+      "sha256": "5a5858f3bdb58de46c286aaa3a5d1b297b9bd41e836d0b54837c1952e5d28fd2"
+    },
+    {
+      "destination_path": "tests/crypto-v3-browser/README.md",
+      "sha256": "ca4d360367186417063df6d44ebc62e989e55003494c5ddb7b6e1a84f3bd64db"
+    },
+    {
+      "destination_path": "tests/crypto-v3-browser/browser.mjs",
+      "sha256": "52c1b0e9821817466412405fcb69b90076666cb1259ea41c312ec796efd4fb35"
+    },
+    {
+      "destination_path": "tests/crypto-v3-browser/native-vectors.json",
+      "sha256": "7c9eb21a35f3aedb77e7e7cd5868c958e4f3fc953aeaf83ac265af4cdb92bce8"
+    },
+    {
+      "destination_path": "tests/crypto-v3-browser/test_native_bounds.py",
+      "sha256": "f7ce2124c11f22d49f7fc611ac564061e1924a2a7add044f7ef4644316770058"
+    },
+    {
+      "destination_path": "tests/grant-v3/proof.rs",
+      "sha256": "ed284804051944d6187de94b74a6453d49c8062e368e5181b8a0d948596e47e9"
+    },
+    {
+      "destination_path": "tests/grant-v3/vectors.json",
+      "sha256": "79a9f9f504c986365d9cb3f008ac8b51a371009ef2737ed64a6d015562d77e99"
+    },
+    {
+      "destination_path": "tools/owned_process.py",
+      "sha256": "213fe0e0630ff163bcefc819e797911e2a685ad0a47446c0594574151ffeefed"
+    },
+    {
+      "destination_path": "tools/package_authority_crypto.py",
+      "sha256": "96ab1b8278c8bf205e7c8ee447dea43daa02510b4f19722c3ffb3db5c4679588"
+    },
+    {
+      "destination_path": "tools/run_crypto_v3_browser.py",
+      "sha256": "3ddd96d425915e6ca174f537c457cdcb7a3dcc68922a029cc1e4285de049c032"
+    },
+    {
+      "destination_path": "tools/test_package_authority_crypto.py",
+      "sha256": "4103a43f3383a60f1bbe333a47452485ffe8573edd977fd487a1243f62a35abe"
+    }
+  ],
+  "developmentRunnerUpdate": {
+    "reason": "Bound shared owned-process helper and fixed bounded debug-free Cargo build settings; historical frozen native/browser results retain their own source scope",
+    "previousRegistry": "artifacts/crypto-v3-browser/source-provenance-before-cargo-tuning.json",
+    "previousRegistrySha256": "e6ef0f95ae485a7e6a217d27ef177dee5568304b6d62b8bb0497fce52b296f1a"
+  },
+  "canonicalDecoderUpdate": {
+    "reason": "Add bounded strict decoders for existing canonical host-key and enrollment CBOR; preserve existing encoding/signature fixtures",
+    "files": [
+      "src/enrollment.rs",
+      "tests/enrollment.rs",
+      "src/host_key_enrollment.rs",
+      "tests/host_key_enrollment.rs"
+    ],
+    "previousRegistry": "artifacts/crypto-v3-browser/source-provenance-before-cbor-decode.json",
+    "previousRegistrySha256": "b65c445a4853d52e39e735fdf0e611deadc7fca992ada8b17320f8564c034830"
+  },
+  "canonicalIdentityAdmissionUpdate": {
+    "scope": "Strict signed full identity and window proof, existing v3 canonical decoders and rights/expiry-only proposal narrowing, public WASM authority bridges",
+    "unchanged": "Historical identity/wire and grant/context canonical encoders; grant bind visibility only",
+    "limitations": "No server nonce issuance, atomic replay consumption, authenticated transport or deployment qualification"
+  }
+}

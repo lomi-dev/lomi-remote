@@ -1,0 +1,12 @@
+[package]
+name = "lomi-terminal-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[dependencies]
+alacritty_terminal = "=0.26.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+vt100 = "=0.16.2"

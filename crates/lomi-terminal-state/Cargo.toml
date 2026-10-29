@@ -1,0 +1,27 @@
+[package]
+name = "lomi-terminal-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+log = { version = "=0.4.34", features = ["max_level_off"] }
+alacritty_terminal = "=0.26.0"
+lomi-remote-protocol = { path = "../lomi-remote-protocol" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+url = "=2.5.8"
+uuid = { version = "=1.26.1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+libc = "=0.2.189"
+tempfile = "=3.27.0"
+
+[[bin]]
+name = "state-fixtures"
+path = "src/bin/state-fixtures.rs"
+
+[[test]]
+name = "native-qualification"
+path = "../../tests/terminal-state-native/qualification.rs"

@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "AccountId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EnrollmentId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Closed, proof-only acknowledgement result. The no-family case deliberately\nhas no family ID or epoch fields.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "$ref": "#/$defs/AccountId"
+        },
+        "enrollmentId": {
+          "$ref": "#/$defs/EnrollmentId"
+        },
+        "familyHostAccessEpoch": {
+          "maxLength": 19,
+          "minLength": 1,
+          "pattern": "^([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6][0-9]{0}|9223372036854775807)$",
+          "type": "string"
+        },
+        "hostAccessEpoch": {
+          "maxLength": 19,
+          "minLength": 1,
+          "pattern": "^([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6][0-9]{0}|9223372036854775807)$",
+          "type": "string"
+        },
+        "hostAuthorizationId": {
+          "$ref": "#/$defs/HostAuthorizationId"
+        },
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "outcome": {
+          "const": "revokedFamily",
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "hostId",
+        "enrollmentId",
+        "operationId",
+        "accountId",
+        "hostAuthorizationId",
+        "familyHostAccessEpoch",
+        "hostAccessEpoch"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "$ref": "#/$defs/AccountId"
+        },
+        "enrollmentId": {
+          "$ref": "#/$defs/EnrollmentId"
+        },
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "outcome": {
+          "const": "noFamily",
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "hostId",
+        "enrollmentId",
+        "operationId",
+        "accountId"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "HostEnrollmentRevocationAckResult"
+}

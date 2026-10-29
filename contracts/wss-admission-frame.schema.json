@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "ChannelId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RelayTicket": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "channelId": {
+      "$ref": "#/$defs/ChannelId"
+    },
+    "ticket": {
+      "$ref": "#/$defs/RelayTicket"
+    }
+  },
+  "required": [
+    "channelId",
+    "ticket"
+  ],
+  "title": "WssAdmissionFrame",
+  "type": "object"
+}

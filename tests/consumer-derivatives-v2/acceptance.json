@@ -1,0 +1,227 @@
+{
+  "status": "PREPARED_NOT_EXECUTED",
+  "stages": [
+    {
+      "id": "S0",
+      "kind": "static",
+      "gate": "current task permitted",
+      "actions": [
+        "Verify exact FC66 receipt/archive, a1fd sidecar, 39 core/8 initdb files, acquisition summary bytes without executable invocation.",
+        "Verify reviewed14-file manifest and two NULL-pin files; extract only28 named public archive members.",
+        "Compare intended006/007/008 literal predecessor source to frozen migrations byte-for-byte."
+      ],
+      "pass": [
+        "No PG/version/child invocation; candidate files unchanged; named source hash allowlist complete."
+      ]
+    },
+    {
+      "id": "S1",
+      "kind": "not-executed-PG",
+      "gate": "explicit root appointment admission AFTER current appointment released",
+      "actions": [
+        "Allocate unique private /private/tmp root with marker, private HOME/TMPDIR, umask077, core dumps0; minimum2GiB free; no inherited env or .env/service files.",
+        "Verify four actual executable versions18.6 only after admission; hash39core/8initdb before/after.",
+        "Use approved owned_process initialized SIGCHLD/WNOWAIT ownership; bound each child60s, total900s, at most2clients; PG is separately marked pg_ctl owner.",
+        "initdb synthetic e2_owner trust C locale UTF8; socket-only listen_addresses empty; inspect only owned cluster/socket/listener identities, no broad process argv/env."
+      ],
+      "pass": [
+        "No TCP listener, HTTP listener or service; synthetic identities only; versions and closure stable."
+      ]
+    },
+    {
+      "id": "S2",
+      "kind": "not-executed-SQL",
+      "gate": "S1 pass",
+      "actions": [
+        "Reproduce frozen Auth setup pattern in target and reference DBs: frozen24 migration SQL files in exact order as e2_owner; no Prisma/TS/Bun/HTTP run in this SQL-only appointment. Record deviation that SQL replay does not qualify Prisma migration ledger.",
+        "Create exact synthetic lomi_migrator NOLOGIN, lomi_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS, lomi_remote_api NOLOGIN, lomi_remote_exchange NOLOGIN.",
+        "Apply three frozen ops scripts in frozen order twice; retain source/transcript/catalog snapshots.",
+        "Reject unexpected role grants/defaults/column ACL before candidate installation; known implicit PUBLIC builtin access is separated from protected public-schema objects."
+      ],
+      "pass": [
+        "Intended frozen006/007/008 definitions match independently loaded reference-old; owner/expanded ACL equal; no live operator state used."
+      ]
+    },
+    {
+      "id": "S3",
+      "kind": "not-executed-SQL",
+      "gate": "S2 pass; isolated candidate install only",
+      "actions": [
+        "Apply exact approval-intent,012,authority-core,typed-entrypoints SQL bytes as e2_owner while all gates closed. Stop at first syntax/catalog/role failure.",
+        "Run fixture-ownership-bootstrap.sql exactly once to reconcile FC66 operator-owned installation with intended function ownership; never use it after helper sealing. No body substitutions.",
+        "Apply fixture-ops.sql (exact function/type/column grants). No broad table grant, membership or fallback user.",
+        "Build independent reference-new from same frozen/candidate sources and the explicit literal post-state owner/ACL statements in reviewed operators, not target catalog."
+      ],
+      "pass": [
+        "No function body drift, no retained temporary schemaCREATE, no unknown protected-object/default/column grant; complete constraints/triggers/indexes catalog recorded."
+      ]
+    },
+    {
+      "id": "S4",
+      "kind": "not-executed-catalog-discovery",
+      "gate": "S3 pass and reference transcript/source closure review",
+      "actions": [
+        "Run catalog-discovery.sql separately against reference-old/reference-new and target; preserve full raw pg_get_functiondef UTF8 hex, SHA256, owner/security/config and expanded ACL.",
+        "Reference-old helper state is exact candidate source under migrator with NULL/default-deny install ACL; reference-new helper state uses only exact literal owner/revoke/grant statements from reviewed helper operator. Reference-old/new three roots come only from frozen migrations/exact reviewed three literal definitions.",
+        "Require target-old byte/owner/ACL equality to independently admitted reference-old before selecting any predecessor pin. Require source SHA comparison to reviewed candidate/frozen source for each reference object; arbitrary target discovery never supplies expected state.",
+        "Prepare transition manifest binding frozen archive/receipt/candidate hashes, reference setup transcript hashes, expected owner maps, all measuredold/new raw definitions+ACL, target-before equality, derived-copy byte deltas. Root reviews it before any measured operator executes.",
+        "Fill only NULL pin JSON fields in explicit private derived fixture copies. Keep immutable signature/owner/source hash fields; no pg_get_functiondef normalization or text rewrites, no replacement body changes. Original staging and public review copies stay NULL."
+      ],
+      "pass": [
+        "Reviewable source-provenance chain for each old/new/helper/prerequisite pin; derived SQL bodies byte-identical; target mismatch rejects."
+      ]
+    },
+    {
+      "id": "S5",
+      "kind": "not-executed-SQL",
+      "gate": "root approves S4 measured transition manifest",
+      "actions": [
+        "Execute derived helper operator then derived three-root operator on target under shared global lock; require final exact pins and unreachable helper owner. Run each again for idempotency.",
+        "Repeat frozen ops+fixture-ops twice, then derived operator validation; preserve final exact catalog equality and no retained schemaCREATE or role membership.",
+        "Execute role/owner and catalog drift negative cases below with transaction rollback; verify definitions/owners/ACL unchanged on every denial."
+      ],
+      "pass": [
+        "Actual direct migrator DDL/SETROLE denied; grants stable after twice reapplication; mixed/mutated catalogs abort; exact final closure only."
+      ]
+    },
+    {
+      "id": "S6",
+      "kind": "not-executed-synthetic-SQL",
+      "gate": "S5 pass; lifecycle fixture cases implemented/reviewed before execution",
+      "actions": [
+        "Use synthetic active user, real-shaped opaque browser session, browser metadata, stable account/binding; create fresh marked web/mobile request and short code using only synthetic token bytes in private fixture stdin/files.",
+        "Exercise cases below without HTTP, BetterAuth, UI, Prisma migration012 or live config. Force named deferred guards at intermediate and final points and COMMIT; validate real receipt/proof state.",
+        "Use deterministic fixture clocks via retained short original deadlines, never mutate immutable snapshots or disable triggers to simulate expiry. Waits bounded by current appointment/lock budget."
+      ],
+      "pass": [
+        "All lifecycle cases pass actual SQL; no partial or replay/remint survives; original plaintext verifier purged by ordinary TTL deletion; source-free current C remains live as specified."
+      ]
+    },
+    {
+      "id": "S7",
+      "kind": "not-executed-concurrency-and-plans",
+      "gate": "S6 pass and per-case two-client budget review",
+      "actions": [
+        "Use exactly2owned psql clients plus operator. Barrier by advisory locks/private pipes, never arbitrary sleep; retain transaction/SQLSTATE/outcome evidence for races.",
+        "Populate large ordinary-planner fixtures at two growth sizes (1000 and10000 unrelated principals/approvals); ANALYZE and EXPLAIN ANALYZE BUFFERS VERBOSE without planner setting overrides.",
+        "Measure actual RI-trigger/cascade deletes in rollback transactions plus affected-row counts and unrelated-account liveness; standalone analogous SELECT plans are insufficient."
+      ],
+      "pass": [
+        "Reserved-PK lookups and seven cascade leading indexes support expected bounds under ordinary planning; growth does not create unrelated principal scans; races serialize or roll back cleanly."
+      ]
+    },
+    {
+      "id": "S8",
+      "kind": "not-executed-owned-cleanup",
+      "gate": "finally path, including every failure",
+      "actions": [
+        "Stop only marked owned PG cluster with bounded pg_ctl stop and status; separately prove no owned listeners/clients, archive only sanitized synthetic receipt/catalog/plans and source manifests.",
+        "Retain run receipt flags SQLOnly=true, HTTP/BetterAuth/UI/production=false and actual stage statuses. Unrun stages remain NOT_RUN, never inferred passed.",
+        "Delete only owned private fixture paths after marker/identity confirmation; no broad pkill, shared service stop, guessed PID or unrelated lock release."
+      ],
+      "pass": [
+        "Owned process identities closed, toolchain/candidate hashes unchanged; no credentials/.env/raw verifier retained in public evidence."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "owner-denials",
+      "stage": "S5",
+      "implementation": "recipe-not-yet-executed",
+      "action": "As real lomi_migrator and runtime/API/Exchange, attempt exact CREATE OR REPLACE bypass body, ALTER FUNCTION security/search_path/owner/name, DROP exact helper including CASCADE, SET ROLE body owner, and membership acquisition in isolated rollback transactions.",
+      "expected": "SQLSTATE42501 permission denial, not syntax/missing/dependency error; exact catalogs unchanged. Positive authorized invoker/typed calls still work."
+    },
+    {
+      "id": "mixed-and-drift",
+      "stage": "S5",
+      "implementation": "recipe-not-yet-executed",
+      "action": "In disposable rollback branch make1of2helpers or1of3roots new, alter one ACL/config/body/owner, or give body owner membership/schemaCREATE.",
+      "expected": "Measured operator aborts atomically. No mixed repair, unknown catalog acceptance or temporary authority retained."
+    },
+    {
+      "id": "default-unknown",
+      "stage": "S5",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Inject SELECT default privilege for synthetic fixture_unexpected role before candidate creation in disposable reference branch; also inject protected per-column grant afterward.",
+      "expected": "Admission rejects unknown role/default/column ACL explicitly before pins are accepted; rollback/rebuild clean. No silent revoke-and-bless."
+    },
+    {
+      "id": "grants-twice",
+      "stage": "S5",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Apply frozen3ops+fixtureops twice after initial seal and compare exact roles/table+column/default/function/type ACL and helper/root definitions each time.",
+      "expected": "Stable final complete catalog; no scalar consumer API exposure, owner membership, schemaCREATE or migrator helper ownership."
+    },
+    {
+      "id": "web-mobile-approval",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "For both kinds approve fresh request/code under global lock; capture DB approval time+epoch+original parent ceilings, reserved IDs, combined scope/client/origin/state/PKCE. Exchange using same retained intent.",
+      "expected": "Proof+service+actual+consent commit once; canManageAccount=false and real parent browser/web unchanged. Typed assertion uses actual credential hash."
+    },
+    {
+      "id": "partial-and-rollback",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Consume sources without intent/proof; consume intent without proof; proof without real sources; issue only subset; force deferred check early; delete real source during same exchange; then retry original live code after rollback.",
+      "expected": "All partial forms rollback, including current-tx fake proof. Successful retry uses same reserved IDs and unchanged original expiry; no leaked success/credential before commit."
+    },
+    {
+      "id": "ttl-and-secret",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Commit exchange then ordinary DELETE expired remote_identity_code, remote_login_attempt and mobile_login under maintenance pattern; query absence of original verifier/source rows and call current principal/recipient with correct C. Also delete live pending source and expired pending source.",
+      "expected": "Consumed C remains governed by proof+actual authority after source TTL cleanup; no verifier copy/retention. Live pending deletion fails closed; expired pending cleanup permitted only with no issued authority."
+    },
+    {
+      "id": "bindings-and-pkce",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Swap user/parent/kind/actual/service/consent/client/redirect/origin/state/codeHash/PKCE/cookie binding; raw parent ID hash as credential; stale mobile accessHash; wrong assertion version.",
+      "expected": "Each invalid input denied without unauthorized principal/consent. Forged public/unsigned values never classify browser as mobile."
+    },
+    {
+      "id": "legacy-upgrade-remint",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Use old account-read service, existing unmarked pending request or preexisting actual; try changing scope/version/request marker/approval/birth/snapshot IDs; revoke C then retry discovery same origin; replay consumed code.",
+      "expected": "No V3 authority/upgrade/remint. Tombstone stable and no new C; only fresh login+explicit approval can create different actual origin."
+    },
+    {
+      "id": "approval-renew-race",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Approve, extend parent through existing legacy renewal before exchange; then exchange and renew/refresh actual/service/current idle repeatedly; repeat with original parent shortened or epoch/status changed.",
+      "expected": "Fixed original consentedAt+ceilings retained; no7-day reset or enlargement. Shortening below original hard ceiling or status/epoch fence denies exchange. Idle remains current liveness."
+    },
+    {
+      "id": "mobile-access-vs-principal",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Expire/rotate short access credential while principal/consent live, then compare authenticated request with established recipient/grant liveness; logout/replay-revoke actual afterward.",
+      "expected": "Expired/stale credential denied; established liveness ignores short access expiry, then actual logout/replay revocation denies. No old refresh extends consent/C."
+    },
+    {
+      "id": "revokes-cascades",
+      "stage": "S6",
+      "implementation": "recipe-not-yet-executed",
+      "action": "C-only revoke; consent revoke; actual revoke/delete; service revoke/delete; real parent revoke/delete; account epoch/global revoke; suspension/account delete, with unrelated control account.",
+      "expected": "Correct authority denied; C-only tombstone preserves legacy actual/service account-read; unrelated control survives. Exact C/proof/consent parent cascades measured."
+    },
+    {
+      "id": "race-commit-cleanup",
+      "stage": "S7",
+      "implementation": "recipe-not-yet-executed",
+      "action": "Two clients race consume/consume, exchange/TTL cleanup, exchange/epoch or parent expiry, proof/deferred commit/source delete, and C revoke/recipient.",
+      "expected": "Exactly one legal consume; all stale/partial operations fail or serialize. Lock order global-before-source row locks; no hang/dead client beyond budget."
+    },
+    {
+      "id": "ordinary-plans",
+      "stage": "S7",
+      "implementation": "recipe-not-yet-executed",
+      "action": "At1000and10000 unrelated rows, ordinary EXPLAIN ANALYZE BUFFERS VERBOSE for3principal pending checks and7cascade child predicates, then actual parent/account/service/web/mobile cascades.",
+      "expected": "No approval-only full principal scans; retain actual query plans/trigger timings/row counts under unforced settings and growth evidence; C existing origin unique/PK paths not redundant indexes."
+    }
+  ]
+}

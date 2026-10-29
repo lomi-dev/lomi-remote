@@ -1,0 +1,1084 @@
+{
+  "$defs": {
+    "BoundedList": {
+      "items": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 16384,
+      "type": "array"
+    },
+    "BoundedList2": {
+      "items": {
+        "$ref": "#/$defs/TerminalTab"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList3": {
+      "items": {
+        "$ref": "#/$defs/EntryId"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "ChunkCount": {
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ChunkIndex": {
+      "maximum": 1023,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ConsumerAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "CursorAdvance": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "DisplayText": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "Effect": {
+      "enum": [
+        "none",
+        "committed",
+        "partial",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "EntryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EventCursor": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FileRevision": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FilesInvalidated": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/BoundedList3"
+        },
+        "overflow": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "overflow"
+      ],
+      "type": "object"
+    },
+    "GitInvalidated": {
+      "additionalProperties": false,
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "required": [
+        "repositoryId"
+      ],
+      "type": "object"
+    },
+    "Method": {
+      "enum": [
+        "workspace.get",
+        "workspace.capabilities",
+        "workspace.subscribe",
+        "terminal.create",
+        "terminal.split",
+        "terminal.rename",
+        "terminal.move",
+        "terminal.close",
+        "terminal.restart",
+        "terminal.attach",
+        "terminal.snapshot",
+        "terminal.ack",
+        "terminal.claim",
+        "terminal.renew",
+        "terminal.release",
+        "terminal.input",
+        "terminal.resize",
+        "files.list",
+        "files.stat",
+        "files.read",
+        "files.searchNames",
+        "files.watch",
+        "files.create",
+        "files.mkdir",
+        "files.rename",
+        "files.remove",
+        "git.repositories",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.show",
+        "git.stage",
+        "git.unstage",
+        "git.commit",
+        "git.fetch",
+        "git.push",
+        "git.pull",
+        "operation.status",
+        "operation.cancel"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "OperationParameterHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "OperationReceipt": {
+      "additionalProperties": false,
+      "description": "Validated receipt DTO, not proof of persistence, admission, authority or fencing.\nA consumer must authenticate current rights and row binding before disclosure.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ConsumerAuthorizationId"
+        },
+        "actualRights": {
+          "$ref": "#/$defs/CapabilitySet"
+        },
+        "cancelRequested": {
+          "type": "boolean"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "originalMethod": {
+          "$ref": "#/$defs/Method"
+        },
+        "parameterHash": {
+          "$ref": "#/$defs/OperationParameterHash"
+        },
+        "repositoryExecution": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "operationId",
+        "actor",
+        "workspaceId",
+        "originalMethod",
+        "actualRights",
+        "repositoryExecution",
+        "parameterHash",
+        "state",
+        "cancelRequested",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "OperationResult": {
+      "description": "Only identifiers/revisions, no names, paths, commands or cached plaintext.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "domain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "terminal",
+              "type": "string"
+            },
+            "paneId": {
+              "$ref": "#/$defs/PaneId"
+            },
+            "sessionEpoch": {
+              "$ref": "#/$defs/SessionEpoch"
+            },
+            "sessionId": {
+              "$ref": "#/$defs/TerminalSessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision",
+            "paneId",
+            "sessionId",
+            "sessionEpoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entryId": {
+              "$ref": "#/$defs/EntryId"
+            },
+            "fileRevision": {
+              "$ref": "#/$defs/FileRevision"
+            },
+            "kind": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entryId",
+            "fileRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "repoStateToken": {
+              "$ref": "#/$defs/RepoStateToken"
+            }
+          },
+          "required": [
+            "kind",
+            "repoStateToken"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OperationState": {
+      "enum": [
+        "accepted",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "outcome_unknown"
+      ],
+      "type": "string"
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PaneState": {
+      "enum": [
+        "starting",
+        "publishing",
+        "running",
+        "exited",
+        "stopped",
+        "lost"
+      ],
+      "type": "string"
+    },
+    "RepoStateToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RepositoryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "ResyncReason": {
+      "enum": [
+        "gap",
+        "stale_cursor",
+        "workspace_epoch_changed",
+        "runtime_changed",
+        "session_epoch_changed",
+        "profile_changed",
+        "subscriber_overflow",
+        "watch_overflow",
+        "snapshot_invalid",
+        "assembly_timeout"
+      ],
+      "type": "string"
+    },
+    "RuntimeId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SplitAxis": {
+      "enum": [
+        "horizontal",
+        "vertical"
+      ],
+      "type": "string"
+    },
+    "SubscriptionId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "TabId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalContext": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "profile": {
+          "$ref": "#/$defs/TerminalProfile"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceContext"
+        }
+      },
+      "required": [
+        "workspace",
+        "paneId",
+        "sessionId",
+        "sessionEpoch",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "TerminalControlChanged": {
+      "additionalProperties": false,
+      "properties": {
+        "controlled": {
+          "type": "boolean"
+        },
+        "leaseVersion": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "leaseVersion",
+        "controlled"
+      ],
+      "type": "object"
+    },
+    "TerminalLayout": {
+      "description": "The shared terminal projection contains no private desktop view descriptors.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "pane",
+              "type": "string"
+            },
+            "pane": {
+              "$ref": "#/$defs/TerminalPane"
+            }
+          },
+          "required": [
+            "kind",
+            "pane"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "axis": {
+              "$ref": "#/$defs/SplitAxis"
+            },
+            "first": {
+              "$ref": "#/$defs/TerminalLayout"
+            },
+            "kind": {
+              "const": "split",
+              "type": "string"
+            },
+            "second": {
+              "$ref": "#/$defs/TerminalLayout"
+            }
+          },
+          "required": [
+            "kind",
+            "axis",
+            "first",
+            "second"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalPane": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/PaneState"
+        }
+      },
+      "required": [
+        "paneId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TerminalProfile": {
+      "enum": [
+        "lomi-rust-grid-v1-experimental"
+      ],
+      "type": "string"
+    },
+    "TerminalSessionId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalTab": {
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/TerminalLayout"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabId": {
+          "$ref": "#/$defs/TabId"
+        }
+      },
+      "required": [
+        "tabId",
+        "name",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "WorkspaceChanged": {
+      "additionalProperties": false,
+      "properties": {
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "operationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/WorkspaceState"
+        }
+      },
+      "required": [
+        "domainRevision",
+        "state"
+      ],
+      "type": "object"
+    },
+    "WorkspaceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "grantRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "hostAccessEpoch": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeGeneration": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        },
+        "workspaceEpoch": {
+          "$ref": "#/$defs/WorkspaceEpoch"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "workspaceEpoch",
+        "runtimeId",
+        "runtimeGeneration",
+        "hostAccessEpoch",
+        "grantRevision"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "data": {
+          "$ref": "#/$defs/WorkspaceEventData"
+        },
+        "eventSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        }
+      },
+      "required": [
+        "context",
+        "subscriptionId",
+        "eventSeq",
+        "cursor",
+        "data"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEventData": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/WorkspaceChanged"
+            },
+            "kind": {
+              "const": "workspace.changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/OperationReceipt"
+            },
+            "kind": {
+              "const": "operation.changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/FilesInvalidated"
+            },
+            "kind": {
+              "const": "files.invalidated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/GitInvalidated"
+            },
+            "kind": {
+              "const": "git.invalidated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TerminalControlChanged"
+            },
+            "kind": {
+              "const": "terminal.controlChanged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/CursorAdvance"
+            },
+            "kind": {
+              "const": "cursor.advance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceResync": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "reason": {
+          "$ref": "#/$defs/ResyncReason"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        }
+      },
+      "required": [
+        "context",
+        "subscriptionId",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "WorkspaceSnapshotChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/BoundedList"
+        },
+        "index": {
+          "$ref": "#/$defs/ChunkIndex"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "index",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "WorkspaceSnapshotComplete": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "throughSeq",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "WorkspaceSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "subscriptionId",
+        "throughSeq",
+        "cursor",
+        "chunkCount",
+        "totalBytes"
+      ],
+      "type": "object"
+    },
+    "WorkspaceState": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabs": {
+          "$ref": "#/$defs/BoundedList2"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "name",
+        "tabs"
+      ],
+      "type": "object"
+    },
+    "WorkspaceStreamAck": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "context",
+        "subscriptionId",
+        "throughSeq",
+        "cursor"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceSnapshotMetadata"
+        },
+        "type": {
+          "const": "snapshotMetadata",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceSnapshotChunk"
+        },
+        "type": {
+          "const": "snapshotChunk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceSnapshotComplete"
+        },
+        "type": {
+          "const": "snapshotComplete",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceEvent"
+        },
+        "type": {
+          "const": "event",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceStreamAck"
+        },
+        "type": {
+          "const": "ack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/WorkspaceResync"
+        },
+        "type": {
+          "const": "resyncRequired",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "WorkspaceStreamFrame"
+}

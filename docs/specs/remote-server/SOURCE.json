@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "sourceDirectory": "remote-server",
+  "copyMode": "Verbatim Markdown snapshot; original workspace-relative links retained.",
+  "filesSha256": {
+    "00-cel-i-wymagania.md": "c002a25705468c1d8a62c858e7dfc24f1f2f5aa45299a8e730b226f9fba804b2",
+    "01-obecny-system.md": "a07fcb6c7410dd67d2c75a1e741e86418a1cfe705858887497c497f8e2889de7",
+    "02-architektura.md": "9c878f2b985583cfd573bf42be11083b4f4adc31c25bc4df691876ef022a874a",
+    "03-instalacja-tui-usluga.md": "8865f51d1c99108c80d5bd050d40b3b2c0ae9992486526ed2ab580c501c500a1",
+    "04-protokol-workspace.md": "9c2d6d14c033b500d9da7cc43c90c1ef325de67c990be564600117d9a5cdd858",
+    "05-logowanie-bezpieczenstwo.md": "f4f0484dfd373c89797d450382d07d59eff68c15544b453ffabdb51d2638c786",
+    "06-przebudowa-aplikacji.md": "e22bce8748abacd3f84cf6558b338a1f6f829ac192c7232a81bc7bd57b3cb0ce",
+    "07-realizacja-i-odbior.md": "306673f9aa9db6d569e2231e0029bb875e9ebf51ac33cbe219f4a523f3d2ccb8",
+    "08-decyzje-i-zrodla.md": "b1c3ccc5db53d81d6021cd051c03f9f71c3dc32ae7dcb95e7d16acbae34284dc",
+    "09-kontrakty-i-stany.md": "ef691247b6e1c50f2450ead747b09e403b5b72da072f2a82ce33e56a3852bd4e",
+    "10-operacje-i-weryfikacja.md": "ae8a1817120abf0a3ec92fe3bd7077484e18d9dbe9e21ac6009be59f62ee7010",
+    "AUDYT.md": "3677860ce89f93099a054adebeed30f3747af343aeae3df54445fffdaa184789",
+    "README.md": "f2121ae7fa53cd615984f8837d237209aa32440b8f72330bce93b31d5ea407e2",
+    "STAN-WDROZENIA.md": "bfc400a61b6681d39989b0dd9049b0eef7b18da1ab223a6a2d0df97f558b66ba",
+    "prompt.md": "52ca518eff4e20af8f7c53107765c090c57bbbecc7df642df452680ae8981594"
+  },
+  "excluded": "stan-wdrozenia contains local historical runtime evidence; original files remain in the workspace."
+}

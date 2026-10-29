@@ -1,0 +1,150 @@
+{
+  "S6": "NOT_RUN",
+  "S7": "NOT_RUN",
+  "admissionSchema": {
+    "exactKeys": [
+      "scope",
+      "freezeSha256",
+      "rootReviewed"
+    ],
+    "freezeSha256": "exact actual new freeze.json SHA256",
+    "rootReviewed": "literal True only, reject integers/floats/strings",
+    "scope": "private-pipe-guc-six-cases-only"
+  },
+  "bounds": {
+    "actualNodeCaseMaxSeconds": 15,
+    "actualPgCaseMaxSeconds": 120,
+    "aggregateMaxSeconds": 300,
+    "coreDumpBytes": 0,
+    "deadlineRenewal": false,
+    "defaultWalBytes": 16777216,
+    "emergency960": 960,
+    "hardPerFileBytes": 33554432,
+    "minimumFreeBytesPerCase": 2147483648,
+    "nodeWorkSeconds": 5,
+    "owners": "six sequential, one original outer monotonic start shared by all",
+    "pgWorkSeconds": 60,
+    "privateWork": "freshshortresolvedowned0700 /private/tmp/lpp-*; socketpathbytes<104; retainedcredentialfreework",
+    "qualification900": 900,
+    "unresolvedOwner": "retain indefinitely; never external timeoutkill or drop handle",
+    "work840": 840,
+    "workAggregateMonitoredBytes": 2147483648,
+    "workScanSeconds": 1
+  },
+  "cases": {
+    "cancel-writer": {
+      "expected": "actualread while retained childlive then parent latch -> retained stop/reap",
+      "status": "NOT_RUN"
+    },
+    "eof-alive": {
+      "expected": "bothEOF whilechildalive never completes; deadline handoff + retained stop/reap",
+      "status": "NOT_RUN",
+      "streamDeadlineSeconds": 2
+    },
+    "malformed": {
+      "expected": "closedgenericprotocolfailure, cleared summary, no canary persistence",
+      "status": "NOT_RUN"
+    },
+    "private-guc": {
+      "expected": "freshinitdb admitteddefaultWAL, foregroundDEVNULL/privateGUC, closedpublicDBsetup + unchangedGUCexit0/rawempty, normalPGexit0/stop0/status3/PIDsocketabsent",
+      "status": "NOT_RUN"
+    },
+    "trailing": {
+      "expected": "valid13+trailingcanary cannot complete, cleared summary",
+      "status": "NOT_RUN"
+    },
+    "valid": {
+      "expected": "13ordered markers + bothEOF + retainedactualreap + exit0; stream shape only",
+      "status": "NOT_RUN"
+    }
+  },
+  "credentialsCreated": false,
+  "databaseSetupSqlSha256": "1e493aba4c4847ca11390bd5a61d49cda1a9058c9170dc6db024fc71435721d7",
+  "default": "closed NOT_RUN status, no child or adapter import",
+  "emitterSha256": "a7256617b6694eda368cfb6b769017135dd3cadda450bf0644d45860dd7f0ffa",
+  "entrypoint": [
+    "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+    "-I",
+    "-S",
+    "-B",
+    "/Users/woro/Documents/Lomi/lomi-remote/artifacts/consumer-private-native-probes/2026-10-20-framework-environment-correction/controller.py",
+    "--native-admission",
+    "ROOT_REVIEWED_JSON"
+  ],
+  "externalOwnerExit": "PENDING_ROOT_RECEIPT",
+  "fullS5Qualified": false,
+  "nativeAdmission": "NOT_GRANTED",
+  "nativePipeProvenance": "pinned Popen+PIPE source construction, exact retained binary readFDs exclusively consumed by pinned adapter, FIFO+nonblocking+noninheritable actual checks; FIFO alone insufficient",
+  "nativeProvenanceClaimedDuringPureTests": false,
+  "nextPrivateControllerRequirements": [
+    "separately frozen full public schema/seal/grant registry",
+    "same-database exact catalog/metadata and six-table rollbackcounts",
+    "connectionclosure, originalresource/deadline/actualouterexit0, positiveownedcleanup",
+    "neverarchivePGdata/WAL aftertokens; separately verify marker/uid/inode-safe ownedPRIVATEPGdata disposal after normalstop0/status3/allreaped/PIDsocketabsence/finish_owner and beforequalifiedpublication; nofurtherg.cleanup calls, else explicitunqualifiedprivacygap; no other user/fixture dirs touched"
+  ],
+  "parentEnvironment": {
+    "HOME_TMPDIR": "resolved absolute owned0700 directories",
+    "LANG_LC_ALL": "C if present",
+    "LC_CTYPE": "C/C.UTF-8/UTF-8 only if present (CPython locale bootstrap)",
+    "PATH": "/usr/bin:/bin",
+    "TZ": "UTC if present",
+    "__CF_USER_TEXT_ENCODING": "if present exact ASCII f'0x{os.getuid():X}:0x0:0x0'; root launcher sets explicitly, never forwards ambient value",
+    "emptyInheritedExcept": [
+      "HOME",
+      "TMPDIR",
+      "PATH",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+      "TZ",
+      "__CF_USER_TEXT_ENCODING"
+    ],
+    "unknownKeys": "reject before any child"
+  },
+  "positiveSqlCallsExecuted": 0,
+  "priorCorrectionFreezeSha256": "23412ec852b2112c2c0f074e1254471b0ff5e9617ba6593cacd728c497dbb6d3",
+  "priorOwnedMetadataFreezeSha256": "6c481ee2318c612a3e8fefc44ac8149fe4d9eaf96029c3688bab7cc9747e40a2",
+  "priorSixProbeFreezeSha256": "41a8fa714d0c95bd457b0830276df6c958c9d46b5213f88c2eb62117242af386",
+  "privateAdapterSha256": "40b5a1200e13fb6ee2ec0f0d418d548cdbb3d77dd2bdf5285616a51db00e66c8",
+  "publicMetadata": {
+    "malformed": "fixed metadata rejection; qualification false; no partial raw metadata",
+    "ownedWork": "exact locator/device/inode/uid/mode; original marker UUID/hash/identity; PG data identity; exact PID/socket paths and measured absence/emptiness",
+    "pidScope": "historical retained owner reap only; PID reuse forbids future ownership/kill inference",
+    "publication": "after finish_owner only",
+    "retainedOperations": "ordinal; closed operation/processRole enums; positive exact integer historical retainedPid; exact integer exit; reaped/groupQuiet/foreground/forced",
+    "rootReview": "bind exact locator/identities/marker; recheck exact PID absence/socket emptiness without broad scan",
+    "timing": "finite original 840/900/960 plus aggregate300; case start/end/elapsed and work/stream/actual deadlines"
+  },
+  "publication": "ALLfinish_owner before closed summary/publication; separate actual root ownerexitreceipt",
+  "reviewStatus": "PENDING_ROOT_INDEPENDENT_REVIEW",
+  "rootLauncherCommandTemplate": [
+    "env",
+    "-i",
+    "HOME=<owned0700>",
+    "TMPDIR=<owned0700>",
+    "PATH=/usr/bin:/bin",
+    "LC_ALL=C",
+    "__CF_USER_TEXT_ENCODING=0x1F5:0x0:0x0",
+    "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+    "-I",
+    "-S",
+    "-B",
+    "/Users/woro/Documents/Lomi/lomi-remote/artifacts/consumer-private-native-probes/2026-10-20-framework-environment-correction/controller.py",
+    "--native-admission",
+    "ROOT_REVIEWED_JSON"
+  ],
+  "rootLauncherEnvironmentAddition": {
+    "ambientForwarding": false,
+    "childEnvironmentForwarding": false,
+    "construction": "f'0x{os.getuid():X}:0x0:0x0'",
+    "exactExpectedValueForPreparingUid": "0x1F5:0x0:0x0",
+    "key": "__CF_USER_TEXT_ENCODING"
+  },
+  "schemaVersion": 1,
+  "scope": "private-pipe-guc-six-cases-only",
+  "sourcePreparationExecutedOnly": "pinned Python isolated fake tests; no actual native entry point",
+  "status": "PREPARED_NOT_EXECUTED",
+  "syntheticInputBoundary": "canary is known input source only; no raw emitter output archived or persisted",
+  "testOnlySeam": "ProbeGuardian adds only hash-pinned emitter.cjs plus fixed mode enum and closed public CREATE DATABASE script; production31adapter/SQL/parser/streams/Guardian unchanged",
+  "toolPins": "unchanged tools.json: Python81c/Node5d9/47PG map, 49files before+after, no versions or acquisition"
+}

@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "CanonicalCryptoCborHex": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    },
+    "EnrollmentProof": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalCbor": {
+          "$ref": "#/$defs/CanonicalCryptoCborHex"
+        },
+        "signature": {
+          "$ref": "#/$defs/SignatureHex"
+        }
+      },
+      "required": [
+        "canonicalCbor",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SignatureHex": {
+      "maxLength": 128,
+      "minLength": 128,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    },
+    "WindowIdentityId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "proof": {
+      "$ref": "#/$defs/EnrollmentProof"
+    },
+    "windowIdentityId": {
+      "$ref": "#/$defs/WindowIdentityId"
+    }
+  },
+  "required": [
+    "windowIdentityId",
+    "operationId",
+    "proof"
+  ],
+  "title": "ConsumerWindowRegisterParams",
+  "type": "object"
+}

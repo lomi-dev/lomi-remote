@@ -1,0 +1,12 @@
+[package]
+name = "lomi-git-wasi-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.103"
+wasmtime = { version = "=49.0.3", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p1"] }

@@ -1,0 +1,707 @@
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 738cdbb..7c918a1 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -30,6 +30,7 @@ debug = "line-tables-only"
+ incremental = false
+ 
+ [features]
++e0-desktop-probe = []
+ native-smoke = []
+ remote-probe = ["native-smoke"]
+ chat-probe = ["native-smoke"]
+diff --git a/src-tauri/build.rs b/src-tauri/build.rs
+index 5834542..7cceace 100644
+--- a/src-tauri/build.rs
++++ b/src-tauri/build.rs
+@@ -1,6 +1,7 @@
+ fn main() {
+     for feature in [
+         "NATIVE_SMOKE",
++        "E0_DESKTOP_PROBE",
+         "CHAT_PROBE",
+         "ANDROID_PROBE",
+         "REMOTE_PROBE",
+@@ -23,7 +24,8 @@ fn main() {
+     prepare
+         .arg("../scripts/prepare-ai-runtime.mjs")
+         .env("TARGET", &target);
+-    if std::env::var_os("CARGO_FEATURE_CHAT_PROBE").is_some()
++    if std::env::var_os("CARGO_FEATURE_E0_DESKTOP_PROBE").is_some()
++        || std::env::var_os("CARGO_FEATURE_CHAT_PROBE").is_some()
+         || std::env::var_os("CARGO_FEATURE_MCP_PROBE").is_some()
+     {
+         prepare.arg("--fixture");
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0618c23..2362971 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1,6 +1,7 @@
+ #[cfg(all(
+     any(
+         feature = "native-smoke",
++        feature = "e0-desktop-probe",
+         feature = "chat-probe",
+         feature = "android-probe",
+         feature = "remote-probe",
+@@ -13,6 +14,9 @@ compile_error!("Qualification probes must not enter release builds");
+ mod agent_control;
+ mod agent_notifications;
+ mod agent_runtime;
++#[cfg(all(feature = "e0-desktop-probe", target_os = "macos"))]
++#[path = "../../tests/native/e0-desktop-support.rs"]
++mod e0_desktop_probe;
+ 
+ #[cfg(target_os = "macos")]
+ pub fn agent_runtime_host_worker_entry() -> Option<i32> {
+@@ -253,10 +257,13 @@ pub fn run() {
+             app.state::<remote::Remote>()
+                 .initialize(app.handle().clone());
+             app.state::<push::Push>().initialize(app.handle());
+-            let account_auth = app.path().app_data_dir()?.join("account-auth");
+-            app.state::<auth::AuthController>()
+-                .initialize(&account_auth, app.handle().clone());
+-            app.state::<push::Push>().start(app.handle());
++            #[cfg(not(feature = "e0-desktop-probe"))]
++            {
++                let account_auth = app.path().app_data_dir()?.join("account-auth");
++                app.state::<auth::AuthController>()
++                    .initialize(&account_auth, app.handle().clone());
++                app.state::<push::Push>().start(app.handle());
++            }
+             app.manage(terminal::Shells {
+                 profiles: shell::discover(),
+                 integration,
+@@ -283,12 +290,32 @@ pub fn run() {
+             remote_probe::start(app.handle().clone());
+             #[cfg(not(target_os = "macos"))]
+             remote::install_tray(app)?;
++            #[cfg(all(feature = "e0-desktop-probe", target_os = "macos"))]
++            e0_desktop_probe::start(app.handle().clone());
+             agent_control::initialize_startup(app.handle().clone());
+             Ok(())
+         })
+         .invoke_handler(|invoke| {
+             // Child browser views share the main window, but never its application privileges.
+             let view = invoke.message.webview();
++            #[cfg(feature = "e0-desktop-probe")]
++            if invoke.message.command() == "check_app_update" {
++                invoke
++                    .resolver
++                    .reject("Network update checks disabled in isolated fixture");
++                return true;
++            }
++            #[cfg(all(feature = "e0-desktop-probe", target_os = "macos"))]
++            if invoke.message.command().starts_with("e0_desktop_")
++                && ((view.label() == "main" && view.window().label() == "main")
++                    || (view.label() == "e0-observer" && view.window().label() == "e0-observer"))
++            {
++                let probe: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
++                    e0_desktop_probe::e0_desktop_mode,
++                    e0_desktop_probe::e0_desktop_projection
++                ];
++                return probe(invoke);
++            }
+             if !browser::trusted_app_view(view.label(), view.window().label()) {
+                 invoke
+                     .resolver
+@@ -601,7 +628,9 @@ pub fn run() {
+         #[cfg(target_os = "macos")]
+         macos::handle_run_event(app, &event);
+         if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+-            if *code != Some(tauri::RESTART_EXIT_CODE) {
++            if *code != Some(tauri::RESTART_EXIT_CODE)
++                && !(cfg!(feature = "e0-desktop-probe") && matches!(*code, Some(0 | 2)))
++            {
+                 if let Some(window) = app.get_window("main") {
+                     api.prevent_exit();
+                     let _ = window.unminimize();
+@@ -627,6 +656,8 @@ pub fn run() {
+             app.state::<android_probe::Probe>().cleanup();
+             app.state::<chat::commands::Chats>().stop();
+             app.state::<terminal::Terminals>().stop_all();
++            #[cfg(all(feature = "e0-desktop-probe", target_os = "macos"))]
++            e0_desktop_probe::finish_exit();
+             #[cfg(windows)]
+             app.state::<windows_instance::Instance>().release();
+         }
+diff --git a/src-tauri/src/terminal.rs b/src-tauri/src/terminal.rs
+index 041742c..ffea110 100644
+--- a/src-tauri/src/terminal.rs
++++ b/src-tauri/src/terminal.rs
+@@ -659,6 +659,25 @@ fn size(cols: u16, rows: u16) -> Result<PtySize, String> {
+ }
+ 
+ impl Terminals {
++    #[cfg(feature = "e0-desktop-probe")]
++    pub(crate) fn e0_pids(&self) -> Result<Vec<u32>, String> {
++        self.sessions
++            .lock()
++            .map(|sessions| {
++                sessions
++                    .values()
++                    .filter_map(|session| session.pid)
++                    .collect()
++            })
++            .map_err(|_| "Fixture terminal PIDs unavailable".into())
++    }
++    #[cfg(feature = "e0-desktop-probe")]
++    pub(crate) fn e0_count(&self) -> Result<usize, String> {
++        self.sessions
++            .lock()
++            .map(|s| s.len())
++            .map_err(|_| "Fixture terminal count unavailable".into())
++    }
+     pub(crate) fn observe_remote(
+         &self,
+     ) -> Result<
+diff --git a/src/Workbench.tsx b/src/Workbench.tsx
+index 8adbf55..430523e 100644
+--- a/src/Workbench.tsx
++++ b/src/Workbench.tsx
+@@ -361,6 +361,8 @@ export default function Workbench() {
+     },
+     [renderPaneLayout, settings.leave],
+   );
++  if (window.e0FixtureMode === "main")
++    window.e0Workbench = { get: () => currentSession.current, set: setSession };
+   useAgentControlBridge(
+     session,
+     () => currentSession.current,
+diff --git a/src/main.tsx b/src/main.tsx
+index a061df7..5403565 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -14,8 +14,20 @@ initializeAppearance();
+ trackRemoteActivity();
+ if (native && macOS) document.documentElement.dataset.platform = "macos";
+ 
+-createRoot(document.getElementById("root")!).render(
+-  <StrictMode>
+-    <App />
+-  </StrictMode>,
+-);
++async function mount() {
++  if (native) {
++    const { invoke } = await import("@tauri-apps/api/core");
++    const mode = await invoke<string>("e0_desktop_mode").catch(() => null);
++    if (mode) {
++      window.e0FixtureMode = mode;
++      await (await import("./e0-desktop-probe")).start(mode);
++      if (mode === "observer") return;
++    }
++  }
++  createRoot(document.getElementById("root")!).render(
++    <StrictMode>
++      <App />
++    </StrictMode>,
++  );
++}
++void mount();
+diff --git a/src/e0-desktop-probe.ts b/src/e0-desktop-probe.ts
+new file mode 100644
+index 0000000..4037d3c
+--- /dev/null
++++ b/src/e0-desktop-probe.ts
+@@ -0,0 +1,286 @@
++import { api } from "./api";
++import {
++  newProject,
++  newSession,
++  newTab,
++  newId,
++  layoutPanes,
++  fileTabs,
++  type Tab,
++  type Session,
++  type Layout,
++  type FileTab,
++  type Pane,
++} from "./model";
++import { loadedEditor, openEditorDocument } from "./editor-service";
++import { EditorView } from "@codemirror/view";
++import { undoDepth, redoDepth, undo, redo } from "@codemirror/commands";
++
++declare global {
++  interface Window {
++    e0FixtureMode?: string;
++    e0Workbench?: { get: () => Session | undefined; set: (s: Session) => void };
++    e0Command?: (command: any) => Promise<unknown>;
++    e0Result?: unknown;
++  }
++}
++const wait = async (test: () => unknown) => {
++  for (let i = 0; i < 200; i++) {
++    if (test()) return;
++    await new Promise((r) => setTimeout(r, 50));
++  }
++  throw Error("Fixture renderer deadline");
++};
++let revision = 0;
++let file: FileTab;
++let terminals = new Map<string, Pane>();
++const hash = async (text: string) =>
++  [
++    ...new Uint8Array(
++      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
++    ),
++  ]
++    .map((x) => x.toString(16).padStart(2, "0"))
++    .join("");
++async function inspect() {
++  const doc = loadedEditor(file)!;
++  const content = document.querySelector(".cm-content") as HTMLElement;
++  const view = content && EditorView.findFromDOM(content);
++  const buffer = doc.readAgentBuffer({
++    workspaceId: "fixture",
++    panelId: file.id,
++    relativePath: file.relative,
++    maxChars: 1024,
++  });
++  return {
++    documentId: doc.documentId,
++    dirty: doc.dirty,
++    textHash: await hash(doc.state.doc.toString()),
++    selection: doc.state.selection.toJSON(),
++    undo: undoDepth(doc.state),
++    redo: redoDepth(doc.state),
++    bufferRevision: buffer.text.bufferRevision,
++    diskRevision: buffer.text.diskRevision,
++    privateId: file.id,
++    editorMounted: !!view,
++    revision,
++  };
++}
++export async function start(mode: string) {
++  if (mode === "observer") {
++    document.getElementById("root")!.textContent =
++      "E0 read-only host projection";
++    window.e0Command = async (command) => {
++      if (command.op === "production-denied") {
++        try { await api("load_session"); return false; } catch { return true; }
++      }
++      const s = await api("e0_desktop_projection");
++      document.getElementById("root")!.textContent = JSON.stringify(s);
++      return s;
++    };
++    return;
++  }
++  window.e0Command = async (command) => {
++    await wait(() => window.e0Workbench);
++    const bench = window.e0Workbench!;
++    if (command.op === "initialize") {
++      const project = newProject(command.root, "local:zsh");
++      const workspace = project.workspaces[0];
++      const a = newTab(command.root, "local:zsh", "Fixture A", 2);
++      workspace.tabs = [a];
++      const b = newTab(command.root, "local:zsh", "Fixture B");
++      file = {
++        type: "file",
++        id: newId(),
++        title: "private.txt",
++        root: command.root,
++        relative: "private.txt",
++      };
++      terminals = new Map(
++        [...layoutPanes(a.layout), ...layoutPanes(b.layout)]
++          .filter((p): p is Pane => p.type === "terminal")
++          .map((p) => [p.id, p]),
++      );
++      a.layout = {
++        type: "split",
++        id: newId(),
++        axis: "horizontal",
++        ratio: 0.5,
++        first: a.layout,
++        second: file,
++      };
++      a.activePaneId = file.id;
++      workspace.tabs.push(b);
++      workspace.activeTabId = a.id;
++      bench.set({
++        ...newSession(),
++        projects: [project],
++        activeProjectId: project.id,
++      });
++      await wait(() => document.querySelector(".cm-content"));
++      await openEditorDocument(file);
++      const keepDisabled = [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "Keep disabled");
++      keepDisabled?.click();
++      await wait(() => ![...document.querySelectorAll("button")].some(button => button.textContent?.trim() === "Keep disabled"));
++      return {
++        tabA: a.id,
++        tabB: b.id,
++        paneA: [...terminals.keys()][0],
++        paneB: [...terminals.keys()][2],
++        paneC: [...terminals.keys()][1],
++        ...(await inspect()),
++      };
++    }
++    if (command.op === "edit") {
++      const content = document.querySelector(".cm-content") as HTMLElement;
++      content.focus();
++      // WebKit editing enters through the browser's input/CodeMirror path.
++      const line = content.querySelector(".cm-line")!;
++      const text = line.firstChild!;
++      const selection = window.getSelection()!;
++      const range = document.createRange();
++      range.selectNodeContents(line);
++      range.collapse(false);
++      selection.removeAllRanges();
++      selection.addRange(range);
++      content.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: "fixture dirty Ω" }));
++      text.textContent = (text.textContent ?? "") + "fixture dirty Ω";
++      range.selectNodeContents(line);
++      range.collapse(false);
++      selection.removeAllRanges();
++      selection.addRange(range);
++      content.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "fixture dirty Ω" }));
++      await wait(() => loadedEditor(file)?.dirty);
++      EditorView.findFromDOM(content)!.dispatch({selection: {anchor: 2, head: 7}});
++      return { inputPath: "native-webview-dom-input-codemirror-observer", ...(await inspect()) };
++    }
++    if (command.op === "history") {
++      const view = EditorView.findFromDOM(
++        document.querySelector(".cm-content")!,
++      )!;
++      const before = await inspect();
++      if (!undo(view)) throw Error("Undo unavailable");
++      const undone = await inspect();
++      if (!redo(view)) throw Error("Redo unavailable");
++      return { before, undone, redone: await inspect() };
++    }
++    if (command.op === "apply") {
++      const snapshot = command.snapshot;
++      if (snapshot.revision <= revision) throw Error("STALE_HOST_REVISION");
++      const previous = bench.get()!;
++      const next = structuredClone(previous);
++      const ws = next.projects[0].workspaces[0];
++      function privateTree(layout: Layout): Layout | null {
++        if (layout.type !== "split")
++          return layout.type === "terminal" ? null : layout;
++        const a = privateTree(layout.first),
++          b = privateTree(layout.second);
++        return a && b ? { ...layout, first: a, second: b } : (a ?? b);
++      }
++      function hostTree(t: any): Layout {
++        if (t.type === "terminal") {
++          const pane = terminals.get(t.id);
++          if (!pane) throw Error("UNKNOWN_HOST_TERMINAL");
++          return pane;
++        }
++        return {
++          type: "split",
++          id: newId(),
++          axis: "horizontal",
++          ratio: 0.5,
++          first: hostTree(t.first),
++          second: hostTree(t.second),
++        };
++      }
++      ws.tabs = ws.tabs.flatMap<Tab>((tab) => {
++        if (tab.type !== "terminal") return [tab];
++        const priv = privateTree(tab.layout);
++        const host = snapshot.tabs.find((t: any) => t.id === tab.id);
++        const shared = host ? hostTree(host.tree) : null;
++        const layout =
++          priv && shared
++            ? {
++                type: "split" as const,
++                id: newId(),
++                axis: "horizontal" as const,
++                ratio: 0.5,
++                first: shared,
++                second: priv,
++              }
++            : (priv ?? shared);
++        return layout
++          ? [
++              {
++                ...tab,
++                layout,
++                activePaneId: layoutPanes(layout).some(
++                  (p) => p.id === tab.activePaneId,
++                )
++                  ? tab.activePaneId
++                  : layoutPanes(layout)[0].id,
++              },
++            ]
++          : [];
++      });
++      // Retention occurs synchronously inside the actual Workbench setter.
++      // The negative control replaces the actual setter for this operation.
++      const setter = bench.set;
++      if (command.noopSetter) bench.set = () => {};
++      try { bench.set(next); } finally { bench.set = setter; }
++      await new Promise((r) => setTimeout(r, 150));
++      const committed = bench.get()!;
++      const committedWs = committed.projects[0].workspaces[0];
++      const membership = (tabs: Tab[]) => tabs.flatMap(t => t.type === "terminal"
++        ? layoutPanes(t.layout).filter(p => p.type === "terminal").map(p => [p.id, t.id]) : [])
++        .sort((a, b) => a[0].localeCompare(b[0]));
++      const hostMembership = snapshot.tabs.flatMap((t: any) => {
++        const leaves = (tree: any): string[] => tree.type === "terminal"
++          ? [tree.id] : [...leaves(tree.first), ...leaves(tree.second)];
++        return leaves(t.tree).map(id => [id, t.id]);
++      }).sort((a: string[], b: string[]) => a[0].localeCompare(b[0]));
++      if (JSON.stringify(membership(committedWs.tabs)) !== JSON.stringify(hostMembership))
++        throw Error("WORKBENCH_COMMIT_MEMBERSHIP_MISMATCH");
++      if (JSON.stringify(fileTabs(committed).map(t => t.id).sort()) !==
++          JSON.stringify(fileTabs(previous).map(t => t.id).sort()))
++        throw Error("WORKBENCH_PRIVATE_MEMBERSHIP_MISMATCH");
++      // Only the selected tab renders. Visit each committed tab and compare the
++      // actual Dockview descendants (including geometry), then restore selection.
++      const renderedLayouts = [];
++      const paneElements = () => [...document.querySelectorAll<HTMLElement>(
++        ".terminal-layout [data-pane-id], .terminal-layout [data-file-pane-id]")];
++      for (const tab of committedWs.tabs) {
++        if (tab.type !== "terminal") continue;
++        const navigation = structuredClone(bench.get()!);
++        navigation.projects[0].workspaces[0].activeTabId = tab.id;
++        bench.set(navigation);
++        const expected = layoutPanes(tab.layout).map(p => p.id).sort();
++        await wait(() => JSON.stringify(paneElements().map(p =>
++          p.dataset.paneId ?? p.dataset.filePaneId).sort()) === JSON.stringify(expected));
++        await wait(() => paneElements().every(p => {
++          const r = p.getBoundingClientRect(); return r.width > 0 && r.height > 0;
++        }));
++        const rects = paneElements().map(p => p.getBoundingClientRect());
++        for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
++          const a = rects[i], b = rects[j];
++          if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
++              Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1)
++            throw Error("RENDERED_PANES_OVERLAP");
++        }
++        renderedLayouts.push({ tabId: tab.id, paneIds: expected });
++      }
++      const restore = structuredClone(bench.get()!);
++      restore.projects[0].workspaces[0].activeTabId = committedWs.activeTabId;
++      bench.set(restore);
++      await wait(() => document.querySelector(".cm-content"));
++      revision = snapshot.revision;
++      const actual = bench.get()!;
++      return {
++        ...(await inspect()), renderedLayouts, terminalMembership: membership(actual.projects[0].workspaces[0].tabs),
++        privateIds: fileTabs(actual).map(t => t.id),
++        terminalIds: membership(actual.projects[0].workspaces[0].tabs).map(([id]) => id),
++      };
++    }
++    if (command.op === "inspect") return inspect();
++    throw Error("Unsupported fixture operation");
++  };
++}
+diff --git a/tests/native/e0-desktop-support.rs b/tests/native/e0-desktop-support.rs
+new file mode 100644
+index 0000000..fad5567
+--- /dev/null
++++ b/tests/native/e0-desktop-support.rs
+@@ -0,0 +1,209 @@
++//! Opt-in isolated GUI fixture. Never compiled into a normal application.
++use serde_json::{json, Value};
++use std::{
++    path::{Path, PathBuf},
++    sync::Mutex,
++    time::Duration,
++};
++use tauri::{Manager, Webview, WebviewUrl, WebviewWindowBuilder};
++static WATCHDOG_EXPIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++// This pinned macOS runtime maps RequestExit to ControlFlow::Exit (status 0).
++// Preserve the fixture watchdog's failure status after ordinary owned cleanup.
++pub(crate) fn finish_exit() {
++    if WATCHDOG_EXPIRED.load(std::sync::atomic::Ordering::SeqCst) {
++        std::process::exit(2);
++    }
++}
++fn directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
++    use std::os::unix::fs::{MetadataExt, PermissionsExt};
++    let root = PathBuf::from(std::env::var_os("LOMI_E0_DIRECTORY").ok_or("E0 fixture missing")?);
++    let meta = std::fs::symlink_metadata(&root).map_err(|_| "E0 fixture missing")?;
++    if !root.is_absolute()
++        || !meta.is_dir()
++        || meta.uid() != unsafe { libc::geteuid() }
++        || meta.permissions().mode() & 0o777 != 0o700
++        || !app.config().identifier.starts_with("dev.lomi.e0-")
++    {
++        return Err("E0 fixture isolation rejected".into());
++    }
++    let expected = std::env::var_os("LOMI_E0_APPDATA").ok_or("E0 appdata missing")?;
++    if app
++        .path()
++        .app_data_dir()
++        .map_err(|_| "E0 appdata unavailable")?
++        != PathBuf::from(expected)
++    {
++        return Err("E0 appdata mismatch".into());
++    }
++    Ok(root)
++}
++#[tauri::command]
++pub(crate) fn e0_desktop_mode(app: tauri::AppHandle, webview: Webview) -> Result<String, String> {
++    directory(&app)?;
++    match webview.label() {
++        "main" => Ok("main".into()),
++        "e0-observer" => Ok("observer".into()),
++        _ => Err("Fixture caller denied".into()),
++    }
++}
++#[tauri::command]
++pub(crate) fn e0_desktop_projection(
++    app: tauri::AppHandle,
++    webview: Webview,
++) -> Result<Value, String> {
++    if webview.label() != "e0-observer" {
++        return Err("Fixture caller denied".into());
++    }
++    let bytes = std::fs::read(directory(&app)?.join("snapshot.json"))
++        .map_err(|_| "Projection unavailable")?;
++    if bytes.len() > 16384 {
++        return Err("Projection limit".into());
++    }
++    serde_json::from_slice(&bytes).map_err(|_| "Projection invalid".into())
++}
++fn write(root: &Path, value: Value) {
++    let path = root.join("reply.next");
++    let bytes = serde_json::to_vec(&value).unwrap();
++    use std::io::Write;
++    use std::os::unix::fs::OpenOptionsExt;
++    if let Ok(mut f) = std::fs::OpenOptions::new()
++        .write(true)
++        .create(true)
++        .truncate(true)
++        .mode(0o600)
++        .open(&path)
++    {
++        if f.write_all(&bytes).is_ok() {
++            let _ = std::fs::rename(path, root.join("reply.json"));
++        }
++    }
++}
++async fn evaluate(view: &Webview, script: &str) -> Result<Value, String> {
++    let (send, receive) = tokio::sync::oneshot::channel();
++    let send = Mutex::new(Some(send));
++    view.eval_with_callback(script, move |s| {
++        if let Some(send) = send.lock().unwrap().take() {
++            let result = if s.len() > 65536 {
++                Err("Evaluation limit".into())
++            } else {
++                serde_json::from_str(&s).map_err(|_| "Invalid evaluation JSON".into())
++            };
++            let _ = send.send(result);
++        }
++    })
++    .map_err(|_| "Evaluation failed")?;
++    tokio::time::timeout(Duration::from_secs(5), receive)
++        .await
++        .map_err(|_| "Evaluation timeout")?
++        .map_err(|_| "Evaluation dropped")?
++}
++pub(crate) async fn screenshot(view: &Webview, path: PathBuf) -> Result<Value, String> {
++    let (send, receive) = tokio::sync::oneshot::channel();
++    let send = std::sync::Arc::new(Mutex::new(Some(send)));
++    view.with_webview(move |platform| {
++        use objc2_app_kit::NSImage;
++        use objc2_foundation::NSError;
++        use objc2_web_kit::WKWebView;
++        // The handle is retained by Tauri and is accessed on its GUI thread.
++        let native = unsafe { &*platform.inner().cast::<WKWebView>() };
++        let callback = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
++            let result = if !error.is_null() || image.is_null() {
++                Err("WKWebView snapshot failed".into())
++            } else {
++                let image = unsafe { &*image };
++                image
++                    .TIFFRepresentation()
++                    .ok_or("Missing native image data".to_string())
++                    .and_then(|data| {
++                        let bytes = unsafe { data.as_bytes_unchecked() };
++                        if bytes.len() > 32 * 1024 * 1024 {
++                            return Err("Snapshot too large".into());
++                        }
++                        let image =
++                            image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
++                                .map_err(|e| e.to_string())?;
++                        let dimensions = json!({"width": image.width(), "height": image.height()});
++                        image.save(&path).map_err(|e| e.to_string())?;
++                        Ok(dimensions)
++                    })
++            };
++            if let Some(send) = send.lock().unwrap().take() {
++                let _ = send.send(result);
++            }
++        });
++        unsafe {
++            native.takeSnapshotWithConfiguration_completionHandler(None, &callback);
++        }
++    })
++    .map_err(|e| e.to_string())?;
++    tokio::time::timeout(Duration::from_secs(5), receive)
++        .await
++        .map_err(|_| "Snapshot timeout")?
++        .map_err(|_| "Snapshot callback dropped")?
++}
++
++async fn run_command(app: &tauri::AppHandle, c: &Value) -> Result<Value, String> {
++    match c["op"].as_str().ok_or("Command missing")?{
++        "screenshot"=>{
++            let label=c["view"].as_str().unwrap_or("main");
++            if !["main","e0-observer"].contains(&label){return Err("View denied".into());}
++            screenshot(&app.get_webview(label).ok_or("View unavailable")?,directory(app)?.join(format!("{label}.png"))).await
++        },
++        "observer"=>{
++            let url=app.config().build.dev_url.clone().ok_or("Fixture requires dev server")?;
++            let mut url=url;url.set_query(Some("e0=observer"));
++            WebviewWindowBuilder::new(app,"e0-observer",WebviewUrl::External(url)).title("Lomi E0 projection fixture").inner_size(700.,420.).build().map_err(|_|"Observer creation failed")?;
++            Ok(json!({"created":true,"nativePtys":app.state::<crate::terminal::Terminals>().e0_count()?}))
++        },
++        "diagnostic"=>{
++            evaluate(&app.get_webview("main").ok_or("Main unavailable")?,"({url:location.href,ready:document.readyState,fixtureMode:window.e0FixtureMode||null,command:!!window.e0Command,workbench:!!window.e0Workbench,content:!!document.querySelector('.cm-content')})").await
++        },
++        "count"=>Ok(json!({"nativePtys":app.state::<crate::terminal::Terminals>().e0_count()?,"pids":app.state::<crate::terminal::Terminals>().e0_pids()?})),
++        "eval"=>{
++            let label=c["view"].as_str().unwrap_or("main");
++            if !["main","e0-observer"].contains(&label){return Err("View denied".into());}
++            let view=app.get_webview(label).ok_or("View unavailable")?;
++            for _ in 0..200 {
++                if evaluate(&view,"Boolean(window.e0Command)").await.unwrap_or(Value::Null) == true { break; }
++                tokio::time::sleep(Duration::from_millis(50)).await;
++            }
++            let data=serde_json::to_string(&c["command"]).map_err(|_|"Command invalid")?;
++            evaluate(&view,&format!("(()=>{{window.e0Result=null; if(!window.e0Command)return false;window.e0Command({data}).then(result=>window.e0Result={{ok:true,result}},()=>window.e0Result={{ok:false}});return true;}})()")).await?;
++            for _ in 0..200{let r=evaluate(&view,"window.e0Result || null").await?;if !r.is_null(){return Ok(r);}tokio::time::sleep(Duration::from_millis(50)).await;}
++            Err("Renderer operation deadline".into())
++        },
++        "exit"=>{app.exit(0);Ok(json!({"exit":true}))},
++        _=>Err("Unsupported fixture command".into())
++    }
++}
++pub(crate) fn start(app: tauri::AppHandle) {
++    let Ok(root) = directory(&app) else { return };
++    tauri::async_runtime::spawn(async move {
++        let mut last = 0;
++        // Feature-only shortened watchdog is exercised by a separate negative run.
++        let ticks = std::env::var("LOMI_E0_WATCHDOG_TICKS").ok()
++            .and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0 && *n <= 12000)
++            .unwrap_or(12000);
++        for _ in 0..ticks {
++            tokio::time::sleep(Duration::from_millis(50)).await;
++            let Some(c) = std::fs::read(root.join("command.json"))
++                .ok()
++                .filter(|b| b.len() <= 32768)
++                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
++            else {
++                continue;
++            };
++            let Some(seq) = c["seq"].as_u64().filter(|s| *s > last) else {
++                continue;
++            };
++            last = seq;
++            let result = run_command(&app, &c).await;
++            write(
++                &root,
++                json!({"seq":seq,"ok":result.is_ok(),"result":result.as_ref().ok(),"error":result.err()}),
++            );
++        }
++        WATCHDOG_EXPIRED.store(true, std::sync::atomic::Ordering::SeqCst);
++        app.exit(2);
++    });
++}

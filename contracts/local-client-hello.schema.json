@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "LocalIpcMajor": {
+      "const": 1,
+      "type": "integer"
+    },
+    "LocalIpcVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "$ref": "#/$defs/LocalIpcMajor"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "nonce": {
+      "$ref": "#/$defs/HostId"
+    },
+    "profileId": {
+      "$ref": "#/$defs/HostId"
+    },
+    "version": {
+      "$ref": "#/$defs/LocalIpcVersion"
+    }
+  },
+  "required": [
+    "version",
+    "profileId",
+    "nonce"
+  ],
+  "title": "LocalClientHello",
+  "type": "object"
+}

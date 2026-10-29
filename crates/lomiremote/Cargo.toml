@@ -1,0 +1,37 @@
+[package]
+name = "lomiremote"
+default-run = "lomiremote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+experimental-macos-coalition-cleanup = ["lomi-terminal/experimental-macos-coalition-cleanup"]
+default = []
+release-maintenance = ["lomi-update-trust/release-root"]
+linux-setup-handoff = ["release-maintenance"]
+scm-fixture = ["lomi-host/scm-fixture"]
+service-fixture = ["lomi-platform/service-fixture"]
+dpapi-fixture = ["service-fixture", "lomi-platform/dpapi-fixture"]
+
+[dependencies]
+lomi-terminal = { path = "../lomi-terminal" }
+clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context"] }
+crossterm = "=0.29.0"
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+lomi-host = { path = "../lomi-host" }
+lomi-platform = { path = "../lomi-platform" }
+lomi-remote-protocol = { path = "../lomi-remote-protocol" }
+serde_json = "=1.0.151"
+lomi-terminal-state = { path = "../lomi-terminal-state" }
+uuid = { version = "=1.26.1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+lomi-update-trust = { path = "../lomi-update-trust", features = ["release-root"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lomi-update-trust = { path = "../lomi-update-trust", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+lomi-update-trust = { path = "../lomi-update-trust", optional = true }

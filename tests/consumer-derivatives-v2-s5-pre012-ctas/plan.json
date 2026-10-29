@@ -1,0 +1,60 @@
+{
+  "S3": "NOT_RUN",
+  "S4": "NOT_RUN",
+  "S6": "NOT_RUN",
+  "actualCasesExecuted": 0,
+  "businessAndLifecycle": false,
+  "cases": 4,
+  "fullS5Qualified": false,
+  "harnessRemaining": [
+    "No Guardian/owned native adapter/controller is provided or admitted here.",
+    "No actual CTAS field semantics, SQL setup success, authority result,55000 or rollback measured yet.",
+    "Root review must approve source before a separately frozen Guardian24e396/ResourcePolicy1d631 successor integration with recursive source/tool admissions and fixed lifecycle/deadline/cleanup gates.",
+    "Actual pinnedPG18.6 is the hard acceptance boundary for CTAS/index/type/ACL/reset/ruleutils expectations; mismatch must stop and preserve evidence, never learn fault-target fields or retry automatically."
+  ],
+  "identityPolicy": {
+    "admission": "Canonical positive ASCII-decimal uint32 strings; mutually distinct, absent from pristine numeric-string catalog identities and admitted builtin OIDs; no allocation-order assumption",
+    "allOtherFields": "Independently constructed from pristine same-DB templates and declared DDL; strict JSON scalar types, array order and full row cardinalities; never select other expected fields from actual fault capture",
+    "count": 10,
+    "names": [
+      "heap",
+      "composite",
+      "array",
+      "index",
+      "unique",
+      "fk",
+      "action_delete",
+      "action_update",
+      "check_insert",
+      "check_update"
+    ]
+  },
+  "limitations": [
+    "27 captured public projections only: text CTAS may create TOAST/dependency objects outside these projections; no global full-catalog proof.",
+    "Permuted triple contains protectedclientClass: tests permutation but does not independently isolate sorted-triple selector branch.",
+    "Impossible catalog-only enforcement/inheritance/parent/period/index states remain model-only, uncounted.",
+    "Pure synthetic expected rows/outputs and comparison helpers do not establish actual execution or completion."
+  ],
+  "prior10Reexecuted": false,
+  "prior18Reexecuted": false,
+  "protocol": {
+    "afterEach": "Owned rejected connection must be reaped/closed; all3 raw same-DB27 sections exactly equal that DB baseline, strict5 unchanged and setup objects absent; first mismatch STOP/discard appointment",
+    "authority": "Unchanged pg-s0-s4-metadata.sql inside setup transaction. Parse actual kind rows, reject27 envelopes/vacuous kinds, call original source-pinned reject_authority_drift separately, return/save explicit authority pass record only after guard returns. IntentionalCTAS metadata is not compared against pristine metadata.",
+    "beforeEach": "Future harness must capture raw27 baselines all3DB after frozen pristine prefix, independently admit strict5 and pre-fault6builtin identities perDB, empty fixtures/no setup objects",
+    "evidence": "Future executor saves full raw setup, independent expected rows, actual metadata, authority-return marker, whole script/operatorSHA, ownedpsqlactualstatus, all3 before/after and positive owned cleanup.",
+    "whole012": "Complete unchanged source BEGIN...COMMIT embedded once; expected ownedpsql3,55000/exact mismatch message; exactuniqueordered markers/single advisory blank/noacceptance"
+  },
+  "scope": "Four CTAS full-row public-projection model and transaction/protocol source only",
+  "status": "SOURCE_ONLY_NOT_RUN",
+  "templates": {
+    "attributes": "Projection source real type/typmod/collation/physical layout; reset nullable/no default/identity/generated/ACL/options/statistics/missing",
+    "constraints": "Pristine unique and class FK; explicit constraint names, ordered columns, new target/index, originalCASCADE/noaction update/default deferral flags",
+    "expandedAcl": "Exact owner-eight relation rows includingMAINTAIN for heap AND index; PUBLIC+owner USAGE for each type; source column grants never copied",
+    "heap": "Pristine consumer ordinary/permanent relation; new identity/name/composite type, zeroCHECK/nullACL/hastriggers",
+    "index": "Pristine remote binding unique-index object/catalog; explicit new identity/name/target/key ordinals",
+    "triggers": "Four pristine classFK action/check templates, admitted builtin identities; exact OID-based names/definitions/events/constraint/index/relation links. Replacement removes exactly original four.",
+    "typedAssociations": "Derive opclasses/collations/options and three equality-operator arrays from pristine remote binding UNIQUE/FK typed positions, reorder/resize for each projection",
+    "types": "Pristine consumer composite+array; only identity/name/heap/array/element crosslinks change",
+    "unchanged": "Every other field/row/section, including functions/roles/memberships/schemaauthority/defaultACL/columnACL/ledger"
+  }
+}

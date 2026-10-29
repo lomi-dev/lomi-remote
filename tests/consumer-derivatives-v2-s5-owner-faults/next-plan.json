@@ -1,0 +1,86 @@
+{
+  "status": "PLANNED_NOT_RUN",
+  "runtimeAdmitted": false,
+  "scope": "Separate future source batches; no implied completion or full S5 qualification",
+  "groups": [
+    {
+      "id": "operator-mixed-and-function-drift",
+      "status": "NOT_RUN",
+      "pristineState": "Exact source-reconstructed old helpers and roots, same independent refs; do not start from a branch already mutated by another case",
+      "cases": [
+        "one of two helpers owner/ACL changed to exact independent new state through ordinary ALTER/REVOKE/GRANT",
+        "one of three roots replaced with exact independently admitted new literal body",
+        "helper/root body mutation",
+        "helper/root config",
+        "helper/root owner",
+        "helper/root expanded ACL",
+        "body-owner schema CREATE",
+        "body-owner membership in either direction"
+      ],
+      "expectedSqlstate": "P0001",
+      "sourceSupport": "Frozen helper lines19-22/29-30 and root lines18-19/29/39-45 use RAISE EXCEPTION without ERRCODE. Official PG18 error documentation gives defaultP0001. Exact guard message is also mandatory to exclude a setup error.",
+      "requiredImplementation": "Review every legal DDL setup first; ordinary role/object commands only. Retain exact unmodified operator source as a single-session work item under an outer rollback transaction; setup and expected operator error must roll back together. Unexpected acceptance stops/discards entire private appointment, never repairs. Record exact before/setup/error/after catalogs and no leaked role/object changes. Source-review transaction nesting and ON_ERROR_STOP boundaries before execution."
+    },
+    {
+      "id": "pristine-pre012-check-fk",
+      "status": "NOT_RUN",
+      "pristineState": "NEW fixture branch replaying frozen24 migrations+empty ledger+frozenops; install approval-intent dependency but DO NOT apply012/core/typed/bootstrap/sealing first. Compare original five selected constraints to exact predecessor contract before each case.",
+      "cases": [
+        "extra clientClass-only FK to ordinary CTAS target preserving type",
+        "extra originId-only FK to ordinary CTAS target preserving type",
+        "permuted protected triple FK to other CTAS target with exact unique target",
+        "missing CHECK",
+        "same-name wrong expression CHECK",
+        "renamed CHECK",
+        "unvalidated CHECK",
+        "duplicate equivalent CHECK",
+        "changed class equality FK state/action/target"
+      ],
+      "expectedSqlstate": "55000",
+      "sourceSupport": "Frozen012 predecessor guard explicitly USING ERRCODE=55000 before destructive DDL.",
+      "requiredImplementation": "A separately reviewed pre012 replay hook must run before base.execute installs012; current sealed-state runtime cannot implement this by attempting to drop already-absent predecessor CHECKs. Place legal setup and unmodified012 in owned rollback branch; require55000 and exact baseline metadata/catalog equality plus absent setup tables. No direct pg_constraint writes."
+    },
+    {
+      "id": "012-reapply",
+      "status": "NOT_RUN",
+      "pristineState": "Independently apply approval-intent then012 once from known pristine predecessor using exact sources; capture resulting schema.",
+      "cases": [
+        "second exact012 rejects at strict predecessor guard"
+      ],
+      "expectedSqlstate": "55000",
+      "requiredImplementation": "Separate branch from CHECK/FK mutation cases; exact post-first012 catalog/schema must remain unchanged after rejected second transaction."
+    },
+    {
+      "id": "default-column-admission",
+      "status": "NOT_RUN",
+      "pristineState": "Fresh candidate/reference branch before accepting expected pins; exact original known role/catalog maps",
+      "cases": [
+        "synthetic unexpected role plus default privilege before candidate creation",
+        "protected column privilege after candidate creation"
+      ],
+      "expectedSqlstate": null,
+      "sourceGap": "Frozen helper/root operators do not query pg_default_acl or per-column ACLs, so P0001 rejection by those operators cannot be assumed. Current pure exact-reference admission rejects such drift externally; it is not an operator SQLSTATE.",
+      "requiredDecision": "Design a distinct reviewed admission-negative fixture with exact failure category, or separately authorize a strict operator successor if direct operator rejection is required. Preserve all current candidates and proofs; never normalize/revoke-and-bless unexpected grants."
+    },
+    {
+      "id": "positive-authorized-business",
+      "status": "NOT_RUN",
+      "pristineState": "Future real-shaped active browser/mobile principal and real authorized credential/assertion fixture, separately source-reviewed",
+      "cases": [
+        "authorized direct invoker path",
+        "authorized typed path"
+      ],
+      "requiredImplementation": "Do not treat NULL/invalid principal denial or successful no-op/bypass function as a positive business test. Full S5 remains false until actual full declared matrix is proven."
+    }
+  ],
+  "excluded": [
+    "S6 lifecycle",
+    "S7 planner/concurrency",
+    "HTTP",
+    "BetterAuth",
+    "UI",
+    "Prisma engine",
+    "production",
+    "direct writes to system catalogs/impossible fabricated states"
+  ]
+}

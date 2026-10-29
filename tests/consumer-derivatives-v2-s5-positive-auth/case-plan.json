@@ -1,0 +1,171 @@
+{
+  "boundedSubsetCompleted": false,
+  "cases": [
+    {
+      "expected": {
+        "exactReturnComparison": false,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_principal_live_v2(consumer_authorization)",
+      "id": "principal-runtime",
+      "role": "lomi_runtime",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": false,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_scalar_recheck_v2(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "scalar-invoker",
+      "role": "lomi_remote_inventory_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "message": "actual credential required",
+        "sqlstate": "28000"
+      },
+      "function": "lomi_consumer_scalar_recheck_v2(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "scalar-wronghash",
+      "role": "lomi_remote_inventory_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": false,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_scalar_recheck_v2(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "scalar-repeat",
+      "role": "lomi_remote_inventory_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": false,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_assertion_recheck(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "assertion-root",
+      "role": "lomi_remote_pairing_write_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "message": "actual credential required",
+        "sqlstate": "28000"
+      },
+      "function": "lomi_consumer_assertion_recheck(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "assertion-wronghash",
+      "role": "lomi_remote_pairing_write_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": false,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_assertion_recheck(uuid,uuid,text,text,bigint,bigint,boolean,bytea)",
+      "id": "assertion-repeat",
+      "role": "lomi_remote_pairing_write_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": true,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_recipient_recheck(uuid,uuid)",
+      "id": "recipient-root",
+      "role": "lomi_remote_pairing_write_owner",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": true,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_inventory_v2(lomi_consumer_assertion_v2)",
+      "id": "typed-inventory",
+      "role": "lomi_remote_api",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "message": "actual credential required",
+        "sqlstate": "28000"
+      },
+      "function": "lomi_consumer_inventory_v2(lomi_consumer_assertion_v2)",
+      "id": "typed-wronghash",
+      "role": "lomi_remote_api",
+      "status": "NOT_RUN"
+    },
+    {
+      "expected": {
+        "exactReturnComparison": true,
+        "successfulActualInvocation": true
+      },
+      "function": "lomi_consumer_inventory_v2(lomi_consumer_assertion_v2)",
+      "id": "typed-repeat",
+      "role": "lomi_remote_api",
+      "status": "NOT_RUN"
+    }
+  ],
+  "driverIntegrated": false,
+  "excludedNotRun": [
+    "derivative issuance/approval crypto",
+    "host/pair/channel populated operations",
+    "broader fault matrix",
+    "S6 lifecycle/planner/concurrency",
+    "S7",
+    "HTTP/BetterAuth/Prisma/production"
+  ],
+  "expectedReturnSource": "fixture IDs, ordinary identity INSERT default and captured-once expiry; never tested function output",
+  "fixedErrorStages": [
+    "initial-identity",
+    "setup-runtime",
+    "principal-runtime",
+    "scalar-group",
+    "roots-group",
+    "typed-group",
+    "rollback"
+  ],
+  "fixedNoticeMarkers": [
+    "positive-auth:setup-runtime:PASS",
+    "positive-auth:principal-runtime:PASS",
+    "positive-auth:scalar-invoker:PASS",
+    "positive-auth:scalar-wronghash:PASS",
+    "positive-auth:scalar-repeat:PASS",
+    "positive-auth:assertion-root:PASS",
+    "positive-auth:assertion-wronghash:PASS",
+    "positive-auth:assertion-repeat:PASS",
+    "positive-auth:recipient-root:PASS",
+    "positive-auth:typed-inventory:PASS",
+    "positive-auth:typed-wronghash:PASS",
+    "positive-auth:typed-repeat:PASS",
+    "positive-auth:rollback:PASS"
+  ],
+  "fullS5Qualified": false,
+  "futurePostconditions": [
+    "exact same-database catalog/metadata before-after equality",
+    "six-table counts before-after equality",
+    "outer ROLLBACK and connection closed",
+    "positive owned PG/private fixture cleanup",
+    "independent actual outer exit0 plus deadline and completion gate"
+  ],
+  "futurePrerequisites": [
+    "exact admitted target/reference catalog+metadata and both seals/final grants",
+    "independently reviewed closed credential recorder including server diagnostic policy",
+    "fresh root runtime/resource admission",
+    "original owned-controller/900s/840s+60s/2GiB/60s-child/socket-only/max2 bounds"
+  ],
+  "runtimeAdmitted": false,
+  "schemaVersion": 1,
+  "scope": "SOURCE_ONLY_POSITIVE_AUTH_SUBSET",
+  "stages": {
+    "S5": "NOT_RUN",
+    "S6": "NOT_RUN",
+    "S7": "NOT_RUN"
+  }
+}

@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+umask 077
+
+BOOTSTRAP_ORIGIN=@@BOOTSTRAP_ORIGIN_SHELL@@
+EXPECTED_PLATFORM=@@BOOTSTRAP_PLATFORM_SHELL@@
+EXPECTED_TARGET=@@BOOTSTRAP_TARGET_SHELL@@
+EXPECTED_VERSION=@@BOOTSTRAP_VERSION_SHELL@@
+EXPECTED_ROOT_SHA256=@@BOOTSTRAP_ROOT_SHA256_SHELL@@
+EXPECTED_KEY_SHA256=@@BOOTSTRAP_KEY_SHA256_SHELL@@
+ARCHIVE_NAME=@@BOOTSTRAP_ARCHIVE_NAME_SHELL@@
+ARCHIVE_SIZE=@@BOOTSTRAP_ARCHIVE_SIZE_SHELL@@
+ARCHIVE_SHA256=@@BOOTSTRAP_ARCHIVE_SHA256_SHELL@@
+ARCHIVE_MAX_BYTES=@@BOOTSTRAP_ARCHIVE_MAX_BYTES_SHELL@@
+MANIFEST_NAME=@@BOOTSTRAP_MANIFEST_NAME_SHELL@@
+MANIFEST_SIZE=@@BOOTSTRAP_MANIFEST_SIZE_SHELL@@
+SIGNATURE_NAME=@@BOOTSTRAP_SIGNATURE_NAME_SHELL@@
+PUBLIC_KEY_NAME=@@BOOTSTRAP_PUBLIC_KEY_NAME_SHELL@@
+
+fail() {
+    printf '%s\n' "Lomi Remote Linux bootstrap: $1" >&2
+    exit 1
+}
+
+case "$EXPECTED_PLATFORM" in
+    linux-x86_64|linux-aarch64) ;;
+    *) fail 'unsupported Linux target' ;;
+esac
+host_os=$(uname -s) || fail 'could not identify this operating system'
+[ "$host_os" = Linux ] || fail 'this bootstrap is only for Linux'
+host_arch=$(uname -m) || fail 'could not identify this machine architecture'
+case "$EXPECTED_PLATFORM:$host_arch" in
+    linux-x86_64:x86_64|linux-aarch64:aarch64) ;;
+    *) fail 'release platform does not match this Linux machine' ;;
+esac
+lomi_expected_option=
+for lomi_argument do
+    case "$lomi_expected_option" in
+        version)
+            [ "$lomi_argument" = "$EXPECTED_VERSION" ] \
+                || fail 'requested version differs from this authenticated bootstrap'
+            lomi_expected_option=
+            ;;
+        install-dir)
+            case "$lomi_argument" in /*) ;; *) fail 'install path must be absolute' ;; esac
+            lomi_expected_option=
+            ;;
+        '')
+            case "$lomi_argument" in
+                --version) lomi_expected_option=version ;;
+                --install-dir) lomi_expected_option=install-dir ;;
+                install|uninstall|--no-path) ;;
+                *) fail 'use install|uninstall [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-path]' ;;
+            esac
+            ;;
+    esac
+done
+[ -z "$lomi_expected_option" ] || fail 'installer option is missing its value'
+
+openssl_version=$(openssl version 2>/dev/null) || fail 'OpenSSL 3 is required'
+case "$openssl_version" in OpenSSL\ 3.*) ;; *) fail 'OpenSSL 3 is required' ;; esac
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/lomi-bootstrap.XXXXXXXX") \
+    || fail 'could not create a private bootstrap directory'
+trap 'rm -rf "$work"' 0
+trap 'exit 1' HUP INT TERM
+mkdir "$work/extracted"
+
+download_bounded() {
+    url=$1
+    destination=$2
+    expected_size=$3
+    limit=$((expected_size + 1))
+    curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+        --connect-timeout 20 --max-time 600 "$url" | \
+        head -c "$limit" > "$destination"
+    actual_size=$(LC_ALL=C wc -c < "$destination" | tr -d '[:space:]')
+    [ "$actual_size" = "$expected_size" ] \
+        || fail 'download size did not match the signed release'
+}
+
+fetch() {
+    asset=$1
+    destination=$2
+    expected_size=$3
+    download_bounded "${BOOTSTRAP_ORIGIN}${asset}" "$destination" "$expected_size"
+}
+
+fetch "$MANIFEST_NAME" "$work/manifest" "$MANIFEST_SIZE"
+cat > "$work/expected-manifest" <<LOMI_BOOTSTRAP_MANIFEST
+LOMI-LINUX-BOOTSTRAP-V1
+platform=$EXPECTED_PLATFORM
+target=$EXPECTED_TARGET
+version=$EXPECTED_VERSION
+public-tuf-root-sha256=$EXPECTED_ROOT_SHA256
+archive=$ARCHIVE_NAME
+archive-size=$ARCHIVE_SIZE
+archive-sha256=$ARCHIVE_SHA256
+LOMI_BOOTSTRAP_MANIFEST
+cmp -s "$work/manifest" "$work/expected-manifest" \
+    || fail 'release manifest does not match the pinned platform, target, version, or root'
+
+fetch "$SIGNATURE_NAME" "$work/manifest.sig" 64
+fetch "$PUBLIC_KEY_NAME" "$work/public.der" 44
+actual_key_sha256=$(sha256sum "$work/public.der")
+actual_key_sha256=${actual_key_sha256%% *}
+[ "$actual_key_sha256" = "$EXPECTED_KEY_SHA256" ] \
+    || fail 'bootstrap public key does not match the independently pinned digest'
+openssl pkeyutl -verify -rawin -pubin -keyform DER \
+    -inkey "$work/public.der" -in "$work/manifest" \
+    -sigfile "$work/manifest.sig" >/dev/null 2>&1 \
+    || fail 'release manifest signature is invalid'
+
+case "$ARCHIVE_SIZE" in
+    ''|0|0*|*[!0-9]*) fail 'invalid pinned archive size' ;;
+esac
+[ "${#ARCHIVE_SIZE}" -le 10 ] \
+    || fail 'pinned archive exceeds the supported size limit'
+[ "$ARCHIVE_SIZE" -le "$ARCHIVE_MAX_BYTES" ] \
+    || fail 'pinned archive exceeds the supported size limit'
+fetch "$ARCHIVE_NAME" "$work/archive.zip" "$ARCHIVE_SIZE"
+actual_archive_sha256=$(sha256sum "$work/archive.zip")
+actual_archive_sha256=${actual_archive_sha256%% *}
+[ "$actual_archive_sha256" = "$ARCHIVE_SHA256" ] \
+    || fail 'release archive digest is invalid'
+
+unzip -tq "$work/archive.zip" >/dev/null \
+    || fail 'release archive is not a valid ZIP file'
+unzip -q "$work/archive.zip" -d "$work/extracted" \
+    || fail 'release archive could not be extracted'
+[ -f "$work/extracted/install.sh" ] \
+    || fail 'authenticated release archive lacks install.sh'
+/bin/sh "$work/extracted/install.sh" "$@"

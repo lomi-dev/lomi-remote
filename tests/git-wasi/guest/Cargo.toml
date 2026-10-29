@@ -1,0 +1,22 @@
+[package]
+name = "lomi-git-wasi-guest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+gix = { version = "=0.88.0", default-features = false, features = ["sha1", "status", "revision", "blob-diff"] }
+memmap2 = "=0.9.11"
+serde_json = "=1.0.150"
+filetime = "=0.2.29"
+
+[patch.crates-io]
+memmap2 = { path = "vendor/memmap2" }
+filetime = { path = "vendor/filetime" }
+
+[profile.release]
+opt-level = "s"
+debug = 0
+strip = true

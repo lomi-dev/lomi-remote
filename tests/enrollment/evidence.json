@@ -1,0 +1,79 @@
+{
+  "scope": "synthetic-enrollment-store-only",
+  "qualified": false,
+  "postgresVersion": "postgres (PostgreSQL) 17.8 (Postgres.app)",
+  "checks": [
+    {
+      "step": "build-canonical-rust-fixture",
+      "exitCode": 0,
+      "durationSeconds": 0.178,
+      "totals": []
+    },
+    {
+      "step": "frozen-package-install",
+      "exitCode": 0,
+      "durationSeconds": 0.048,
+      "totals": []
+    },
+    {
+      "step": "typecheck",
+      "exitCode": 0,
+      "durationSeconds": 0.549,
+      "totals": []
+    },
+    {
+      "step": "init-private-pg17",
+      "exitCode": 0,
+      "durationSeconds": 0.477,
+      "totals": []
+    },
+    {
+      "step": "start-private-socket-only-pg17",
+      "exitCode": 0,
+      "durationSeconds": 0.117,
+      "totals": []
+    },
+    {
+      "step": "create-disposable-database",
+      "exitCode": 0,
+      "durationSeconds": 0.052,
+      "totals": []
+    },
+    {
+      "step": "apply-experiment-schema",
+      "exitCode": 0,
+      "durationSeconds": 0.017,
+      "totals": []
+    },
+    {
+      "step": "configure-limited-runtime-role",
+      "exitCode": 0,
+      "durationSeconds": 0.009,
+      "totals": []
+    },
+    {
+      "step": "postgres-enrollment-race-and-process-crash-tests",
+      "exitCode": 0,
+      "durationSeconds": 0.924,
+      "totals": [
+        "17 pass",
+        "0 fail",
+        "65 expect() calls"
+      ]
+    },
+    {
+      "step": "stop-private-pg17",
+      "exitCode": 0,
+      "durationSeconds": 0.113,
+      "totals": []
+    }
+  ],
+  "not_run": [
+    "BetterAuth hook/class binding",
+    "consumer FK/window lifecycle",
+    "OS credential receipt",
+    "production routes",
+    "deployment"
+  ],
+  "exitCode": 0
+}

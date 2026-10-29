@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "CanonicalCryptoCborHex": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    },
+    "EnrollmentProof": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalCbor": {
+          "$ref": "#/$defs/CanonicalCryptoCborHex"
+        },
+        "signature": {
+          "$ref": "#/$defs/SignatureHex"
+        }
+      },
+      "required": [
+        "canonicalCbor",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "HostAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostRefreshCredential": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SignatureHex": {
+      "maxLength": 128,
+      "minLength": 128,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "hostAuthorizationId": {
+      "$ref": "#/$defs/HostAuthorizationId"
+    },
+    "hostId": {
+      "$ref": "#/$defs/HostId"
+    },
+    "proof": {
+      "$ref": "#/$defs/EnrollmentProof"
+    },
+    "refresh": {
+      "$ref": "#/$defs/HostRefreshCredential"
+    },
+    "rotationId": {
+      "$ref": "#/$defs/OperationId"
+    }
+  },
+  "required": [
+    "hostAuthorizationId",
+    "hostId",
+    "rotationId",
+    "refresh",
+    "proof"
+  ],
+  "title": "HostAuthorizationRefreshParams",
+  "type": "object"
+}

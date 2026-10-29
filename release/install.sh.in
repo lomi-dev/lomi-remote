@@ -1,0 +1,694 @@
+#!/bin/sh
+set -eu
+umask 077
+IFS=' 	
+'
+
+RELEASE_ORIGIN=@@RELEASE_ORIGIN_SHELL@@
+RELEASE_VERSION=@@VERSION_SHELL@@
+TARGET_NAME=@@TARGET_NAME_SHELL@@
+PLATFORM=@@PLATFORM_SHELL@@
+PINNED_ROOT_SHA256=@@ROOT_SHA256_SHELL@@
+EXPECTED_TEAM_ID=@@TEAM_ID_SHELL@@
+GRACE_SECONDS=20
+
+fail() {
+    printf '%s\n' "Lomi Remote installer: $1" >&2
+    exit 1
+}
+
+print_shell_argument() {
+    lomi_quote_remainder=$1
+    printf "'"
+    while [ -n "$lomi_quote_remainder" ]; do
+        case "$lomi_quote_remainder" in
+            *"'"*)
+                printf '%s' "${lomi_quote_remainder%%"'"*}"
+                printf '%s' "'\\''"
+                lomi_quote_remainder=${lomi_quote_remainder#*"'"}
+                ;;
+            *)
+                printf '%s' "$lomi_quote_remainder"
+                lomi_quote_remainder=
+                ;;
+        esac
+    done
+    printf "'"
+}
+
+BUNDLE_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P) || fail 'cannot resolve installer directory'
+UPDATER="$BUNDLE_DIR/lomi-update-trust"
+[ -x "$UPDATER" ] || fail 'verified updater is missing'
+case "$PLATFORM" in
+    macos-*)
+        codesign --verify --strict "$0" >/dev/null 2>&1 \
+            || fail 'installer script has an invalid macOS code signature'
+        script_team=$(codesign -dv --verbose=4 "$0" 2>&1 | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+        [ "$script_team" = "$EXPECTED_TEAM_ID" ] \
+            || fail 'installer script is signed by an unexpected team'
+        codesign --verify --strict "$UPDATER" >/dev/null 2>&1 \
+            || fail 'updater binary has an invalid macOS code signature'
+        updater_team=$(codesign -dv --verbose=4 "$UPDATER" 2>&1 | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+        [ "$updater_team" = "$EXPECTED_TEAM_ID" ] \
+            || fail 'updater binary is signed by an unexpected team'
+        ;;
+esac
+[ "$("$UPDATER" root-pin)" = "$PINNED_ROOT_SHA256" ] || fail 'embedded public trust root does not match the package pin'
+mode=install
+lomi_mode_seen=0
+lomi_version_seen=0
+lomi_install_dir_seen=0
+lomi_no_path_seen=0
+lomi_purge_seen=0
+ADMIN_ACCOUNT=
+ADMIN_HOST_MODE=boot
+lomi_admin_mode_seen=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version)
+            [ "$lomi_version_seen" -eq 0 ] && [ "$#" -ge 2 ] \
+                || fail 'use --version VERSION exactly once'
+            [ "$2" = "$RELEASE_VERSION" ] \
+                || fail 'requested version differs from this authenticated installer; obtain that version through the authenticated installation channel'
+            lomi_version_seen=1
+            shift 2
+            ;;
+        --install-dir)
+            [ "$lomi_install_dir_seen" -eq 0 ] && [ "$#" -ge 2 ] \
+                || fail 'use --install-dir ABSOLUTE_PATH exactly once'
+            case "$2" in /*) ;; *) fail 'install path must be absolute' ;; esac
+            LOMI_INSTALL_DIR=$2
+            lomi_install_dir_seen=1
+            shift 2
+            ;;
+        --no-path)
+            [ "$lomi_no_path_seen" -eq 0 ] || fail 'duplicate --no-path'
+            # This installer never edits a parent shell or its PATH files.
+            lomi_no_path_seen=1
+            shift
+            ;;
+        --purge)
+            [ "$lomi_purge_seen" -eq 0 ] || fail 'duplicate --purge'
+            lomi_purge_seen=1
+            shift
+            ;;
+        --*) fail 'unknown installer option' ;;
+        *)
+            if [ "$lomi_mode_seen" -eq 0 ]; then
+                case "$1" in
+                    install|uninstall|admin-install|admin-uninstall) mode=$1 ;;
+                    *) fail 'use install|uninstall or admin-install|admin-uninstall ACCOUNT [manual|login|boot]' ;;
+                esac
+                lomi_mode_seen=1
+            else
+                case "$mode" in
+                    admin-install|admin-uninstall)
+                        if [ -z "$ADMIN_ACCOUNT" ]; then
+                            ADMIN_ACCOUNT=$1
+                        elif [ "$lomi_admin_mode_seen" -eq 0 ]; then
+                            ADMIN_HOST_MODE=$1
+                            lomi_admin_mode_seen=1
+                        else
+                            fail 'too many administrator installer arguments'
+                        fi
+                        ;;
+                    *) fail 'unexpected installer argument' ;;
+                esac
+            fi
+            shift
+            ;;
+    esac
+done
+case "$mode" in
+    admin-install|admin-uninstall)
+        [ -n "$ADMIN_ACCOUNT" ] || fail 'administrator installation requires ACCOUNT'
+        case "$ADMIN_HOST_MODE" in
+            manual|login|boot) ;;
+            *) fail 'admin Host mode must be manual, login, or boot' ;;
+        esac
+        ;;
+esac
+if [ "$lomi_purge_seen" -eq 1 ]; then
+    case "$mode" in
+        uninstall|admin-uninstall) ;;
+        *) fail '--purge is valid only with uninstall' ;;
+    esac
+fi
+
+# Every supported macOS Host mode uses the protected per-account image and
+# terminal custodian. A private user/root installation cannot supply them.
+# Keep the legacy private uninstall path, but require explicit account/mode
+# selection for installations and updates.
+case "$PLATFORM:$mode" in
+    macos-*:install)
+        printf '%s\n' 'macOS installation requires a selected ordinary account and the administrator-managed signed Host components.' >&2
+        printf '%s\n' 'Run the verified installer with ACCOUNT replaced by that account name:' >&2
+        {
+            printf '  sudo '
+            if [ -n "${LOMI_PROFILE_DIR:-}" ]; then
+                printf '/usr/bin/env '
+                print_shell_argument "LOMI_PROFILE_DIR=$LOMI_PROFILE_DIR"
+                printf ' '
+            fi
+            print_shell_argument "$BUNDLE_DIR/install.sh"
+            printf ' admin-install ACCOUNT manual\n'
+            printf '%s\n' 'Choose manual, login or boot explicitly; existing projects and profile data are preserved.'
+        } >&2
+        exit 1
+        ;;
+esac
+
+admin_boot_install() {
+    case "$PLATFORM" in macos-*) ;; *) fail 'admin-managed boot installs are supported only on macOS' ;; esac
+    [ "$(id -u)" -eq 0 ] || fail 'admin-managed boot install requires an explicit root invocation'
+    [ -n "$ADMIN_ACCOUNT" ] || fail 'an account name must be selected explicitly'
+
+    default_install=$(
+        "$UPDATER" admin-macos-install-dir "$ADMIN_ACCOUNT"
+    ) || fail 'selected account install directory could not be resolved'
+    if [ -n "${LOMI_INSTALL_DIR:-}" ] && [ "$LOMI_INSTALL_DIR" != "$default_install" ]; then
+        fail 'admin-managed installs use the fixed protected per-account install directory; LOMI_INSTALL_DIR must match it exactly'
+    fi
+
+    PROFILE_DEFAULT=$("$UPDATER" admin-macos-profile "$ADMIN_ACCOUNT") \
+        || fail 'selected account could not be resolved'
+    PROFILE_DIR=${LOMI_PROFILE_DIR:-$PROFILE_DEFAULT}
+    case "$PROFILE_DIR" in /*) ;; *) fail 'profile path must be absolute' ;; esac
+    if [ ! -e "$PROFILE_DIR" ] && [ ! -L "$PROFILE_DIR" ]; then
+        [ "$PROFILE_DIR" = "$PROFILE_DEFAULT" ] \
+            || fail 'custom admin profiles must already exist as private directories'
+        PROFILE_DIR=$("$UPDATER" prepare-admin-profile "$ADMIN_ACCOUNT" "$PROFILE_DEFAULT") \
+            || fail 'could not prepare the selected account profile with the protected updater helper'
+        case "$PROFILE_DIR" in /*) ;; *) fail 'profile helper returned a non-absolute path' ;; esac
+        [ "$PROFILE_DIR" = "$PROFILE_DEFAULT" ] \
+            || fail 'profile helper returned an unexpected selected-account path'
+    fi
+    [ -d "$PROFILE_DIR" ] && [ ! -L "$PROFILE_DIR" ] \
+        || fail 'the selected account profile must be an existing real directory'
+    SERVICE_RECORD="$PROFILE_DIR/service-registration-macos.json"
+
+    INSTALL_DIR=$default_install
+    if [ "$mode" = admin-uninstall ] && [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+        [ ! -e "$SERVICE_RECORD" ] && [ ! -L "$SERVICE_RECORD" ] \
+            || fail 'No installed program; profile-owned boot registration remains. Profile data were preserved, and cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings.'
+        if [ "$lomi_purge_seen" -eq 1 ]; then
+            fail 'No installed program is available to authenticate a profile purge. The selected account profile was preserved; revoke this Host from the central Lomi account access settings if it remains listed.'
+        fi
+        printf '%s\n' 'No installed program; selected account profile and configuration were preserved. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+        return 0
+    fi
+    base='/Library/Application Support'
+    app_dir="$base/LomiRemote"
+    install_parent="$app_dir/Install"
+    [ -d "$base" ] && [ ! -L "$base" ] || fail 'system application support directory is unavailable'
+    [ ! -L "$app_dir" ] || fail 'system application directory cannot be a symbolic link'
+    if [ ! -e "$app_dir" ] && [ ! -L "$app_dir" ]; then
+        mkdir "$app_dir" || fail 'cannot create the system application directory'
+        chmod 755 "$app_dir" || fail 'cannot set system application directory permissions'
+    fi
+    [ ! -L "$install_parent" ] || fail 'system install parent cannot be a symbolic link'
+    if [ ! -e "$install_parent" ] && [ ! -L "$install_parent" ]; then
+        mkdir "$install_parent" || fail 'cannot create the system install parent directory'
+        chmod 755 "$install_parent" || fail 'cannot set system install parent permissions'
+    fi
+    if [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+        mkdir "$INSTALL_DIR" || fail 'cannot create the system install directory'
+        chmod 755 "$INSTALL_DIR" || fail 'cannot set system install directory permissions'
+    fi
+    [ ! -L "$INSTALL_DIR" ] || fail 'admin install directory cannot be a symbolic link'
+    "$UPDATER" validate-admin-boot-install-dir "$INSTALL_DIR" \
+        || fail 'admin install directory must be root-owned mode 0755 with safe, non-symlink ancestors'
+    INSTALL_DIR=$(CDPATH= cd -P "$INSTALL_DIR" && pwd -P) \
+        || fail 'cannot canonicalize system install directory'
+    "$UPDATER" validate-admin-boot-install-dir "$INSTALL_DIR" \
+        || fail 'canonical admin install directory failed ownership validation'
+    "$UPDATER" bind-admin-boot-profile "$PROFILE_DIR" "$INSTALL_DIR" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
+        || fail 'admin install directory is bound to another account, profile, or Host mode, or contains unbound state'
+    TRUST_DIR="$INSTALL_DIR/trust"
+    CLI="$INSTALL_DIR/lomiremote"
+
+    verify_admin_cli() {
+        [ -f "$CLI" ] && [ ! -L "$CLI" ] \
+            && codesign --verify --strict "$CLI" >/dev/null 2>&1 \
+            || return 1
+        team=$(codesign -dv --verbose=4 "$CLI" 2>&1 | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+        [ "$team" = "$EXPECTED_TEAM_ID" ]
+    }
+
+    profile_record_exists=0
+    if [ -e "$SERVICE_RECORD" ] || [ -L "$SERVICE_RECORD" ]; then
+        profile_record_exists=1
+    fi
+
+    if [ "$mode" = admin-uninstall ] && [ ! -e "$INSTALL_DIR" ]; then
+        [ "$profile_record_exists" -eq 0 ] \
+            || fail 'No installed program; profile-owned boot registration remains. Profile data were preserved, and cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings.'
+        if [ "$lomi_purge_seen" -eq 1 ]; then
+            fail 'No installed program is available to authenticate a profile purge. The selected account profile was preserved; revoke this Host from the central Lomi account access settings if it remains listed.'
+        fi
+        printf '%s\n' 'No installed program; selected account profile and configuration were preserved. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+        return 0
+    fi
+
+    if [ "$mode" = admin-uninstall ]; then
+        "$UPDATER" verify-admin-installed-maintenance-cli "$INSTALL_DIR" "$PLATFORM" \
+            || fail 'the installed CLI does not match its verified activation; restore the signed release before uninstall, or revoke this Host from the central Lomi account access settings'
+        verify_admin_cli \
+            || fail 'the installed protected CLI is missing or untrusted; restore it with a verified installer and retry. If recovery cannot restore it, revoke this Host from the central Lomi account access settings.'
+        set --
+        if [ "$lomi_purge_seen" -eq 1 ]; then set -- --purge; fi
+        exec "$CLI" --profile-dir "$PROFILE_DIR" uninstall --confirm "$@"
+    fi
+
+    recovery_schema=
+    recovered=0
+    recovery_state=$("$UPDATER" admin-boot-recovery-needed "$INSTALL_DIR") \
+        || fail 'could not inspect the admin activation journal safely'
+    case "$recovery_state" in
+        clear) ;;
+        pending)
+            printf '%s\n' 'An interrupted admin-managed activation is pending. The updater will stop the selected account LaunchDaemon and repair the verified release. Save work; proceeding in 20 seconds.' >&2
+            sleep "$GRACE_SECONDS"
+            recovery_schema=$("$UPDATER" recover-release-admin-boot \
+                "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") \
+                || fail 'recovery could not verify the selected account service, profile schema, and release pair'
+            case "$recovery_schema" in *[!0-9]*|'') fail 'recovery returned an invalid profile schema' ;; esac
+            recovered=1
+            ;;
+        *) fail 'updater returned an invalid admin activation recovery state' ;;
+    esac
+    # Recovery may finish an interrupted uninstall whose exact service record
+    # was already removed before the activation journal was committed.
+    profile_record_exists=0
+    if [ -e "$SERVICE_RECORD" ] || [ -L "$SERVICE_RECORD" ]; then
+        profile_record_exists=1
+    fi
+
+    check_admin_service() {
+        admin_service_status=$("$CLI" --profile-dir "$PROFILE_DIR" service status \
+            --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT") \
+            || fail 'selected account Host mode and registration could not be authenticated'
+        admin_service_account=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Account: //p')
+        [ "$admin_service_account" = "$ADMIN_ACCOUNT" ] \
+            || fail 'Host account does not match the explicitly selected account'
+        admin_service_mode=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Mode: //p')
+        [ "$admin_service_mode" = "$ADMIN_HOST_MODE" ] \
+            || fail 'Host mode does not match the explicitly selected mode'
+        admin_service_registration=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Registration: //p')
+        if [ -z "$admin_service_registration" ]; then
+            admin_service_registration=registered
+        fi
+        if [ "$ADMIN_HOST_MODE" = manual ]; then
+            [ "$admin_service_registration" = absent ] \
+                || fail 'manual Host mode cannot adopt an autostart registration'
+        else
+            [ "$admin_service_registration" = registered ] \
+                || [ "$admin_service_registration" = cleanup-pending ] \
+                || fail 'Host registration has an unsupported recovery state'
+        fi
+        admin_service_active=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Active: //p')
+        [ "$admin_service_active" = active ] || [ "$admin_service_active" = inactive ] \
+            || fail 'Host status did not identify an exact active state'
+        admin_service_autostart=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Autostart: //p')
+        if [ "$ADMIN_HOST_MODE" = manual ]; then
+            [ "$admin_service_autostart" = none ] \
+                || fail 'manual Host mode unexpectedly has autostart'
+        else
+            case "$admin_service_autostart" in
+                enabled|disabled) ;;
+                unavailable)
+                    [ "$ADMIN_HOST_MODE" = login ] \
+                        || fail 'only a logged-out login Host may have unavailable autostart status'
+                    ;;
+                *) fail 'Host status did not identify an autostart state' ;;
+            esac
+        fi
+        admin_custodian_ready=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Custodian ready: //p')
+        [ "$admin_custodian_ready" = yes ] || [ "$admin_custodian_ready" = no ] \
+            || fail 'Host status did not identify custodian readiness'
+    }
+
+    get_selected_maintenance() {
+        maintenance_json=$(/usr/bin/sudo -n -H -u "$ADMIN_ACCOUNT" -- \
+            "$CLI" --profile-dir "$PROFILE_DIR" maintenance prepare --json) \
+            || fail 'selected account host did not return authenticated maintenance status'
+        maintenance_values=$(printf '%s' "$maintenance_json" | "$UPDATER" maintenance-schema) \
+            || fail 'selected account host returned malformed maintenance status'
+        maintenance_schema=${maintenance_values%%
+*}
+        maintenance_terminals=${maintenance_values#*
+}
+        case "$maintenance_schema:$maintenance_terminals" in
+            *[!0-9:]*|:*|*:) fail 'selected account maintenance values are invalid' ;;
+        esac
+    }
+
+    schema_hint=${recovery_schema:--}
+    should_start=0
+    install_service=0
+    had_installed_cli=0
+    if verify_admin_cli; then had_installed_cli=1; fi
+    if [ "$profile_record_exists" -eq 1 ]; then
+        verify_admin_cli || fail 'registered boot executable is missing or has an invalid signature'
+        check_admin_service
+        [ "$admin_service_registration" != cleanup-pending ] \
+            || fail 'LaunchDaemon registration cleanup is pending; run admin-uninstall before updating'
+        if [ "$recovered" -eq 0 ] && [ "$admin_service_active" = active ]; then
+            get_selected_maintenance
+            schema_hint=$maintenance_schema
+            printf 'Lomi Remote update will stop the selected account host. Active terminals: %s. Save work and press Ctrl-C to cancel; continuing in %s seconds.\n' \
+                "$maintenance_terminals" "$GRACE_SECONDS"
+            sleep "$GRACE_SECONDS"
+        fi
+    else
+        if [ "$ADMIN_HOST_MODE" != manual ]; then
+            install_service=1
+            if [ "$ADMIN_HOST_MODE" = boot ]; then should_start=1; fi
+        fi
+        if [ "$recovered" -eq 0 ] && verify_admin_cli; then
+            if maintenance_json=$(/usr/bin/sudo -n -H -u "$ADMIN_ACCOUNT" -- \
+                "$CLI" --profile-dir "$PROFILE_DIR" maintenance prepare --json 2>/dev/null); then
+                maintenance_values=$(printf '%s' "$maintenance_json" | "$UPDATER" maintenance-schema) \
+                    || fail 'selected account host returned malformed maintenance status'
+                maintenance_schema=${maintenance_values%%
+*}
+                maintenance_terminals=${maintenance_values#*
+}
+                case "$maintenance_schema:$maintenance_terminals" in
+                    *[!0-9:]*|:*|*:) fail 'selected account maintenance values are invalid' ;;
+                esac
+                printf 'Lomi Remote update will stop the selected account host. Active terminals: %s. Save work and press Ctrl-C to cancel; continuing in %s seconds.\n' \
+                    "$maintenance_terminals" "$GRACE_SECONDS"
+                sleep "$GRACE_SECONDS"
+                schema_hint=$maintenance_schema
+            fi
+        fi
+    fi
+
+    if [ -e "$TRUST_DIR" ] || [ -L "$TRUST_DIR" ]; then
+        "$UPDATER" status-release "$TRUST_DIR" >/dev/null \
+            || fail 'existing admin trust state is incomplete or invalid; preserving it for recovery'
+    else
+        "$UPDATER" initialize-release "$TRUST_DIR" >/dev/null \
+            || fail 'could not initialize private admin trust state'
+    fi
+
+    "$UPDATER" install-release-admin-boot "$TRUST_DIR" "$RELEASE_ORIGIN" \
+        "$TARGET_NAME" "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" \
+        "$schema_hint" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" "$RELEASE_VERSION" \
+        || fail 'signed release verification or admin profile activation failed'
+    verify_admin_cli || {
+        if [ "$had_installed_cli" -eq 1 ]; then
+            "$UPDATER" rollback-release-admin-boot "$TRUST_DIR" "$PROFILE_DIR" \
+                "$INSTALL_DIR" "$PLATFORM" "$schema_hint" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
+                || fail 'signature failed and schema-compatible admin rollback was unavailable'
+            if [ "$should_start" -eq 1 ]; then
+                "$CLI" --profile-dir "$PROFILE_DIR" service start --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT" \
+                    || fail 'previous admin release was restored but the selected Host did not become healthy'
+            fi
+        else
+            "$UPDATER" uninstall-release-admin-boot "$PROFILE_DIR" "$INSTALL_DIR" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
+                || fail 'signature failed and the admin installation could not be safely removed'
+        fi
+        fail 'platform signature validation failed; the prior signed release was restored when available'
+    }
+
+    if [ "$ADMIN_HOST_MODE" = manual ]; then
+        check_admin_service
+        if [ "$admin_custodian_ready" != yes ]; then install_service=1; fi
+    fi
+    if [ "$install_service" -eq 1 ]; then
+        "$CLI" --profile-dir "$PROFILE_DIR" service install --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT" \
+            || fail 'could not prepare the selected Host mode and terminal custodian'
+    fi
+    if [ "$should_start" -eq 1 ]; then
+        if "$CLI" --profile-dir "$PROFILE_DIR" service start --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT"; then
+            printf '%s\n' 'Signed admin-managed release installed and the selected account Host is running.'
+            return 0
+        fi
+        if [ "$had_installed_cli" -eq 1 ]; then
+            "$UPDATER" rollback-release-admin-boot "$TRUST_DIR" "$PROFILE_DIR" \
+                "$INSTALL_DIR" "$PLATFORM" - "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
+                || fail 'updated LaunchDaemon failed and a schema-compatible rollback was unavailable'
+            verify_admin_cli || fail 'restored admin executable signature validation failed'
+        else
+            "$UPDATER" uninstall-release-admin-boot "$PROFILE_DIR" "$INSTALL_DIR" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
+                || fail 'new admin release failed and could not be safely removed'
+        fi
+        fail 'updated LaunchDaemon did not start; the previous signed release was restored when available'
+    fi
+    case "$ADMIN_HOST_MODE" in
+        manual)
+            printf '%s\n' 'Signed admin-managed release and terminal custodian installed. Manual Host mode has no autostart; an existing running Host keeps its prior state.'
+            ;;
+        login)
+            printf '%s\n' 'Signed admin-managed release and terminal custodian installed. The Host starts at account login; an existing Host keeps its prior running state.'
+            ;;
+        boot)
+            printf '%s\n' 'Signed admin-managed release installed. The Host keeps its prior running state.'
+            ;;
+    esac
+}
+
+case "$mode" in
+    admin-install|admin-uninstall)
+        admin_boot_install
+        if [ "$mode" = admin-install ]; then
+            printf '%s\n' 'Complete device login, workspace and sharing setup as the selected account with:'
+            printf '  sudo -H -u '
+            print_shell_argument "$ADMIN_ACCOUNT"
+            printf ' -- '
+            print_shell_argument "$CLI"
+            printf ' --profile-dir '
+            print_shell_argument "$PROFILE_DIR"
+            printf ' setup --account '
+            print_shell_argument "$ADMIN_ACCOUNT"
+            printf ' --mode '
+            print_shell_argument "$ADMIN_HOST_MODE"
+            printf '\n'
+        fi
+        exit 0
+        ;;
+esac
+
+case "$PLATFORM" in
+    macos-*)
+        HOME_DIR=${HOME:?HOME is required}
+        DEFAULT_PROFILE="$HOME_DIR/Library/Application Support/LomiRemote"
+        DEFAULT_INSTALL="$HOME_DIR/Library/Application Support/LomiRemote/Install"
+        SERVICE_RECORD='service-registration-macos.json'
+        ;;
+    linux-*)
+        HOME_DIR=${HOME:?HOME is required}
+        DEFAULT_PROFILE=${XDG_DATA_HOME:-"$HOME_DIR/.local/share"}/lomiremote
+        DEFAULT_INSTALL="$HOME_DIR/.local/lib/lomiremote"
+        SERVICE_RECORD='service-registration.json'
+        ;;
+    *) fail 'unsupported Unix release platform' ;;
+esac
+PROFILE_DIR=${LOMI_PROFILE_DIR:-$DEFAULT_PROFILE}
+INSTALL_DIR=${LOMI_INSTALL_DIR:-$DEFAULT_INSTALL}
+case "$PROFILE_DIR" in /*) ;; *) fail 'profile path must be absolute' ;; esac
+case "$INSTALL_DIR" in /*) ;; *) fail 'install path must be absolute' ;; esac
+if [ "$mode" = uninstall ] && [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+    if { [ -e "$PROFILE_DIR/$SERVICE_RECORD" ] || [ -L "$PROFILE_DIR/$SERVICE_RECORD" ]; }; then
+        fail 'No installed program; profile-owned service registration remains. Profile data were preserved, and cloud authorization revocation is unconfirmed; restore the installed CLI with a verified installer or revoke this Host from the central Lomi account access settings.'
+    fi
+    if [ "$lomi_purge_seen" -eq 1 ] && { [ -e "$PROFILE_DIR" ] || [ -L "$PROFILE_DIR" ]; }; then
+        fail 'No installed program is available to authenticate a profile purge. Profile data were preserved; revoke this Host from the central Lomi account access settings if it remains listed.'
+    fi
+    printf '%s\n' 'No installed program; profile and configuration were preserved. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+    exit 0
+fi
+if [ -L "$INSTALL_DIR" ]; then
+    fail 'install directory cannot be a symbolic link'
+fi
+if [ ! -e "$INSTALL_DIR" ]; then
+    mkdir -p "$INSTALL_DIR" || fail 'cannot create install directory'
+    chmod 700 "$INSTALL_DIR" || fail 'cannot protect install directory'
+fi
+INSTALL_DIR=$(CDPATH= cd -P "$INSTALL_DIR" && pwd -P) || fail 'cannot canonicalize install directory'
+"$UPDATER" validate-install-dir "$INSTALL_DIR" \
+    || fail 'existing install directory is unowned or has unsafe permissions'
+TRUST_DIR="$INSTALL_DIR/trust"
+CLI="$INSTALL_DIR/lomiremote"
+profile_exists=0
+if [ -e "$PROFILE_DIR" ] || [ -L "$PROFILE_DIR" ]; then
+    profile_exists=1
+fi
+
+if [ "$mode" = uninstall ]; then
+    if [ -f "$CLI" ] && [ -x "$CLI" ] && [ ! -L "$CLI" ]; then
+        "$UPDATER" verify-installed-maintenance-cli "$INSTALL_DIR" "$PLATFORM" \
+            || fail 'the installed CLI does not match its verified activation; restore the signed release before uninstall, or revoke this Host from the central Lomi account access settings'
+        case "$PLATFORM" in
+            macos-*)
+                codesign --verify --strict "$CLI" >/dev/null 2>&1 \
+                    || fail 'the installed CLI is untrusted; restore it with a verified installer, then retry uninstall. If recovery cannot restore it, revoke this Host from the central Lomi account access settings'
+                cli_team=$(codesign -dv --verbose=4 "$CLI" 2>&1 | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+                [ "$cli_team" = "$EXPECTED_TEAM_ID" ] \
+                    || fail 'the installed CLI is signed by an unexpected team; restore it with a verified installer or revoke this Host from the central Lomi account access settings'
+                ;;
+        esac
+        set --
+        if [ "$lomi_purge_seen" -eq 1 ]; then set -- --purge; fi
+        exec "$CLI" --profile-dir "$PROFILE_DIR" uninstall --confirm "$@"
+    fi
+    if [ "$profile_exists" -eq 1 ]; then
+        fail 'the installed CLI is missing or untrusted and the profile identity is uncertain; restore it with a verified installer and retry uninstall. If recovery cannot restore it, revoke this Host from the central Lomi account access settings'
+    fi
+    "$UPDATER" uninstall-release "$PROFILE_DIR" "$INSTALL_DIR" \
+        || fail 'updater refused to remove an unowned or active installation'
+    printf '%s\n' 'Application release files removed from a profile that was absent. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+    exit 0
+fi
+
+recovery_schema=
+recovery_state=$("$UPDATER" release-recovery-needed "$INSTALL_DIR") \
+    || fail 'could not inspect the installed activation journal safely'
+case "$recovery_state" in
+    clear) ;;
+    pending)
+        printf '%s\n' 'An interrupted activation is pending. The updater will stop a verified managed host if one is registered and repair the installation. Save work; proceeding in 20 seconds.' >&2
+        sleep "$GRACE_SECONDS"
+        recovery_schema=$("$UPDATER" recover-release "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM") \
+            || fail 'interrupted release recovery could not prove service shutdown, profile schema, and verified release compatibility'
+        case "$recovery_schema" in *[!0-9]*|'') fail 'recovery returned an invalid profile schema' ;; esac
+        profile_exists=1
+        ;;
+    *) fail 'updater returned an invalid activation recovery state' ;;
+esac
+
+profile_schema=${recovery_schema:-0}
+active_terminals=0
+service_managed=0
+profile_owner_authenticated=0
+if [ -n "$recovery_schema" ]; then
+    if [ "$recovery_schema" -gt 0 ]; then profile_owner_authenticated=1; fi
+    record="$PROFILE_DIR/$SERVICE_RECORD"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+        "$CLI" --profile-dir "$PROFILE_DIR" service status >/dev/null \
+            || fail 'recovered profile-owned service registration could not be authenticated'
+        service_managed=1
+    fi
+elif [ "$profile_exists" -eq 1 ]; then
+    if [ -x "$CLI" ] \
+        && status=$("$CLI" --profile-dir "$PROFILE_DIR" maintenance prepare --json) \
+        && parsed=$(printf '%s' "$status" | "$UPDATER" maintenance-schema); then
+        profile_schema=${parsed%%
+*}
+        active_terminals=${parsed#*
+}
+        case "$profile_schema:$active_terminals" in
+            *[!0-9:]*|:*|*:) fail 'host maintenance counts are invalid' ;;
+        esac
+        profile_owner_authenticated=1
+        printf 'Lomi Remote update will stop the current host. Active terminals: %s. Save work and press Ctrl-C to cancel; continuing in %s seconds.\n' \
+            "$active_terminals" "$GRACE_SECONDS"
+        sleep "$GRACE_SECONDS"
+        record="$PROFILE_DIR/$SERVICE_RECORD"
+        if [ -e "$record" ] || [ -L "$record" ]; then
+            "$CLI" --profile-dir "$PROFILE_DIR" service status >/dev/null \
+                || fail 'profile-owned service registration could not be authenticated'
+            service_managed=1
+            "$CLI" --profile-dir "$PROFILE_DIR" service stop \
+                || fail 'managed service did not stop cleanly'
+        else
+            "$CLI" --profile-dir "$PROFILE_DIR" daemon stop --confirm \
+                || fail 'the authenticated host did not shut down cleanly'
+        fi
+    else
+        record="$PROFILE_DIR/$SERVICE_RECORD"
+        if [ -e "$record" ] || [ -L "$record" ]; then
+            fail 'profile-owned service registration cannot be authenticated without the installed CLI'
+        fi
+        printf '%s\n' 'No authenticated live profile owner is available. The updater will continue only if the owner-locked profile has no SQLite database; otherwise no activation occurs.' >&2
+    fi
+fi
+
+if [ -e "$TRUST_DIR" ] || [ -L "$TRUST_DIR" ]; then
+    "$UPDATER" status-release "$TRUST_DIR" >/dev/null \
+        || fail 'existing updater trust state is incomplete or invalid; preserving it for recovery'
+else
+    "$UPDATER" initialize-release "$TRUST_DIR" >/dev/null \
+        || fail 'could not initialize private updater trust state'
+fi
+
+"$UPDATER" install-release "$TRUST_DIR" "$RELEASE_ORIGIN" "$TARGET_NAME" \
+    "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" "$profile_schema" "$RELEASE_VERSION" \
+    || fail 'signed release verification or activation failed'
+
+start_host() {
+    if [ "$service_managed" -eq 1 ]; then
+        "$CLI" --profile-dir "$PROFILE_DIR" service start
+    else
+        "$CLI" --profile-dir "$PROFILE_DIR" daemon start
+    fi
+}
+
+verify_platform_signature() {
+    case "$PLATFORM" in
+        macos-*)
+            codesign --verify --strict "$CLI" >/dev/null 2>&1 || return 1
+            team=$(codesign -dv --verbose=4 "$CLI" 2>&1 | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+            [ "$team" = "$EXPECTED_TEAM_ID" ] || return 1
+            ;;
+        linux-*) ;;
+    esac
+    return 0
+}
+
+if ! verify_platform_signature; then
+    if [ "$profile_owner_authenticated" -eq 1 ]; then
+        "$UPDATER" rollback-release "$TRUST_DIR" "$PROFILE_DIR" "$INSTALL_DIR" \
+            "$PLATFORM" "$profile_schema" \
+            || fail 'platform signature failed and the previous release is not schema-compatible'
+        verify_platform_signature \
+            || fail 'restored executable also failed platform signature validation'
+        start_host || fail 'previous release was restored, but it did not become healthy'
+    else
+        "$UPDATER" uninstall-release "$PROFILE_DIR" "$INSTALL_DIR" \
+            || fail 'platform signature failed and the new release could not be safely removed'
+    fi
+    fail 'platform signature validation failed; the previous release was restored when available'
+fi
+
+if [ "$profile_owner_authenticated" -eq 0 ]; then
+    printf '%s\n' 'Signed release installed. A private profile directory is reserved; no host database was created or started.'
+    printf '%s\n' 'Complete account, workspace and sharing setup with:'
+    printf '  '
+    print_shell_argument "$CLI"
+    if [ -n "${LOMI_PROFILE_DIR:-}" ]; then
+        printf ' --profile-dir '
+        print_shell_argument "$PROFILE_DIR"
+    fi
+    printf ' setup\n'
+    exit 0
+fi
+
+if start_host; then
+    printf '%s\n' 'Signed release installed and the previous host mode is running.'
+    exit 0
+fi
+
+printf '%s\n' 'The updated host did not start. Querying the authenticated current profile schema before considering rollback.' >&2
+status=$("$CLI" --profile-dir "$PROFILE_DIR" maintenance prepare --json) \
+    || fail 'current schema is unknown; automatic rollback is unsafe and the signed update remains installed'
+parsed=$(printf '%s' "$status" | "$UPDATER" maintenance-schema) \
+    || fail 'current schema response is invalid; automatic rollback is unsafe'
+current_schema=${parsed%%
+*}
+case "$current_schema" in *[!0-9]*|'') fail 'current schema is invalid' ;; esac
+if [ "$service_managed" -eq 1 ]; then
+    "$CLI" --profile-dir "$PROFILE_DIR" service stop \
+        || fail 'host did not stop before schema-checked rollback'
+else
+    "$CLI" --profile-dir "$PROFILE_DIR" daemon stop --confirm \
+        || fail 'host did not stop before schema-checked rollback'
+fi
+"$UPDATER" rollback-release "$TRUST_DIR" "$PROFILE_DIR" "$INSTALL_DIR" \
+    "$PLATFORM" "$current_schema" \
+    || fail 'the previous signed release is incompatible with the current profile schema'
+verify_platform_signature
+start_host || fail 'previous release was restored, but it did not become healthy'
+fail 'previous signed release restored after update startup failure'

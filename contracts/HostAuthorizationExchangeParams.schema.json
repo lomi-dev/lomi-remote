@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "CanonicalCryptoCborHex": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    },
+    "EnrollmentBootstrapCredential": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "EnrollmentId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EnrollmentProof": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalCbor": {
+          "$ref": "#/$defs/CanonicalCryptoCborHex"
+        },
+        "signature": {
+          "$ref": "#/$defs/SignatureHex"
+        }
+      },
+      "required": [
+        "canonicalCbor",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SignatureHex": {
+      "maxLength": 128,
+      "minLength": 128,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "bootstrap": {
+      "$ref": "#/$defs/EnrollmentBootstrapCredential"
+    },
+    "enrollmentId": {
+      "$ref": "#/$defs/EnrollmentId"
+    },
+    "hostId": {
+      "$ref": "#/$defs/HostId"
+    },
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "proof": {
+      "$ref": "#/$defs/EnrollmentProof"
+    }
+  },
+  "required": [
+    "enrollmentId",
+    "hostId",
+    "operationId",
+    "bootstrap",
+    "proof"
+  ],
+  "title": "HostAuthorizationExchangeParams",
+  "type": "object"
+}

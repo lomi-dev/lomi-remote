@@ -1,0 +1,68 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -44,6 +44,8 @@
+ const MAX_INTERMEDIATES: usize = 2;
+ const MAX_OSC_PARAMS: usize = 16;
+ const MAX_OSC_RAW: usize = 1024;
++/// Lomi profile ceiling, also enforced with std's otherwise unbounded Vec.
++pub const MAX_OSC_STD_RAW: usize = 64 * 1024;
+ 
+ /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
+ ///
+@@ -65,6 +67,8 @@
+     osc_params: [(usize, usize); MAX_OSC_PARAMS],
+     osc_num_params: usize,
+     ignoring: bool,
++    /// Discard the entire oversized OSC rather than dispatching a truncated one.
++    osc_overflow: bool,
+     partial_utf8: [u8; 4],
+     partial_utf8_len: usize,
+ }
+@@ -372,6 +376,7 @@
+             0x5D => {
+                 self.osc_raw.clear();
+                 self.osc_num_params = 0;
++                self.osc_overflow = false;
+                 self.state = State::OscString
+             },
+             0x5E..=0x5F => self.state = State::SosPmApcString,
+@@ -519,6 +524,9 @@
+     /// Add OSC param separator.
+     #[inline]
+     fn action_osc_put_param(&mut self) {
++        if self.osc_overflow {
++            return;
++        }
+         let idx = self.osc_raw.len();
+ 
+         let param_idx = self.osc_num_params;
+@@ -542,6 +550,16 @@
+ 
+     #[inline(always)]
+     fn action_osc_put(&mut self, byte: u8) {
++        if self.osc_overflow {
++            return;
++        }
++        #[cfg(feature = "std")]
++        if self.osc_raw.len() >= MAX_OSC_STD_RAW {
++            self.osc_overflow = true;
++            self.osc_raw.clear();
++            self.osc_num_params = 0;
++            return;
++        }
+         #[cfg(not(feature = "std"))]
+         {
+             if self.osc_raw.is_full() {
+@@ -552,6 +570,12 @@
+     }
+ 
+     fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
++        if self.osc_overflow {
++            self.osc_raw.clear();
++            self.osc_num_params = 0;
++            self.osc_overflow = false;
++            return;
++        }
+         self.action_osc_put_param();
+         self.osc_dispatch(performer, byte);
+         self.osc_raw.clear();

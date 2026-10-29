@@ -1,0 +1,31 @@
+{
+  "name": "@lomi/authority-crypto-wasm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./wasm": "./generated/authority_crypto_bg.wasm"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check",
+    "test": "node --test test/*.test.mjs",
+    "test:bun": "bun test test/*.test.mjs"
+  },
+  "files": [
+    "README.md",
+    "package.json",
+    "THIRD_PARTY_NOTICES.json",
+    "src/index.mjs",
+    "src/index.d.ts",
+    "generated/authority_crypto.d.ts",
+    "generated/authority_crypto.js",
+    "generated/authority_crypto_bg.wasm",
+    "generated/authority_crypto_bg.wasm.d.ts",
+    "generated/provenance.json"
+  ]
+}

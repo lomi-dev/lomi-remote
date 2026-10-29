@@ -1,0 +1,10 @@
+[package]
+name = "lomi-native-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lomi-files = { path = "../lomi-files" }
+serde = { version = "=1.0.229", features = ["derive"] }

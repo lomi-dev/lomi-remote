@@ -1,0 +1,46 @@
+[package]
+name = "lomi-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+owned-host-fixture = ["lomi-terminal/owned-host-fixture"]
+cloud-fixture = ["lomi-host-auth/fixture-support", "lomi-host-store/fixture-support"]
+default = []
+scm-fixture = []
+
+[dependencies]
+lomi-platform = { path = "../lomi-platform" }
+lomi-host-store = { path = "../lomi-host-store" }
+lomi-host-auth = { path = "../lomi-host-auth" }
+lomi-host-http = { path = "../lomi-host-http" }
+lomi-terminal = { path = "../lomi-terminal" }
+lomi-remote-protocol = { path = "../lomi-remote-protocol" }
+lomi-remote-crypto = { path = "../lomi-remote-crypto" }
+lomi-files = { path = "../lomi-files" }
+lomi-native-files = { path = "../lomi-native-files" }
+lomi-native-project-files = { path = "../lomi-native-project-files" }
+lomi-native-git = { path = "../lomi-native-git" }
+lomi-native-custody = { path = "../lomi-native-custody" }
+lomi-git = { path = "../lomi-git" }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+signal-hook = "=0.4.5"
+uuid = { version = "=1.26.1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "=0.8.1"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Console"] }
+
+[dev-dependencies]
+rcgen = { version = "=0.14.7", default-features = false, features = ["ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12", "ring"] }
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
+lomi-host-http = { path = "../lomi-host-http", features = ["test-fixtures"] }
+tempfile = "=3.27.0"

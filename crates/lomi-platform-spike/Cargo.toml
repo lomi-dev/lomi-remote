@@ -1,0 +1,12 @@
+[package]
+name = "lomi-platform-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.189"
+portable-pty = "=0.9.0"
+tempfile = "=3.27.0"
+

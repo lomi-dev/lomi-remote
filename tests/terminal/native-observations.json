@@ -1,0 +1,103 @@
+{
+  "alacritty": {
+    "candidate": "alacritty_terminal=0.26.0",
+    "decision": "unqualified: no xterm serializer or parser-state restore adapter built by this probe",
+    "probe": {
+      "alternate_entered": true,
+      "dsr_da_host_replies": 2,
+      "normal_buffer_preserved": true
+    },
+    "qualified": false,
+    "restore_adapter": "not implemented"
+  },
+  "blocking_requirements": [
+    "inactive buffer and pending parser state not exported",
+    "full xterm compatibility unproven",
+    "real CLI, multi-hour soak and DSR/DA ownership not qualified"
+  ],
+  "candidate": "vt100=0.16.2",
+  "cases": [
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "normal_ascii",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "alternate_to_normal",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "inactive_alternate",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "pending_csi",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "pending_utf8",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "unicode_cells",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "colors_modes",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "scroll_region_origin",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "saved_cursor",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "osc_title_hyperlink",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "pending_osc",
+      "passed": false,
+      "status": "failed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "resize_reflow",
+      "passed": true,
+      "status": "passed"
+    },
+    {
+      "comparison": "vt100 active screen formatter after live continuation; not full-state proof",
+      "id": "bounded_replay_evicted",
+      "passed": true,
+      "status": "passed"
+    }
+  ],
+  "profile": "stock-state-formatted-experimental",
+  "qualified": false,
+  "scope": "synthetic native differential observations only",
+  "stage": "S0.1"
+}

@@ -1,0 +1,10 @@
+{
+  "name": "lomi-terminal-qualification-oracle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node oracle.mjs --regression",
+    "qualify": "node oracle.mjs --qualify"
+  },
+  "devDependencies": { "@xterm/headless": "6.0.0" }
+}

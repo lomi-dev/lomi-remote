@@ -1,0 +1,1106 @@
+$ErrorActionPreference = 'Stop'
+$Uninstall = $args.Count -eq 1 -and $args[0] -ceq 'uninstall'
+$BrokerMode = $args.Count -gt 0 -and $args[0] -ceq 'file-security'
+$HostServiceMode = $args.Count -gt 0 -and $args[0] -ceq 'host-service'
+
+$ReleaseOrigin = @@RELEASE_ORIGIN_PS@@
+$ReleaseVersion = @@VERSION_PS@@
+$TargetName = @@TARGET_NAME_PS@@
+$CompanionTargetName = @@COMPANION_TARGET_NAME_PS@@
+$Platform = @@PLATFORM_PS@@
+$PinnedRootSha256 = @@ROOT_SHA256_PS@@
+$ExpectedSignerThumbprint = @@SIGNER_THUMBPRINT_PS@@
+$GraceSeconds = 20
+
+function Stop-Installer([string] $Message) {
+    [Console]::Error.WriteLine("Lomi Remote installer: $Message")
+    exit 1
+}
+
+function Test-FullyQualifiedInstallPath([string] $Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -match '[\x00-\x1f\x7f]') { return $false }
+    try {
+        # These APIs also exist in .NET Framework used by Windows PowerShell
+        # 5.1. IsPathRooted alone would incorrectly accept C:relative or \relative.
+        $root = [IO.Path]::GetPathRoot($Path)
+        [void][IO.Path]::GetFullPath($Path)
+        return ($root -match '^[A-Za-z]:[\\/]$') -or ($root.StartsWith('\\', [StringComparison]::Ordinal) -and $root.Length -gt 2)
+    } catch { return $false }
+}
+
+function Read-InstallArguments([string[]] $Arguments) {
+    $mode = 'install'
+    $modeSeen = $false
+    $versionSeen = $false
+    $installDirectory = $null
+    $noPathSeen = $false
+    $purgeSeen = $false
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        switch -CaseSensitive ($Arguments[$index]) {
+            '--version' {
+                if ($versionSeen -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'use --version VERSION exactly once' }
+                $index++
+                if ($Arguments[$index] -cne $ReleaseVersion) { Stop-Installer 'requested version differs from this authenticated installer; obtain that version through the authenticated installation channel' }
+                $versionSeen = $true
+            }
+            '--install-dir' {
+                if ($null -ne $installDirectory -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'use --install-dir ABSOLUTE_PATH exactly once' }
+                $index++
+                $installDirectory = $Arguments[$index]
+                if (-not (Test-FullyQualifiedInstallPath $installDirectory)) { Stop-Installer 'install path must be absolute' }
+            }
+            '--no-path' {
+                if ($noPathSeen) { Stop-Installer 'duplicate --no-path' }
+                # No installer branch edits the parent process PATH or profiles.
+                $noPathSeen = $true
+            }
+            '--purge' {
+                if ($purgeSeen) { Stop-Installer 'duplicate --purge' }
+                $purgeSeen = $true
+            }
+            { $_ -ceq 'install' -or $_ -ceq 'uninstall' } {
+                if ($modeSeen) { Stop-Installer 'choose install or uninstall exactly once' }
+                $mode = $Arguments[$index]
+                $modeSeen = $true
+            }
+            default { Stop-Installer 'use install|uninstall [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-path] [--purge]' }
+        }
+    }
+    if ($purgeSeen -and $mode -cne 'uninstall') { Stop-Installer '--purge is valid only with uninstall' }
+    return [pscustomobject]@{ Uninstall = $mode -ceq 'uninstall'; InstallDirectory = $installDirectory; Purge = $purgeSeen }
+}
+
+function Read-HostServiceArguments([string[]] $Arguments) {
+    if ($Arguments.Count -lt 4 -or $Arguments[0] -cne 'host-service') {
+        Stop-Installer 'use host-service install|update|start|stop|restart|status|recover|rollback|uninstall --account NAME [explicit confirmations]'
+    }
+    $operation = $Arguments[1]
+    if ($operation -cnotin @('install', 'update', 'start', 'stop', 'restart', 'status', 'recover', 'rollback', 'uninstall')) {
+        Stop-Installer 'host-service supports only install, update, start, stop, restart, status, recover, rollback, and uninstall'
+    }
+
+    $account = $null
+    $modeSeen = $false
+    $confirmSeen = $false
+    $serviceRightSeen = $false
+    $repairCredentials = $false
+    $versionSeen = $false
+    $installDirectory = $null
+    $noPathSeen = $false
+    $purge = $false
+    for ($index = 2; $index -lt $Arguments.Count; $index++) {
+        switch -CaseSensitive ($Arguments[$index]) {
+            '--account' {
+                if ($null -ne $account -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'host-service requires exactly one --account NAME' }
+                $index++
+                $account = $Arguments[$index]
+                if ([string]::IsNullOrWhiteSpace($account) -or $account.Length -gt 256 -or $account -cne $account.Trim() -or $account -match '[\x00-\x1f\x7f]') {
+                    Stop-Installer 'host-service account name is invalid'
+                }
+            }
+            '--mode' {
+                if ($modeSeen -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'host-service install requires --mode boot exactly once' }
+                $index++
+                if ($Arguments[$index] -cne 'boot') { Stop-Installer 'Windows Host service installation supports only --mode boot' }
+                $modeSeen = $true
+            }
+            '--confirm' {
+                if ($confirmSeen) { Stop-Installer 'duplicate --confirm is not allowed' }
+                $confirmSeen = $true
+            }
+            '--confirm-service-logon-right' {
+                if ($serviceRightSeen) { Stop-Installer 'duplicate --confirm-service-logon-right is not allowed' }
+                $serviceRightSeen = $true
+            }
+            '--repair-credentials' {
+                if ($repairCredentials) { Stop-Installer 'duplicate --repair-credentials is not allowed' }
+                $repairCredentials = $true
+            }
+            '--version' {
+                if ($versionSeen -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'use --version VERSION exactly once' }
+                $index++
+                if ($Arguments[$index] -cne $ReleaseVersion) { Stop-Installer 'requested version differs from this authenticated installer' }
+                $versionSeen = $true
+            }
+            '--install-dir' {
+                if ($null -ne $installDirectory -or ($index + 1) -ge $Arguments.Count) { Stop-Installer 'use --install-dir ABSOLUTE_PATH exactly once' }
+                $index++
+                $installDirectory = $Arguments[$index]
+                if (-not (Test-FullyQualifiedInstallPath $installDirectory)) { Stop-Installer 'install path must be absolute' }
+            }
+            '--no-path' {
+                if ($noPathSeen) { Stop-Installer 'duplicate --no-path' }
+                $noPathSeen = $true
+            }
+            '--purge' {
+                if ($purge) { Stop-Installer 'duplicate --purge' }
+                $purge = $true
+            }
+            default { Stop-Installer 'host-service received an unsupported argument' }
+        }
+    }
+    if ($null -eq $account) { Stop-Installer 'host-service requires --account NAME' }
+    if ($operation -ceq 'install') {
+        if (-not $modeSeen -or -not $confirmSeen -or -not $serviceRightSeen -or $repairCredentials) {
+            Stop-Installer 'use host-service install --account NAME --mode boot --confirm --confirm-service-logon-right'
+        }
+    } elseif ($modeSeen -or $serviceRightSeen) {
+        Stop-Installer '--mode and --confirm-service-logon-right are valid only for host-service install'
+    }
+    if ($repairCredentials -and $operation -cne 'update') {
+        Stop-Installer '--repair-credentials is valid only for host-service update'
+    }
+    if ($purge -and $operation -cne 'uninstall') {
+        Stop-Installer '--purge is valid only for host-service uninstall'
+    }
+    if (($versionSeen -or $null -ne $installDirectory) -and $operation -cnotin @('install', 'update')) {
+        Stop-Installer '--version and --install-dir are valid only for host-service install or update'
+    }
+    if ($operation -cin @('update', 'stop', 'restart', 'rollback', 'uninstall') -and -not $confirmSeen) {
+        Stop-Installer "host-service $operation requires --confirm"
+    }
+    if ($confirmSeen -and $operation -cin @('start', 'status', 'recover')) {
+        Stop-Installer "host-service $operation does not accept --confirm"
+    }
+    return [pscustomobject]@{
+        Operation = $operation
+        Account = $account
+        RepairCredentials = $repairCredentials
+        InstallDirectory = $installDirectory
+        Purge = $purge
+    }
+}
+
+$HostServiceRequest = $null
+if ($HostServiceMode) { $HostServiceRequest = Read-HostServiceArguments $args }
+if ($BrokerMode -and $HostServiceMode) { Stop-Installer 'choose either file-security or host-service mode' }
+
+function Invoke-Checked([string] $Executable, [string[]] $Arguments) {
+    $output = & $Executable @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "command failed: $([IO.Path]::GetFileName($Executable))"
+    }
+    return $output
+}
+
+function Invoke-UninstallAndExit([string] $Executable, [string[]] $Arguments) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $exitCode = 7
+    $output = @()
+    # Keep native exit reporting independent from a caller's PowerShell 7
+    # preference, while retaining compatibility with Windows PowerShell 5.1.
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        # Keep native stderr visible without converting a nonzero exit into a
+        # PowerShell exception that would hide the CLI's lifecycle result.
+        $ErrorActionPreference = 'Continue'
+        # Native commands update the global automatic variable. A failed
+        # launch must not inherit a previous successful signature/root probe.
+        $global:LASTEXITCODE = $null
+        $output = & $Executable @Arguments
+        if ($null -ne $global:LASTEXITCODE) {
+            $exitCode = [int]$global:LASTEXITCODE
+        } else {
+            [Console]::Error.WriteLine('UNINSTALL_LAUNCH_UNCONFIRMED: no native exit result was received; uninstall was not repeated. Follow the signed recovery instructions or revoke the Host from your Lomi account.')
+        }
+    } catch {
+        [Console]::Error.WriteLine('UNINSTALL_LAUNCH_UNCONFIRMED: uninstall did not produce a confirmed native result and was not repeated. Check the installation and account access settings.')
+        $exitCode = 7
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    foreach ($line in @($output)) {
+        if ($null -ne $line) { [Console]::Out.WriteLine([string]$line) }
+    }
+    exit $exitCode
+}
+
+function Get-MaintenanceValues([string] $Json) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Updater
+    $start.Arguments = 'maintenance-schema'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) { throw 'could not start maintenance parser' }
+    $process.StandardInput.Write($Json)
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { throw 'maintenance response was rejected' }
+    return @($stdout.TrimEnd("`r", "`n").Split([string[]]@("`r`n", "`n"), [StringSplitOptions]::RemoveEmptyEntries))
+}
+
+function Test-AuthenticodeFile([string] $Path) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) {
+        return $false
+    }
+    return ($signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant() -ceq $ExpectedSignerThumbprint.ToUpperInvariant()
+}
+
+$BrokerBootstrapSource = @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class LomiBrokerBootstrapImage : IDisposable {
+    private IntPtr[] handles;
+    public string FilePath { get; private set; }
+    internal LomiBrokerBootstrapImage(string filePath, IntPtr[] pins) {
+        FilePath = filePath;
+        handles = pins;
+    }
+    public void Dispose() {
+        IntPtr[] current = handles;
+        handles = null;
+        if (current == null) return;
+        for (int i = current.Length - 1; i >= 0; --i) {
+            if (current[i] != IntPtr.Zero && current[i] != new IntPtr(-1)) LomiBrokerBootstrap.Close(current[i]);
+        }
+    }
+    ~LomiBrokerBootstrapImage() { Dispose(); }
+}
+
+public static class LomiBrokerBootstrap {
+    private const uint ReadData = 0x0001;
+    private const uint WriteData = 0x0002;
+    private const uint AppendData = 0x0004;
+    private const uint ReadEa = 0x0008;
+    private const uint WriteEa = 0x0010;
+    private const uint DeleteChild = 0x0040;
+    private const uint ReadAttributes = 0x0080;
+    private const uint WriteAttributes = 0x0100;
+    private const uint Delete = 0x00010000;
+    private const uint ReadControl = 0x00020000;
+    private const uint WriteDac = 0x00040000;
+    private const uint WriteOwner = 0x00080000;
+    private const uint GenericWrite = 0x40000000;
+    private const uint GenericAll = 0x10000000;
+    private const uint FileAllAccess = 0x001F01FF;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint OpenExisting = 3;
+    private const uint CreateNew = 1;
+    private const uint OpenReparsePoint = 0x00200000;
+    private const uint BackupSemantics = 0x02000000;
+    private const uint NormalAttribute = 0x00000080;
+    private const uint DirectoryAttribute = 0x00000010;
+    private const uint ReparseAttribute = 0x00000400;
+    private const uint MoveWriteThrough = 0x00000008;
+    private const byte AllowedAce = 0;
+    private const byte DeniedAce = 1;
+    private const byte InheritOnlyAce = 0x08;
+    private const byte ObjectInheritAce = 0x01;
+    private const byte ContainerInheritAce = 0x02;
+    private const ushort DaclProtected = 0x1000;
+    private const uint OwnerSecurityInformation = 0x00000001;
+    private const uint GroupSecurityInformation = 0x00000002;
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const uint FileObject = 1;
+    private const int ErrorFileExists = 80;
+    private const int ErrorAlreadyExists = 183;
+    private const int ErrorHandleEof = 38;
+    private const int ErrorInvalidFunction = 1;
+    private const int ErrorNotSupported = 50;
+    private const long MaxTarget = 256L * 1024L * 1024L;
+    private const string SystemSid = "S-1-5-18";
+    private const string AdministratorsSid = "S-1-5-32-544";
+    private const string TrustedInstallerSid = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+    private const string RootSddl = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GX;;;AU)";
+    private const string PrivateDirectorySddl = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    private const string PrivateFileSddl = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+    private const int ErrorInsufficientBuffer = 122;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes {
+        public int Length;
+        public IntPtr SecurityDescriptor;
+        public int InheritHandle;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime { public uint Low; public uint High; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileInformation {
+        public uint Attributes;
+        public FileTime CreationTime;
+        public FileTime LastAccessTime;
+        public FileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint SizeHigh;
+        public uint SizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AclSizeInformation { public uint AceCount; public uint AclBytesInUse; public uint AclBytesFree; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct FindStreamData {
+        public long StreamSize;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)] public string StreamName;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int SHGetKnownFolderPath(ref Guid folderId, uint flags, IntPtr token, out IntPtr path);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, IntPtr size);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetSecurityInfo(IntPtr handle, uint objectType, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetAclInformation(IntPtr acl, out AclSizeInformation information, uint size, uint informationClass);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetAce(IntPtr acl, uint index, out IntPtr ace);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupAccountNameW(string systemName, string accountName, IntPtr sid, ref uint sidSize, StringBuilder referencedDomainName, ref uint domainSize, out int use);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern IntPtr CreateFileWithSecurity(string path, uint access, uint share, ref SecurityAttributes security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern IntPtr CreateFileNoSecurity(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, ref SecurityAttributes security);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFileExW(string source, string destination, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool DeleteFileW(string path);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out FileInformation information);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileSizeEx(IntPtr handle, out long size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFilePointerEx(IntPtr handle, long distance, out long position, uint method);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FlushFileBuffers(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint length, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstStreamW(string path, int level, out FindStreamData data, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextStreamW(IntPtr find, out FindStreamData data);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindClose(IntPtr find);
+
+    internal static void Close(IntPtr handle) { CloseHandle(handle); }
+    private static Exception Win32(string message) { return new IOException(message + " (Windows error " + Marshal.GetLastWin32Error().ToString() + ")"); }
+    private static bool InvalidHandle(IntPtr handle) { return handle == IntPtr.Zero || handle == new IntPtr(-1); }
+    private static string KnownProgramData() {
+        Guid id = new Guid("62AB5D82-FDC1-4DC3-A9DD-070D1D495D97");
+        IntPtr raw;
+        if (SHGetKnownFolderPath(ref id, 0, IntPtr.Zero, out raw) < 0 || raw == IntPtr.Zero) throw new IOException("Could not resolve ProgramData.");
+        try { return LocalPath(Path.GetFullPath(Marshal.PtrToStringUni(raw))); }
+        finally { Marshal.FreeCoTaskMem(raw); }
+    }
+    private static string LocalPath(string path) {
+        if (String.IsNullOrEmpty(path)) throw new IOException("Broker bootstrap path must be on a local drive.");
+        if (path.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase)) throw new IOException("Broker bootstrap path must be on a local drive.");
+        if (path.StartsWith("\\\\?\\", StringComparison.Ordinal)) path = path.Substring(4);
+        string root = Path.GetPathRoot(path);
+        if (path.StartsWith("\\\\", StringComparison.Ordinal) || String.IsNullOrEmpty(root) || root.StartsWith("\\\\", StringComparison.Ordinal)) throw new IOException("Broker bootstrap path must be on a local drive.");
+        string full = Path.GetFullPath(path);
+        root = Path.GetPathRoot(full);
+        return full.Length > root.Length ? full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) : root;
+    }
+    private static string FinalPath(IntPtr handle) {
+        uint required = GetFinalPathNameByHandleW(handle, null, 0, 0);
+        if (required == 0 || required > 32768) throw Win32("Could not inspect a pinned bootstrap path");
+        StringBuilder value = new StringBuilder((int)required + 1);
+        uint written = GetFinalPathNameByHandleW(handle, value, (uint)value.Capacity, 0);
+        if (written == 0 || written >= value.Capacity) throw Win32("Could not inspect a pinned bootstrap path");
+        string path = value.ToString();
+        if (path.StartsWith("\\\\?\\", StringComparison.Ordinal)) path = path.Substring(4);
+        return LocalPath(path);
+    }
+    private static void RequireSamePath(IntPtr handle, string expected) {
+        if (!String.Equals(FinalPath(handle), LocalPath(expected), StringComparison.OrdinalIgnoreCase)) throw new IOException("Pinned bootstrap path changed identity.");
+    }
+    private static string SidText(IntPtr sid) {
+        IntPtr value;
+        if (sid == IntPtr.Zero || !ConvertSidToStringSidW(sid, out value)) throw Win32("Could not inspect a Windows security identifier");
+        try { return Marshal.PtrToStringUni(value); }
+        finally { LocalFree(value); }
+    }
+    public static string AccountSid(string accountName) {
+        if (String.IsNullOrWhiteSpace(accountName) || accountName.Length > 256 || accountName.Any(Char.IsControl)) throw new IOException("Selected Windows account name is invalid.");
+        uint sidSize = 0, domainSize = 0;
+        int use;
+        LookupAccountNameW(null, accountName, IntPtr.Zero, ref sidSize, null, ref domainSize, out use);
+        if (Marshal.GetLastWin32Error() != ErrorInsufficientBuffer || sidSize == 0 || sidSize > 1024 || domainSize == 0 || domainSize > 32768) throw new IOException("Could not resolve the selected Windows account.");
+        IntPtr sid = Marshal.AllocHGlobal((int)sidSize);
+        StringBuilder domain = new StringBuilder((int)domainSize);
+        try {
+            if (!LookupAccountNameW(null, accountName, sid, ref sidSize, domain, ref domainSize, out use)) throw Win32("Could not resolve the selected Windows account");
+            return SidText(sid);
+        } finally { Marshal.FreeHGlobal(sid); }
+    }
+    public static string HostCliPathForSid(string sid) {
+        if (String.IsNullOrEmpty(sid) || !sid.StartsWith("S-1-", StringComparison.Ordinal) || sid.Any(c => !(Char.IsDigit(c) || c == 'S' || c == '-'))) throw new IOException("Selected Windows account SID is invalid.");
+        return Path.Combine(KnownProgramData(), "LomiRemote", "HostServices", sid, "Install", "lomiremote.exe");
+    }
+    private static void WithSecurity(string sddl, Action<SecurityAttributes> action) {
+        IntPtr descriptor;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, IntPtr.Zero)) throw Win32("Could not prepare a protected bootstrap ACL");
+        try {
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            attributes.SecurityDescriptor = descriptor;
+            attributes.InheritHandle = 0;
+            action(attributes);
+        } finally { LocalFree(descriptor); }
+    }
+    private static IntPtr OpenDirectory(string path) {
+        IntPtr handle = CreateFileNoSecurity(path, ReadControl | ReadAttributes | 0x0001, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
+        if (InvalidHandle(handle)) throw Win32("Could not pin a bootstrap directory");
+        return handle;
+    }
+    private static FileInformation Info(IntPtr handle) {
+        FileInformation info;
+        if (!GetFileInformationByHandle(handle, out info)) throw Win32("Could not inspect a bootstrap file");
+        return info;
+    }
+    private static void ValidateDirectoryPath(IntPtr handle, string path) {
+        FileInformation info = Info(handle);
+        if ((info.Attributes & DirectoryAttribute) == 0 || (info.Attributes & ReparseAttribute) != 0) throw new IOException("Bootstrap directory is not a real directory.");
+        RequireSamePath(handle, path);
+    }
+    private static void ValidateRegularFile(IntPtr handle, string path, long expectedLength, string expectedDigest) {
+        FileInformation info = Info(handle);
+        if ((info.Attributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.NumberOfLinks != 1) throw new IOException("Bootstrap executable is a reparse point, directory, or hard link.");
+        RequireSamePath(handle, path);
+        long length;
+        if (!GetFileSizeEx(handle, out length) || length <= 0 || length > MaxTarget || (expectedLength >= 0 && length != expectedLength)) throw new IOException("Bootstrap executable has an invalid size.");
+        if (expectedDigest != null && !String.Equals(HashHandle(handle), expectedDigest, StringComparison.Ordinal)) throw new IOException("Protected bootstrap executable hash changed.");
+    }
+    private static string HashHandle(IntPtr handle) {
+        long position;
+        if (!SetFilePointerEx(handle, 0, out position, 0)) throw Win32("Could not rewind a pinned bootstrap image");
+        using (SafeFileHandle safe = new SafeFileHandle(handle, false))
+        using (FileStream stream = new FileStream(safe, FileAccess.Read, 65536, false))
+        using (SHA256 hash = SHA256.Create()) {
+            byte[] digest = hash.ComputeHash(stream);
+            StringBuilder text = new StringBuilder(64);
+            for (int i = 0; i < digest.Length; ++i) text.Append(digest[i].ToString("x2"));
+            return text.ToString();
+        }
+    }
+    private static string CopyAndHash(IntPtr source, IntPtr destination, out long total) {
+        total = 0;
+        long position;
+        if (!SetFilePointerEx(source, 0, out position, 0)) throw Win32("Could not rewind the bundled updater");
+        using (SafeFileHandle sourceSafe = new SafeFileHandle(source, false))
+        using (SafeFileHandle destinationSafe = new SafeFileHandle(destination, false))
+        using (FileStream input = new FileStream(sourceSafe, FileAccess.Read, 65536, false))
+        using (FileStream output = new FileStream(destinationSafe, FileAccess.Write, 65536, false))
+        using (SHA256 hash = SHA256.Create()) {
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) != 0) {
+                total += read;
+                if (total > MaxTarget) throw new IOException("Updater exceeds the target size limit.");
+                hash.TransformBlock(buffer, 0, read, buffer, 0);
+                output.Write(buffer, 0, read);
+            }
+            hash.TransformFinalBlock(new byte[0], 0, 0);
+            output.Flush(true);
+            StringBuilder text = new StringBuilder(64);
+            byte[] digest = hash.Hash;
+            for (int i = 0; i < digest.Length; ++i) text.Append(digest[i].ToString("x2"));
+            return text.ToString();
+        }
+    }
+    private static void Security(IntPtr handle, out IntPtr descriptor, out IntPtr owner, out IntPtr group, out IntPtr dacl) {
+        descriptor = IntPtr.Zero; owner = IntPtr.Zero; group = IntPtr.Zero; dacl = IntPtr.Zero;
+        uint status = GetSecurityInfo(handle, FileObject, OwnerSecurityInformation | GroupSecurityInformation | DaclSecurityInformation, out owner, out group, out dacl, IntPtr.Zero, out descriptor);
+        if (status != 0 || descriptor == IntPtr.Zero || dacl == IntPtr.Zero) throw new IOException("Could not inspect bootstrap ACL (Windows error " + status.ToString() + ").");
+    }
+    private static AclSizeInformation AclInfo(IntPtr dacl) {
+        AclSizeInformation info;
+        if (!GetAclInformation(dacl, out info, (uint)Marshal.SizeOf(typeof(AclSizeInformation)), 2)) throw Win32("Could not inspect bootstrap ACL entries");
+        return info;
+    }
+    private static string AceSid(IntPtr ace) { return SidText(IntPtr.Add(ace, 8)); }
+    private static uint AceMask(IntPtr ace) { return unchecked((uint)Marshal.ReadInt32(ace, 4)); }
+    private static void ValidateAncestor(IntPtr handle) {
+        IntPtr descriptor, owner, group, dacl;
+        Security(handle, out descriptor, out owner, out group, out dacl);
+        try {
+            string ownerSid = SidText(owner);
+            if (ownerSid != SystemSid && ownerSid != AdministratorsSid && ownerSid != TrustedInstallerSid) throw new IOException("Bootstrap ancestor has an untrusted owner.");
+            AclSizeInformation info = AclInfo(dacl);
+            uint forbidden = DeleteChild | WriteDac | WriteOwner | Delete | GenericAll | GenericWrite | WriteEa | WriteAttributes;
+            for (uint i = 0; i < info.AceCount; ++i) {
+                IntPtr ace;
+                if (!GetAce(dacl, i, out ace)) throw Win32("Could not inspect bootstrap ancestor ACL");
+                byte type = Marshal.ReadByte(ace);
+                byte flags = Marshal.ReadByte(ace, 1);
+                if (type == DeniedAce) continue;
+                if (type != AllowedAce) throw new IOException("Bootstrap ancestor has an unsupported ACL entry.");
+                if ((flags & InheritOnlyAce) != 0) continue;
+                string sid = AceSid(ace);
+                if (sid == SystemSid || sid == AdministratorsSid || sid == TrustedInstallerSid) continue;
+                if ((AceMask(ace) & forbidden) != 0) throw new IOException("Bootstrap ancestor can be replaced by an untrusted account.");
+            }
+        } finally { LocalFree(descriptor); }
+    }
+    private static void ValidatePrivate(IntPtr handle, bool directory) {
+        IntPtr descriptor, owner, group, dacl;
+        Security(handle, out descriptor, out owner, out group, out dacl);
+        try {
+            if (SidText(owner) != AdministratorsSid || SidText(group) != AdministratorsSid) throw new IOException("Protected bootstrap object has an unexpected owner or group.");
+            ushort control; uint revision;
+            if (!GetSecurityDescriptorControl(descriptor, out control, out revision) || (control & DaclProtected) == 0) throw new IOException("Protected bootstrap ACL is inheritable.");
+            AclSizeInformation info = AclInfo(dacl);
+            bool system = false, administrators = false;
+            byte expectedFlags = directory ? (byte)(ObjectInheritAce | ContainerInheritAce) : (byte)0;
+            for (uint i = 0; i < info.AceCount; ++i) {
+                IntPtr ace;
+                if (!GetAce(dacl, i, out ace)) throw Win32("Could not inspect protected bootstrap ACL");
+                if (Marshal.ReadByte(ace) != AllowedAce) throw new IOException("Protected bootstrap ACL is not exact.");
+                byte flags = Marshal.ReadByte(ace, 1);
+                uint mask = AceMask(ace);
+                string sid = AceSid(ace);
+                if (flags != expectedFlags || mask != FileAllAccess) throw new IOException("Protected bootstrap ACL is not exact.");
+                if (sid == SystemSid && !system) system = true;
+                else if (sid == AdministratorsSid && !administrators) administrators = true;
+                else throw new IOException("Protected bootstrap ACL contains an unexpected principal.");
+            }
+            if (!system || !administrators) throw new IOException("Protected bootstrap ACL omits a required principal.");
+        } finally { LocalFree(descriptor); }
+    }
+    private static void PinAncestors(string path, List<IntPtr> pins) {
+        string root = Path.GetPathRoot(path);
+        if (String.IsNullOrEmpty(root) || root.StartsWith("\\\\", StringComparison.Ordinal)) throw new IOException("Bootstrap path must use a local drive.");
+        string current = root;
+        IntPtr first = OpenDirectory(current);
+        try { ValidateDirectoryPath(first, current); ValidateAncestor(first); pins.Add(first); }
+        catch { CloseHandle(first); throw; }
+        string rest = path.Substring(root.Length);
+        string[] components = rest.Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < components.Length; ++i) {
+            current = Path.Combine(current, components[i]);
+            IntPtr handle = OpenDirectory(current);
+            try { ValidateDirectoryPath(handle, current); ValidateAncestor(handle); pins.Add(handle); }
+            catch { CloseHandle(handle); throw; }
+        }
+    }
+    private static void CreateDirectory(string path, string sddl) {
+        WithSecurity(sddl, delegate(SecurityAttributes attributes) {
+            if (!CreateDirectoryW(path, ref attributes)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error != ErrorAlreadyExists) throw new IOException("Could not create protected bootstrap directory (Windows error " + error.ToString() + ").");
+            }
+        });
+    }
+    private static IntPtr PinTrustedDirectory(string path, List<IntPtr> pins) {
+        IntPtr handle = OpenDirectory(path);
+        try { ValidateDirectoryPath(handle, path); ValidateAncestor(handle); pins.Add(handle); return handle; }
+        catch { CloseHandle(handle); throw; }
+    }
+    private static IntPtr PinPrivateDirectory(string path, List<IntPtr> pins) {
+        IntPtr handle = OpenDirectory(path);
+        try { ValidateDirectoryPath(handle, path); ValidatePrivate(handle, true); pins.Add(handle); return handle; }
+        catch { CloseHandle(handle); throw; }
+    }
+    private static IntPtr OpenReadFile(string path) {
+        IntPtr handle = CreateFileNoSecurity(path, ReadData | ReadAttributes | ReadControl, FileShareRead, IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
+        if (InvalidHandle(handle)) throw Win32("Could not open a pinned bootstrap image");
+        return handle;
+    }
+    private static IntPtr CreatePrivateFile(string path) {
+        IntPtr result = IntPtr.Zero;
+        WithSecurity(PrivateFileSddl, delegate(SecurityAttributes attributes) {
+            result = CreateFileWithSecurity(path, ReadData | WriteData | ReadAttributes | ReadControl, FileShareRead, ref attributes, CreateNew, OpenReparsePoint | NormalAttribute, IntPtr.Zero);
+        });
+        if (InvalidHandle(result)) throw Win32("Could not create a protected updater staging file");
+        return result;
+    }
+    private static void ValidateNoStreams(string path) {
+        FindStreamData data;
+        IntPtr search = FindFirstStreamW(path, 0, out data, 0);
+        if (InvalidHandle(search)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorInvalidFunction || error == ErrorNotSupported) return;
+            throw new IOException("Could not inspect updater alternate streams (Windows error " + error.ToString() + ").");
+        }
+        try {
+            while (true) {
+                if (data.StreamName != "::$DATA") throw new IOException("Updater contains an alternate data stream.");
+                if (!FindNextStreamW(search, out data)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error != ErrorHandleEof) throw new IOException("Could not enumerate updater streams (Windows error " + error.ToString() + ").");
+                    break;
+                }
+            }
+        } finally { FindClose(search); }
+    }
+    public static LomiBrokerBootstrapImage Prepare(string sourcePath) {
+        return PrepareCore(sourcePath, false);
+    }
+    public static LomiBrokerBootstrapImage PrepareHostCli(string sourcePath) {
+        return PrepareCore(sourcePath, true);
+    }
+    private static LomiBrokerBootstrapImage PrepareCore(string sourcePath, bool hostCli) {
+        List<IntPtr> pins = new List<IntPtr>();
+        IntPtr source = IntPtr.Zero, final = IntPtr.Zero, temporary = IntPtr.Zero;
+        string temporaryPath = null;
+        try {
+            string programData = KnownProgramData();
+            PinAncestors(programData, pins);
+            string root = Path.Combine(programData, hostCli ? "LomiRemoteHostBootstrap" : "LomiRemoteFileSecurity");
+            CreateDirectory(root, hostCli ? PrivateDirectorySddl : RootSddl);
+            if (hostCli) PinPrivateDirectory(root, pins);
+            else PinTrustedDirectory(root, pins);
+            string bootstrap = Path.Combine(root, "bootstrap");
+            CreateDirectory(bootstrap, PrivateDirectorySddl);
+            PinPrivateDirectory(bootstrap, pins);
+
+            string input = LocalPath(Path.GetFullPath(sourcePath));
+            source = CreateFileNoSecurity(input, ReadData | ReadAttributes | ReadControl, FileShareRead, IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
+            if (InvalidHandle(source)) throw Win32("Could not pin the bundled updater source");
+            ValidateRegularFile(source, input, -1, null);
+            long sourceLength;
+            if (!GetFileSizeEx(source, out sourceLength) || sourceLength <= 0 || sourceLength > MaxTarget) throw new IOException("Bundled updater exceeds the target size limit.");
+            string sourceDigest = HashHandle(source);
+
+            string temporaryName = ".bootstrap-" + Guid.NewGuid().ToString("N") + ".tmp";
+            temporaryPath = Path.Combine(bootstrap, temporaryName);
+            temporary = CreatePrivateFile(temporaryPath);
+            long copiedLength;
+            string digest = CopyAndHash(source, temporary, out copiedLength);
+            if (copiedLength != sourceLength || !String.Equals(sourceDigest, digest, StringComparison.Ordinal) || !FlushFileBuffers(temporary)) throw Win32("Could not verify or flush the protected updater copy");
+            ValidateRegularFile(temporary, temporaryPath, sourceLength, digest);
+            ValidatePrivate(temporary, false);
+            CloseHandle(temporary);
+            temporary = IntPtr.Zero;
+
+            string finalPath = Path.Combine(bootstrap, digest + ".exe");
+            if (!MoveFileExW(temporaryPath, finalPath, MoveWriteThrough)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error != ErrorFileExists && error != ErrorAlreadyExists) throw new IOException("Could not atomically publish the protected updater (Windows error " + error.ToString() + ").");
+                DeleteFileW(temporaryPath);
+            } else {
+                temporaryPath = null;
+            }
+            final = OpenReadFile(finalPath);
+            ValidateRegularFile(final, finalPath, sourceLength, digest);
+            ValidatePrivate(final, false);
+            ValidateNoStreams(finalPath);
+            return new LomiBrokerBootstrapImage(finalPath, new IntPtr[] { source, final }.Concat(pins).ToArray());
+        } catch {
+            if (temporary != IntPtr.Zero && temporary != new IntPtr(-1)) CloseHandle(temporary);
+            if (temporaryPath != null) DeleteFileW(temporaryPath);
+            if (final != IntPtr.Zero && final != new IntPtr(-1)) CloseHandle(final);
+            if (source != IntPtr.Zero && source != new IntPtr(-1)) CloseHandle(source);
+            for (int i = pins.Count - 1; i >= 0; --i) CloseHandle(pins[i]);
+            throw;
+        }
+    }
+}
+'@
+
+$BundleDir = Split-Path -Parent ([IO.Path]::GetFullPath($MyInvocation.MyCommand.Path))
+$BundleUpdater = Join-Path $BundleDir 'lomi-update-trust.exe'
+if (-not $HostServiceMode -and -not (Test-Path -LiteralPath $BundleUpdater -PathType Leaf)) { Stop-Installer 'verified updater is missing' }
+if (-not (Test-AuthenticodeFile $MyInvocation.MyCommand.Path)) { Stop-Installer 'installer script has an invalid or unexpected Authenticode signature' }
+if ($BrokerMode) {
+    try {
+        Add-Type -TypeDefinition $BrokerBootstrapSource -Language CSharp -ErrorAction Stop | Out-Null
+        $Bootstrap = [LomiBrokerBootstrap]::Prepare($BundleUpdater)
+        $Updater = $Bootstrap.FilePath
+    } catch { Stop-Installer 'could not create a protected updater copy for the broker operation' }
+} elseif (-not $HostServiceMode) {
+    $Updater = $BundleUpdater
+}
+if (-not $HostServiceMode) {
+    if (-not (Test-AuthenticodeFile $Updater)) { Stop-Installer 'updater binary has an invalid or unexpected Authenticode signature' }
+    try {
+        $rootPin = (Invoke-Checked $Updater @('root-pin') | Out-String).Trim()
+    } catch { Stop-Installer 'embedded public trust root could not be read' }
+    if ($rootPin -cne $PinnedRootSha256) { Stop-Installer 'embedded public trust root does not match the package pin' }
+}
+
+# The privileged Host service has an independent protected bootstrap. Its
+# signed CLI and release root are verified before any per-user path discovery.
+if ($HostServiceMode) {
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $currentPrincipal = [Security.Principal.WindowsPrincipal]::new($currentIdentity)
+        if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Stop-Installer 'host-service lifecycle commands require an elevated administrator session'
+        }
+    } finally { $currentIdentity.Dispose() }
+
+    try {
+        Add-Type -TypeDefinition $BrokerBootstrapSource -Language CSharp -ErrorAction Stop | Out-Null
+    } catch { Stop-Installer 'could not initialize protected Host bootstrap checks' }
+    try {
+        $selectedSid = [LomiBrokerBootstrap]::AccountSid($HostServiceRequest.Account)
+        $installedCli = [LomiBrokerBootstrap]::HostCliPathForSid($selectedSid)
+    } catch { Stop-Installer 'could not resolve the selected native Windows account' }
+
+    if ($HostServiceRequest.Operation -ceq 'uninstall') {
+        if (-not (Test-Path -LiteralPath $installedCli -PathType Leaf)) {
+            Stop-Installer 'the selected account protected CLI is missing; restore it with a verified installer and retry. If recovery cannot restore it, revoke this Host from the central Lomi account access settings'
+        }
+        try {
+            $installedCliItem = Get-Item -LiteralPath $installedCli -Force
+            if ($installedCliItem.PSIsContainer -or ($installedCliItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                Stop-Installer 'the selected account protected CLI is not a regular installed file; restore it with a verified installer or revoke this Host from the central Lomi account access settings'
+            }
+        } catch { Stop-Installer 'the selected account protected CLI could not be inspected; restore it with a verified installer or revoke this Host from the central Lomi account access settings' }
+        if (-not (Test-AuthenticodeFile $installedCli)) {
+            Stop-Installer 'the selected account protected CLI has an invalid or unexpected Authenticode signature; restore it with a verified installer or revoke this Host from the central Lomi account access settings'
+        }
+        try {
+            $installedRootPin = (Invoke-Checked $installedCli @('--internal-public-update-root') | Out-String).Trim()
+        } catch { Stop-Installer 'the selected account protected CLI public release root could not be verified; restore it with a verified installer or revoke this Host from the central Lomi account access settings' }
+        if ($installedRootPin -cne $PinnedRootSha256) {
+            Stop-Installer 'the selected account protected CLI public release root does not match the package pin; restore it with a verified installer or revoke this Host from the central Lomi account access settings'
+        }
+
+        # The elevated operator's HOME and LOMI_PROFILE_DIR do not identify
+        # the SCM account. Resolve its profile only through the SID-keyed
+        # Windows profile registration.
+        $profileListKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$selectedSid"
+        try {
+            $nativeProfileRoot = (Get-ItemProperty -LiteralPath $profileListKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+            $nativeProfileRoot = [Environment]::ExpandEnvironmentVariables([string]$nativeProfileRoot)
+            if (-not (Test-FullyQualifiedInstallPath $nativeProfileRoot)) { throw 'profile path is not absolute' }
+            $nativeProfileRoot = [IO.Path]::GetFullPath($nativeProfileRoot)
+            $nativeProfileDir = Join-Path $nativeProfileRoot '.lomiRemote'
+        } catch { Stop-Installer 'the selected native Windows account profile could not be resolved from its SID; no uninstall action was taken. Restore the profile mapping or revoke this Host from the central Lomi account access settings' }
+
+        $uninstallArguments = @('--profile-dir', $nativeProfileDir, 'uninstall', '--confirm')
+        if ($HostServiceRequest.Purge) { $uninstallArguments += '--purge' }
+        Invoke-UninstallAndExit $installedCli $uninstallArguments
+    }
+
+    $BundleCli = Join-Path $BundleDir 'lomiremote.exe'
+    if (-not (Test-Path -LiteralPath $BundleCli -PathType Leaf) -or -not (Test-AuthenticodeFile $BundleCli)) {
+        Stop-Installer 'signed Host service CLI is missing or has an invalid Authenticode signature'
+    }
+    if ($null -ne $HostServiceRequest.InstallDirectory) {
+        try {
+            $requestedInstallDirectory = [IO.Path]::GetFullPath($HostServiceRequest.InstallDirectory).TrimEnd([char]'\')
+            $protectedInstallDirectory = [IO.Path]::GetDirectoryName($installedCli).TrimEnd([char]'\')
+            if (-not [StringComparer]::OrdinalIgnoreCase.Equals($requestedInstallDirectory, $protectedInstallDirectory)) {
+                Stop-Installer 'host-service uses the fixed protected per-account install directory; --install-dir must match it exactly'
+            }
+        } catch { Stop-Installer 'host-service install path could not be validated' }
+    }
+    try {
+        $HostBootstrap = [LomiBrokerBootstrap]::PrepareHostCli($BundleCli)
+        $HostCli = $HostBootstrap.FilePath
+    } catch { Stop-Installer 'could not stage the Host service CLI in its protected bootstrap directory' }
+    if (-not (Test-AuthenticodeFile $HostCli)) { Stop-Installer 'protected Host service CLI has an invalid Authenticode signature' }
+    try {
+        $hostRootPin = (Invoke-Checked $HostCli @('--internal-public-update-root') | Out-String).Trim()
+    } catch { Stop-Installer 'protected Host service CLI public release root could not be read' }
+    if ($hostRootPin -cne $PinnedRootSha256) { Stop-Installer 'protected Host service CLI public release root does not match the package pin' }
+
+    $HostCliArguments = @('service', $HostServiceRequest.Operation, '--account', $HostServiceRequest.Account)
+    if ($HostServiceRequest.Operation -ceq 'install') {
+        $HostCliArguments += @('--mode', 'boot', '--confirm', '--confirm-service-logon-right')
+    } elseif ($HostServiceRequest.Operation -cin @('update', 'stop', 'restart', 'rollback')) {
+        $HostCliArguments += '--confirm'
+    }
+    if ($HostServiceRequest.RepairCredentials) { $HostCliArguments += '--repair-credentials' }
+    if ($HostServiceRequest.Operation -cin @('install', 'update')) { $HostCliArguments += @('--release-version', $ReleaseVersion) }
+    try {
+        $hostResult = Invoke-Checked $HostCli $HostCliArguments
+    } catch { Stop-Installer "protected Host service operation '$($HostServiceRequest.Operation)' failed" }
+    foreach ($line in @($hostResult)) {
+        if ($null -ne $line) { Write-Host ([string]$line) }
+    }
+    Write-Host "Host service operation '$($HostServiceRequest.Operation)' completed for native Windows account '$($HostServiceRequest.Account)' (SID $selectedSid)."
+    if ($HostServiceRequest.Operation -ceq 'install') {
+        if (-not (Test-Path -LiteralPath $installedCli -PathType Leaf) -or -not (Test-AuthenticodeFile $installedCli)) {
+            Stop-Installer 'Host installation completed without a verifiable protected per-account CLI'
+        }
+        try {
+            $installedRootPin = (Invoke-Checked $installedCli @('--internal-public-update-root') | Out-String).Trim()
+        } catch { Stop-Installer 'installed protected Host CLI public release root could not be read' }
+        if ($installedRootPin -cne $PinnedRootSha256) { Stop-Installer 'installed protected Host CLI public release root does not match the package pin' }
+        $quotedInstalledCli = $installedCli.Replace("'", "''")
+        Write-Host "Next step: in '$($HostServiceRequest.Account)'s normal, non-elevated Windows session, run:"
+        Write-Host "  & '$quotedInstalledCli' setup"
+    }
+    $HostBootstrap.Dispose()
+    exit 0
+}
+
+# The broker lifecycle is a separate, explicit administrator operation. Keep
+# it ahead of all per-user path discovery and ordinary-host maintenance so an
+# elevated invocation cannot infer or touch the administrator's own profile.
+if ($args.Count -gt 0 -and $args[0] -ceq 'file-security') {
+    if ($args.Count -lt 2) { Stop-Installer 'use file-security install|upgrade|uninstall --owner-sid SID' }
+    $operation = $args[1]
+    if ($operation -ceq 'install' -or $operation -ceq 'upgrade') {
+        if ($args.Count -ne 5 -or $args[2] -cne '--owner-sid' -or $args[4] -cne '--confirm-system-service' -or [string]::IsNullOrWhiteSpace($args[3])) {
+            Stop-Installer 'use file-security install|upgrade --owner-sid SID --confirm-system-service'
+        }
+        $brokerArguments = @('file-security', $operation, '--owner-sid', $args[3], '--confirm-system-service', $ReleaseOrigin, $TargetName, $Platform)
+    } elseif ($operation -ceq 'uninstall') {
+        if ($args.Count -ne 4 -or $args[2] -cne '--owner-sid' -or [string]::IsNullOrWhiteSpace($args[3])) {
+            Stop-Installer 'use file-security uninstall --owner-sid SID'
+        }
+        $brokerArguments = @('file-security', $operation, '--owner-sid', $args[3])
+    } else {
+        Stop-Installer 'file-security mode supports only install, upgrade, and uninstall'
+    }
+    try { Invoke-Checked $Updater $brokerArguments | Out-Null }
+    catch { Stop-Installer 'signed broker release installation or service management failed' }
+    Write-Host "File security broker $operation completed for the explicitly selected owner SID."
+    exit 0
+}
+$InstallRequest = Read-InstallArguments $args
+$Uninstall = $InstallRequest.Uninstall
+
+$ProfileDir = if ($env:LOMI_PROFILE_DIR) { $env:LOMI_PROFILE_DIR } else { Join-Path $env:USERPROFILE '.lomiRemote' }
+$InstallDir = if ($null -ne $InstallRequest.InstallDirectory) { $InstallRequest.InstallDirectory } elseif ($env:LOMI_INSTALL_DIR) { $env:LOMI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs/LomiRemote' }
+$serviceRecord = Join-Path ($ProfileDir + '-service-windows') 'registration.json'
+$loginRecord = Join-Path ($ProfileDir + '-service-windows-login') 'registration.json'
+$legacyServiceRecord = Join-Path $ProfileDir 'registration.json'
+$profileExists = Test-Path -LiteralPath $ProfileDir
+if (-not (Test-FullyQualifiedInstallPath $ProfileDir) -or -not (Test-FullyQualifiedInstallPath $InstallDir)) {
+    Stop-Installer 'profile and install paths must be absolute'
+}
+if ($Uninstall -and -not (Test-Path -LiteralPath $InstallDir)) {
+    if ((Test-Path -LiteralPath $serviceRecord) -or (Test-Path -LiteralPath $loginRecord) -or (Test-Path -LiteralPath $legacyServiceRecord)) {
+        Stop-Installer 'No installed program; profile-owned service registration remains. Profile data were preserved, and cloud authorization revocation is unconfirmed; restore the installed CLI with a verified installer or revoke this Host from the central Lomi account access settings'
+    }
+    if ($InstallRequest.Purge -and $profileExists) {
+        Stop-Installer 'No installed program is available to authenticate a profile purge. Profile data were preserved; revoke this Host from the central Lomi account access settings if it remains listed'
+    }
+    Write-Host 'No installed program; profile and configuration were preserved. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+    exit 0
+}
+if (Test-Path -LiteralPath $InstallDir) {
+    $existingDirectory = Get-Item -LiteralPath $InstallDir -Force
+    if (-not $existingDirectory.PSIsContainer -or ($existingDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-Installer 'install directory must be a real directory, not a reparse point'
+    }
+    $InstallDir = (Resolve-Path -LiteralPath $InstallDir).Path
+    try { Invoke-Checked $Updater @('validate-install-dir', $InstallDir) | Out-Null }
+    catch { Stop-Installer 'existing install directory is unowned or has unsafe permissions' }
+} else {
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $InstallDir = (Resolve-Path -LiteralPath $InstallDir).Path
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sid = $identity.User
+    $acl = Get-Acl -LiteralPath $InstallDir
+    $acl.SetOwner($sid)
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($entry in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($entry) }
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $sid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $InstallDir -AclObject $acl
+    try { Invoke-Checked $Updater @('validate-install-dir', $InstallDir) | Out-Null }
+    catch { Stop-Installer 'new install directory could not be protected for this account' }
+}
+
+$TrustDir = Join-Path $InstallDir 'trust'
+$Cli = Join-Path $InstallDir 'lomiremote.exe'
+$Helper = Join-Path $InstallDir 'lomiremote-host.exe'
+if (Test-Path -LiteralPath $legacyServiceRecord) {
+    Stop-Installer 'legacy in-profile service registration is unsupported and requires explicit recovery'
+}
+if ((Test-Path -LiteralPath $serviceRecord) -and (Test-Path -LiteralPath $loginRecord)) {
+    Stop-Installer 'multiple profile-owned Windows service registrations are present'
+}
+if (Test-Path -LiteralPath $loginRecord) { $serviceRecord = $loginRecord }
+
+if ($Uninstall) {
+    $trustedInstalledCli = $false
+    if (Test-Path -LiteralPath $Cli -PathType Leaf) {
+        try {
+            $installedCliItem = Get-Item -LiteralPath $Cli -Force
+            $trustedInstalledCli = -not $installedCliItem.PSIsContainer -and -not ($installedCliItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        } catch { $trustedInstalledCli = $false }
+        if ($trustedInstalledCli) { $trustedInstalledCli = Test-AuthenticodeFile $Cli }
+        if ($trustedInstalledCli) {
+            try {
+                $installedRootPin = (Invoke-Checked $Cli @('--internal-public-update-root') | Out-String).Trim()
+                $trustedInstalledCli = $installedRootPin -ceq $PinnedRootSha256
+            } catch { $trustedInstalledCli = $false }
+        }
+    }
+    if ($trustedInstalledCli) {
+        $uninstallArguments = @('--profile-dir', $ProfileDir, 'uninstall', '--confirm')
+        if ($InstallRequest.Purge) { $uninstallArguments += '--purge' }
+        Invoke-UninstallAndExit $Cli $uninstallArguments
+    }
+    if ($profileExists) {
+        Stop-Installer 'the installed CLI is missing or untrusted and the profile identity is uncertain; restore it with a verified installer and retry uninstall. If recovery cannot restore it, revoke this Host from the central Lomi account access settings'
+    }
+    try { Invoke-Checked $Updater @('uninstall-release', $ProfileDir, $InstallDir) | Out-Null }
+    catch { Stop-Installer 'updater refused to remove an unowned or active installation; cloud authorization revocation is unconfirmed, so revoke this Host from the central Lomi account access settings if it remains listed' }
+    Write-Host 'Application release files removed from a profile that was absent. Cloud authorization revocation is unconfirmed; revoke this Host from the central Lomi account access settings if it remains listed.'
+    exit 0
+}
+
+$recoverySchema = $null
+try {
+    $recoveryState = (Invoke-Checked $Updater @('release-recovery-needed', $InstallDir) | Out-String).Trim()
+} catch { Stop-Installer 'could not inspect the installed activation journal safely' }
+if ($recoveryState -ceq 'pending') {
+    Write-Host 'An interrupted activation is pending. The updater will stop a verified managed host if one is registered and repair the installation. Save work; proceeding in 20 seconds.'
+    Start-Sleep -Seconds $GraceSeconds
+    try {
+        $recoverySchema = (Invoke-Checked $Updater @('recover-release', $ProfileDir, $InstallDir, $Platform) | Out-String).Trim()
+    } catch { Stop-Installer 'interrupted release recovery could not prove service shutdown, profile schema, and verified release compatibility' }
+    if ($recoverySchema -notmatch '^(0|[1-9][0-9]*)$') { Stop-Installer 'recovery returned an invalid profile schema' }
+    $profileExists = $true
+} elseif ($recoveryState -cne 'clear') {
+    Stop-Installer 'updater returned an invalid activation recovery state'
+}
+
+$profileSchema = if ($null -ne $recoverySchema) { $recoverySchema } else { '0' }
+$activeTerminals = '0'
+$serviceManaged = $false
+$profileOwnerAuthenticated = $false
+if ($null -ne $recoverySchema) {
+    $profileOwnerAuthenticated = [UInt64]$recoverySchema -gt 0
+    if (Test-Path -LiteralPath $serviceRecord) {
+        try {
+            Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'service', 'status') | Out-Null
+            $serviceManaged = $true
+        } catch { Stop-Installer 'recovered profile-owned Windows service registration could not be authenticated' }
+    }
+} elseif ($profileExists) {
+    $hasServiceRegistration = Test-Path -LiteralPath $serviceRecord
+    $hasTrustedCli = $false
+    if (Test-Path -LiteralPath $Cli -PathType Leaf) {
+        $hasTrustedCli = Test-AuthenticodeFile $Cli
+    }
+    if ($hasServiceRegistration -and -not $hasTrustedCli) {
+        Stop-Installer 'profile-owned service executable is missing or untrusted'
+    }
+    if ($hasTrustedCli) {
+        try {
+            $status = Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'maintenance', 'prepare', '--json')
+            $values = Get-MaintenanceValues ($status | Out-String)
+            if ($values.Count -ne 2) { throw 'invalid maintenance response' }
+            $profileSchema = [string]$values[0]
+            $activeTerminals = [string]$values[1]
+            if ($profileSchema -notmatch '^(0|[1-9][0-9]*)$' -or $activeTerminals -notmatch '^(0|[1-9][0-9]*)$') {
+                throw 'invalid maintenance counts'
+            }
+            $profileOwnerAuthenticated = $true
+        } catch {
+            if ($hasServiceRegistration) {
+                Stop-Installer 'profile-owned service registration could not be authenticated'
+            }
+        }
+    }
+    if ($profileOwnerAuthenticated) {
+        Write-Host "Lomi Remote update will stop the current host. Active terminals: $activeTerminals. Save work and press Ctrl-C to cancel; continuing in $GraceSeconds seconds."
+        Start-Sleep -Seconds $GraceSeconds
+        if ($hasServiceRegistration) {
+            try {
+                Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'service', 'status') | Out-Null
+                $serviceManaged = $true
+                Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'service', 'stop') | Out-Null
+            } catch { Stop-Installer 'profile-owned Windows service registration could not be authenticated or stopped' }
+        } else {
+            try {
+                Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'daemon', 'stop', '--confirm') | Out-Null
+            } catch { Stop-Installer 'the authenticated host did not shut down cleanly' }
+        }
+    } else {
+        Write-Warning 'No authenticated live profile owner is available. The updater will continue only if the owner-locked profile has no SQLite database; otherwise no activation occurs.'
+    }
+}
+
+if (Test-Path -LiteralPath $TrustDir) {
+    try { Invoke-Checked $Updater @('status-release', $TrustDir) | Out-Null }
+    catch { Stop-Installer 'existing updater trust state is incomplete or invalid; preserving it for recovery' }
+} else {
+    try { Invoke-Checked $Updater @('initialize-release', $TrustDir) | Out-Null }
+    catch { Stop-Installer 'could not initialize private updater trust state' }
+}
+
+try {
+    Invoke-Checked $Updater @('install-release-pair', $TrustDir, $ReleaseOrigin, $TargetName, $CompanionTargetName, $ProfileDir, $InstallDir, $Platform, $profileSchema, $ReleaseVersion) | Out-Null
+} catch { Stop-Installer 'signed release verification or activation failed' }
+
+function Test-PlatformSignature {
+    return (Test-AuthenticodeFile $Cli) -and (Test-AuthenticodeFile $Helper)
+}
+if (-not (Test-PlatformSignature)) {
+    if ($profileOwnerAuthenticated) {
+        try {
+            Invoke-Checked $Updater @('rollback-release', $TrustDir, $ProfileDir, $InstallDir, $Platform, $profileSchema) | Out-Null
+        } catch { Stop-Installer 'signature validation failed and the previous release is not schema-compatible' }
+        if (-not (Test-PlatformSignature)) { Stop-Installer 'restored executable signature verification failed' }
+    } else {
+        try { Invoke-Checked $Updater @('uninstall-release', $ProfileDir, $InstallDir) | Out-Null }
+        catch { Stop-Installer 'signature validation failed and the new release could not be safely removed' }
+    }
+    Stop-Installer 'platform signature validation failed; the previous release was restored when available'
+}
+
+if (-not $profileOwnerAuthenticated) {
+    Write-Host 'Signed release installed. A private profile directory is reserved; no host database was created or started.'
+    $setupCommand = "& '" + $Cli.Replace("'", "''") + "'"
+    if ($env:LOMI_PROFILE_DIR) { $setupCommand += " --profile-dir '" + $ProfileDir.Replace("'", "''") + "'" }
+    Write-Host 'Complete account, workspace and sharing setup with:'
+    Write-Host ($setupCommand + ' setup')
+    exit 0
+}
+
+function Start-Host {
+    if ($serviceManaged) {
+        Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'service', 'start') | Out-Null
+    } else {
+        Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'daemon', 'start') | Out-Null
+    }
+}
+try {
+    Start-Host
+    Write-Host 'Signed release installed and the previous host mode is running.'
+    exit 0
+} catch {
+    [Console]::Error.WriteLine('Updated host did not start. Querying the authenticated current profile schema before considering rollback.')
+}
+
+try {
+    $status = Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'maintenance', 'prepare', '--json')
+    $values = Get-MaintenanceValues ($status | Out-String)
+    if ($values.Count -ne 2 -or [string]$values[0] -notmatch '^(0|[1-9][0-9]*)$') { throw 'invalid status' }
+    $currentSchema = [string]$values[0]
+} catch { Stop-Installer 'current schema is unknown; automatic rollback is unsafe and the signed update remains installed' }
+try {
+    if ($serviceManaged) {
+        Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'service', 'stop') | Out-Null
+    } else {
+        Invoke-Checked $Cli @('--profile-dir', $ProfileDir, 'daemon', 'stop', '--confirm') | Out-Null
+    }
+} catch { Stop-Installer 'host did not stop before schema-checked rollback' }
+try {
+    Invoke-Checked $Updater @('rollback-release', $TrustDir, $ProfileDir, $InstallDir, $Platform, $currentSchema) | Out-Null
+} catch { Stop-Installer 'the previous signed release is incompatible with the current profile schema' }
+if (-not (Test-PlatformSignature)) { Stop-Installer 'restored executable signature verification failed' }
+try { Start-Host } catch { Stop-Installer 'previous release was restored, but it did not become healthy' }
+Stop-Installer 'previous signed release restored after update startup failure'

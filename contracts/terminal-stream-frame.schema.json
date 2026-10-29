@@ -1,0 +1,714 @@
+{
+  "$defs": {
+    "BoundedList": {
+      "items": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 16384,
+      "type": "array"
+    },
+    "ChunkCount": {
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ChunkIndex": {
+      "maximum": 1023,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "ResyncReason": {
+      "enum": [
+        "gap",
+        "stale_cursor",
+        "workspace_epoch_changed",
+        "runtime_changed",
+        "session_epoch_changed",
+        "profile_changed",
+        "subscriber_overflow",
+        "watch_overflow",
+        "snapshot_invalid",
+        "assembly_timeout"
+      ],
+      "type": "string"
+    },
+    "RuntimeId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SubscriptionId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "TerminalAckParams": {
+      "additionalProperties": false,
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalChange": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Host-produced grid state delta in the named experimental profile.",
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/BoundedList"
+            },
+            "kind": {
+              "const": "grid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TerminalDimensions"
+            },
+            "kind": {
+              "const": "resize",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TerminalExit"
+            },
+            "kind": {
+              "const": "exit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TerminalControlChanged"
+            },
+            "kind": {
+              "const": "controlChanged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalContext": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "profile": {
+          "$ref": "#/$defs/TerminalProfile"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceContext"
+        }
+      },
+      "required": [
+        "workspace",
+        "paneId",
+        "sessionId",
+        "sessionEpoch",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "TerminalControlChanged": {
+      "additionalProperties": false,
+      "properties": {
+        "controlled": {
+          "type": "boolean"
+        },
+        "leaseVersion": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "leaseVersion",
+        "controlled"
+      ],
+      "type": "object"
+    },
+    "TerminalDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/TerminalChange"
+        },
+        "seq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "seq",
+        "change"
+      ],
+      "type": "object"
+    },
+    "TerminalDeltaChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/BoundedList"
+        },
+        "index": {
+          "$ref": "#/$defs/ChunkIndex"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "index",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "TerminalDeltaComplete": {
+      "additionalProperties": false,
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalDeltaMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "previousSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/WorkingDirectoryValue"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "previousSeq",
+        "throughSeq",
+        "chunkCount",
+        "totalBytes",
+        "workingDirectory"
+      ],
+      "type": "object"
+    },
+    "TerminalDimension": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TerminalDimensions": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        }
+      },
+      "required": [
+        "columns",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TerminalExit": {
+      "additionalProperties": false,
+      "properties": {
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TerminalProfile": {
+      "enum": [
+        "lomi-rust-grid-v1-experimental"
+      ],
+      "type": "string"
+    },
+    "TerminalResync": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/ResyncReason"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "TerminalSessionId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalSnapshotChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/BoundedList"
+        },
+        "index": {
+          "$ref": "#/$defs/ChunkIndex"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "index",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "TerminalSnapshotComplete": {
+      "additionalProperties": false,
+      "properties": {
+        "outputOffset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq",
+        "outputOffset"
+      ],
+      "type": "object"
+    },
+    "TerminalSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "outputOffset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/WorkingDirectoryValue"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq",
+        "outputOffset",
+        "columns",
+        "rows",
+        "chunkCount",
+        "totalBytes",
+        "workingDirectory"
+      ],
+      "type": "object"
+    },
+    "WorkingDirectoryValue": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 1,
+          "not": {
+            "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+          },
+          "type": "string",
+          "x-lomi-maxUtf16CodeUnits": 4096
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "An absolute Host path or null when unknown"
+    },
+    "WorkspaceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "grantRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "hostAccessEpoch": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeGeneration": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        },
+        "workspaceEpoch": {
+          "$ref": "#/$defs/WorkspaceEpoch"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "workspaceEpoch",
+        "runtimeId",
+        "runtimeGeneration",
+        "hostAccessEpoch",
+        "grantRevision"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalSnapshotMetadata"
+        },
+        "type": {
+          "const": "snapshotMetadata",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalSnapshotChunk"
+        },
+        "type": {
+          "const": "snapshotChunk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalSnapshotComplete"
+        },
+        "type": {
+          "const": "snapshotComplete",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalDelta"
+        },
+        "type": {
+          "const": "delta",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalDeltaMetadata"
+        },
+        "type": {
+          "const": "deltaMetadata",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalDeltaChunk"
+        },
+        "type": {
+          "const": "deltaChunk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalDeltaComplete"
+        },
+        "type": {
+          "const": "deltaComplete",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalAckParams"
+        },
+        "type": {
+          "const": "ack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/TerminalResync"
+        },
+        "type": {
+          "const": "resyncRequired",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "TerminalStreamFrame"
+}

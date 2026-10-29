@@ -1,0 +1,21 @@
+{
+  "revision": "2cef452c39eb8b455c8d2ae1251310dc870c50bb",
+  "originalSha256": {
+    "src-tauri/Cargo.toml": "684c2f4a99d29fb0dcf69cb4eaae2b180184b59f7abb0a95daab64a4fa3d36ab",
+    "src-tauri/Cargo.lock": "058041850302f1c276da0c20e69efe3c2151103d0904d698a3268b7e39ac70b3",
+    "src-tauri/build.rs": "1b3cd190d054c543f6c1522249bc18b63919d259e60acef13b86ec551a16ea32",
+    "src-tauri/src/lib.rs": "911acbde8cca79ccb7a4323bf2fb50c0a503757508e8d62d7803b91a0f92180e",
+    "src-tauri/src/project_write_guard.rs": "b6f803dcbd92ec9e292a8eadbb4a9f7cbb4fb6012362d45587207337cbfdbcd5",
+    "src-tauri/src/files/editor.rs": "1dbece30e7387ac836a31551b230af2fec4b98c35bd5e2b3ed3cbb74534103aa",
+    "src-tauri/src/agent_runtime/mcp_policy.rs": "6e22c2d69bef7e918ad6cb5224b66466c29c822faac3efa089200e7645021c1b"
+  },
+  "patchedSha256": {
+    "src-tauri/Cargo.toml": "570e77d75899fd85c4314b13135d11fb323b6845ca83f476610842d4044f9732",
+    "src-tauri/Cargo.lock": "651f3724173bd220ec9b902abf306ac9a52feb8f63972b24a9031b90f434c323",
+    "src-tauri/build.rs": "628f237a447f4f0ec3a8b2c2451ab34ef7e5be2012050f8b8fa613697ae32dff",
+    "src-tauri/src/lib.rs": "dee8f67a7494d7d9c424adb9b77ea1caf4d92376749120559f9f8bcbd996c5bd",
+    "src-tauri/src/project_write_guard.rs": "af2a22b25c09e98618d687939ce43e43ce7755cdd6c6330bb93eed9c399327ef",
+    "src-tauri/src/files/editor.rs": "90a8b80cd6e04a0d0b530db0549dcf57ea55adce481eba6836fa75b0ddc91231",
+    "src-tauri/src/agent_runtime/mcp_policy.rs": "195b17027257338857ea33d36e0e5258af111a88397b179d819792b35b7e5d29"
+  }
+}

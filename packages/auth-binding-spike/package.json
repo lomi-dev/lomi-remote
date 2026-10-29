@@ -1,0 +1,23 @@
+{
+  "name": "@lomi/auth-binding-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-auth": "1.7.6",
+    "kysely": "0.29.6",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@types/pg": "8.23.1",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "mysql2": "3.23.1",
+    "deepmerge-ts": "8.0.0"
+  }
+}

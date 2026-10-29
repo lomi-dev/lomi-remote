@@ -1,0 +1,128 @@
+{
+  "stage": "S0.1",
+  "candidate": "vt100=0.16.2",
+  "profile": "stock-state-formatted-experimental",
+  "oracle": "@xterm/headless=6.0.0",
+  "qualified": false,
+  "cases": [
+    {
+      "id": "normal_ascii",
+      "passed": true,
+      "status": "passed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": true,
+      "titleEquivalent": true
+    },
+    {
+      "id": "alternate_to_normal",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "inactive_alternate",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "pending_csi",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "pending_utf8",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "unicode_cells",
+      "passed": true,
+      "status": "passed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": true,
+      "titleEquivalent": true
+    },
+    {
+      "id": "colors_modes",
+      "passed": true,
+      "status": "passed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": true,
+      "titleEquivalent": true
+    },
+    {
+      "id": "scroll_region_origin",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "saved_cursor",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "osc_title_hyperlink",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": false
+    },
+    {
+      "id": "pending_osc",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": true,
+      "continuationEquivalent": false,
+      "titleEquivalent": false
+    },
+    {
+      "id": "resize_reflow",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    },
+    {
+      "id": "bounded_replay_evicted",
+      "passed": false,
+      "status": "failed",
+      "checkpointEquivalent": false,
+      "continuationEquivalent": false,
+      "titleEquivalent": true
+    }
+  ],
+  "replyFilterProbe": {
+    "observers": 2,
+    "rawReplies": 4,
+    "forwardedReplies": 0,
+    "humanInputs": 2,
+    "productionHostOwnership": "not qualified"
+  },
+  "missingQualification": [
+    "full hidden state equality",
+    "OSC 52 side-effect isolation",
+    "real CLI fixtures",
+    "multi-hour soak",
+    "production host DSR/DA ownership"
+  ],
+  "decision": "rejected; regression success only asserts known counterexamples"
+}

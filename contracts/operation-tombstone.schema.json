@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "ConsumerAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "Method": {
+      "enum": [
+        "workspace.get",
+        "workspace.capabilities",
+        "workspace.subscribe",
+        "terminal.create",
+        "terminal.split",
+        "terminal.rename",
+        "terminal.move",
+        "terminal.close",
+        "terminal.restart",
+        "terminal.attach",
+        "terminal.snapshot",
+        "terminal.ack",
+        "terminal.claim",
+        "terminal.renew",
+        "terminal.release",
+        "terminal.input",
+        "terminal.resize",
+        "files.list",
+        "files.stat",
+        "files.read",
+        "files.searchNames",
+        "files.watch",
+        "files.create",
+        "files.mkdir",
+        "files.rename",
+        "files.remove",
+        "git.repositories",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.show",
+        "git.stage",
+        "git.unstage",
+        "git.commit",
+        "git.fetch",
+        "git.push",
+        "git.pull",
+        "operation.status",
+        "operation.cancel"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A validated privacy-minimal projection retained after final receipt eviction.",
+  "properties": {
+    "actor": {
+      "$ref": "#/$defs/ConsumerAuthorizationId"
+    },
+    "actualRights": {
+      "$ref": "#/$defs/CapabilitySet"
+    },
+    "operationId": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "originalMethod": {
+      "$ref": "#/$defs/Method"
+    },
+    "repositoryExecution": {
+      "type": "boolean"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/WorkspaceId"
+    }
+  },
+  "required": [
+    "operationId",
+    "actor",
+    "workspaceId",
+    "originalMethod",
+    "actualRights",
+    "repositoryExecution"
+  ],
+  "title": "OperationTombstone",
+  "type": "object"
+}

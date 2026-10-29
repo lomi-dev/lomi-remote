@@ -1,0 +1,251 @@
+diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
+index 3c6e88e..f13e020 100644
+--- a/src-tauri/Cargo.lock
++++ b/src-tauri/Cargo.lock
+@@ -3361,6 +3361,7 @@ dependencies = [
+  "jsonc-parser",
+  "keyring",
+  "libc",
++ "lomi-admission-spike",
+  "lomi-control-core",
+  "lomi-control-protocol",
+  "lomi-mcp",
+@@ -3410,6 +3411,15 @@ dependencies = [
+  "zip",
+ ]
+ 
++[[package]]
++name = "lomi-admission-spike"
++version = "0.1.0"
++dependencies = [
++ "libc",
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "lomi-control-core"
+ version = "0.1.0"
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 738cdbb..8d946bf 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -30,6 +30,7 @@ debug = "line-tables-only"
+ incremental = false
+ 
+ [features]
++e0-admission-probe = ["dep:lomi-admission-spike"]
+ native-smoke = []
+ remote-probe = ["native-smoke"]
+ chat-probe = ["native-smoke"]
+@@ -51,6 +52,7 @@ tauri-build = { version = "2", features = [] }
+ tonic-prost-build = { version = "0.14.6" }
+ 
+ [dependencies]
++lomi-admission-spike = { path = "../../../crates/lomi-admission-spike", default-features = false, optional = true }
+ lomi-remote-crypto = { path = "crates/lomi-remote-crypto" }
+ zeroize = { version = "=1.8.2", features = ["serde"] }
+ tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+diff --git a/src-tauri/build.rs b/src-tauri/build.rs
+index 5834542..4c2fb66 100644
+--- a/src-tauri/build.rs
++++ b/src-tauri/build.rs
+@@ -23,7 +23,8 @@ fn main() {
+     prepare
+         .arg("../scripts/prepare-ai-runtime.mjs")
+         .env("TARGET", &target);
+-    if std::env::var_os("CARGO_FEATURE_CHAT_PROBE").is_some()
++    if std::env::var_os("CARGO_FEATURE_E0_ADMISSION_PROBE").is_some()
++        || std::env::var_os("CARGO_FEATURE_CHAT_PROBE").is_some()
+         || std::env::var_os("CARGO_FEATURE_MCP_PROBE").is_some()
+     {
+         prepare.arg("--fixture");
+diff --git a/src-tauri/src/agent_runtime/mcp_policy.rs b/src-tauri/src/agent_runtime/mcp_policy.rs
+index 6911efc..56418f3 100644
+--- a/src-tauri/src/agent_runtime/mcp_policy.rs
++++ b/src-tauri/src/agent_runtime/mcp_policy.rs
+@@ -203,6 +203,9 @@ impl SessionRequestPolicy for NativeOwnershipPolicy {
+         self.check_owner(&inner, request)?;
+         #[cfg(target_os = "macos")]
+         if let Some(captured) = self.managed_scope()? {
++            #[cfg(feature = "e0-admission-probe")]
++            crate::project_write_guard::check_native(&captured.scope.project_root)
++                .map_err(|_| ErrorCode::ControlRevoked)?;
+             let effect = captured
+                 .effects
+                 .enter()
+diff --git a/src-tauri/src/files/editor.rs b/src-tauri/src/files/editor.rs
+index 2c146e2..8ac69e2 100644
+--- a/src-tauri/src/files/editor.rs
++++ b/src-tauri/src/files/editor.rs
+@@ -267,6 +267,8 @@ fn write(request: &SaveFile) -> Result<String, EditorError> {
+     let (path, _) = resolve(&request.root, &request.relative)?;
+     let _admission = crate::project_write_guard::admit(&[&path])
+         .map_err(|message| EditorError::new("codingRunActive", message))?;
++    #[cfg(feature = "e0-admission-probe")]
++    let _admission = _admission.known_in_process();
+     let (original, metadata) = read_bytes(&path)?;
+     if revision(&original) != request.revision {
+         return Err(EditorError::new(
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0618c23..140ac65 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -5,6 +5,7 @@
+         feature = "android-probe",
+         feature = "remote-probe",
+         feature = "remote-visual-probe",
++        feature = "e0-admission-probe",
+         feature = "mcp-probe"
+     ),
+     not(debug_assertions)
+@@ -65,6 +66,9 @@ mod remote_browser_capture_probe;
+ #[path = "../../tests/native/remote-support.rs"]
+ mod remote_probe;
+ pub use cli_titles::print_agy_title;
++#[cfg(feature = "e0-admission-probe")]
++#[path = "../../../../tests/desktop-admission/support.rs"]
++mod e0_admission_probe;
+ mod editor_preferences;
+ mod files;
+ mod git;
+@@ -175,6 +179,10 @@ fn finish_window_startup(window: Window) -> Result<(), String> {
+ 
+ pub fn run() {
+     let context = tauri::generate_context!();
++    #[cfg(feature = "e0-admission-probe")]
++    {
++        return e0_admission_probe::run(context);
++    }
+     #[cfg(windows)]
+     let instance = match windows_instance::Instance::acquire(&context.config().identifier)
+         .expect("failed to acquire the Lomi application instance")
+diff --git a/src-tauri/src/project_write_guard.rs b/src-tauri/src/project_write_guard.rs
+index f3250e5..ae80a79 100644
+--- a/src-tauri/src/project_write_guard.rs
++++ b/src-tauri/src/project_write_guard.rs
+@@ -153,7 +153,13 @@ fn directories(path: &Path) -> Result<Vec<ObjectId>, String> {
+ fn overlap(a: &Path, b: &Path) -> bool {
+     a.starts_with(b) || b.starts_with(a)
+ }
++#[cfg(feature = "e0-admission-probe")]
++#[path = "../../../../tests/desktop-admission/bridge.rs"]
++mod bridge;
++
+ struct ActiveLease {
++    #[cfg(feature = "e0-admission-probe")]
++    remote: Arc<bridge::Admission>,
+     root: Arc<Root>,
+     run: String,
+     generation: u64,
+@@ -186,6 +192,8 @@ impl Registry {
+     }
+ }
+ pub(crate) struct Lease {
++    #[cfg(feature = "e0-admission-probe")]
++    remote: Arc<bridge::Admission>,
+     registry: Shared,
+     token: u64,
+     root: Arc<Root>,
+@@ -193,6 +201,8 @@ pub(crate) struct Lease {
+     generation: u64,
+ }
+ pub(crate) struct WriteAdmission {
++    #[cfg(feature = "e0-admission-probe")]
++    _remote: Vec<bridge::Admission>,
+     registry: Shared,
+     token: u64,
+ }
+@@ -234,10 +244,14 @@ fn activate_in(registry: Shared, path: &Path, run: &str, generation: u64) -> Res
+     }) {
+         return Err(BUSY.into());
+     }
++    #[cfg(feature = "e0-admission-probe")]
++    let remote = Arc::new(bridge::Admission::acquire(Some(&root.path), true)?);
+     let token = state.token()?;
+     state.leases.insert(
+         token,
+         ActiveLease {
++            #[cfg(feature = "e0-admission-probe")]
++            remote: remote.clone(),
+             root: root.clone(),
+             run: run.into(),
+             generation,
+@@ -245,6 +259,8 @@ fn activate_in(registry: Shared, path: &Path, run: &str, generation: u64) -> Res
+     );
+     drop(state);
+     Ok(Lease {
++        #[cfg(feature = "e0-admission-probe")]
++        remote,
+         registry,
+         token,
+         root,
+@@ -311,10 +327,24 @@ fn admit_in(
+     }) {
+         return Err(STOP_RUN.into());
+     }
++    #[cfg(feature = "e0-admission-probe")]
++    let remote = if unscoped || paths.len() > 1 {
++        vec![bridge::Admission::acquire(None, false)?]
++    } else {
++        paths
++            .iter()
++            .map(|p| bridge::Admission::acquire(Some(p), false))
++            .collect::<Result<Vec<_>, _>>()?
++    };
+     let token = state.token()?;
+     state.writes.insert(token, scopes);
+     drop(state);
+-    Ok(WriteAdmission { registry, token })
++    Ok(WriteAdmission {
++        #[cfg(feature = "e0-admission-probe")]
++        _remote: remote,
++        registry,
++        token,
++    })
+ }
+ impl Lease {
+     pub(crate) fn check(&self, run: &str, generation: u64) -> Result<(), String> {
+@@ -327,6 +357,8 @@ impl Lease {
+         {
+             return Err(STOP_RUN.into());
+         }
++        #[cfg(feature = "e0-admission-probe")]
++        self.remote.check()?;
+         self.root.check()
+     }
+     #[cfg(test)]
+@@ -421,3 +453,33 @@ mod tests {
+         assert!(admit_in(shared, &[], None, true).is_err());
+     }
+ }
++
++#[cfg(feature = "e0-admission-probe")]
++pub(crate) fn check_native(root: &Path) -> Result<(), String> {
++    let registry = shared();
++    let state = registry.lock().map_err(|_| UNAVAILABLE)?;
++    let active = state
++        .leases
++        .values()
++        .find(|a| a.root.path == root)
++        .ok_or(STOP_RUN)?;
++    active.root.check()?;
++    active.remote.check()
++}
++#[cfg(feature = "e0-admission-probe")]
++impl Lease {
++    pub(crate) fn probe_token(&self) -> &str {
++        self.remote.token()
++    }
++}
++
++#[cfg(feature = "e0-admission-probe")]
++impl WriteAdmission {
++    /// Caller proves this scope performs only synchronous in-process I/O.
++    pub(crate) fn known_in_process(mut self) -> Self {
++        for admission in &mut self._remote {
++            admission.known_in_process();
++        }
++        self
++    }
++}

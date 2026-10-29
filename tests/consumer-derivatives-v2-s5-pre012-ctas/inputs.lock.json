@@ -1,0 +1,31 @@
+{
+  "actualCTASCasesExecuted": 0,
+  "dependenciesSha256": {
+    "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/pre012-baseline-lomi_derivative_reference_old.json": "1e776349c218770e771c31b4fd47dfadade0910da86e5b28b1425d9b23e94c81",
+    "artifacts/consumer-derivatives-v2-s5-pre012-supervised-runtime/1a0e2d3a-67a6-4ff4-9e22-cfe3f4eda9ee/builtin-trigger-identities-lomi_derivative_reference_old.json": "3ae8f85095e11d13bdbc10f4ef80a51c82107b22897582fa5f21ab21b434e2b4",
+    "staging/consumer-derivatives-v2/012-derivative-authority.candidate.sql": "1f728c4f0daeca8ad743bac9177b29c1d233d6f99dad5d7575fed64677c60763",
+    "staging/consumer-derivatives-v2/predecessor-contract.json": "3d42cb53cd23f23d353a2d42cd85335f207fdd312b574ffea1cb088706faf83d",
+    "tests/consumer-derivatives-v2-s5-pre012-extended/builtin-trigger-identities.sql": "bb02218ffd56dd461517170a9493c36589ae069f47821ef07a433746007dddf8",
+    "tests/consumer-derivatives-v2-s5-pre012-extended/cases.py": "9362945e547eeed818b2f30df55aff9036823ceae40dcd957bf4ec95c5dab20d",
+    "tests/consumer-derivatives-v2-s5-pre012-extended/excluded.json": "ca38cde838a09358d4a841e9a581a8271b5d12daba9b8ffa7e049c9bab5fa27d",
+    "tests/consumer-derivatives-v2-s5-pre012-extended/inputs.lock.json": "89f126742c98f4cc2129f4c344c35dee0f1e93ef9a83ca3e086ff2fb082d71f4",
+    "tests/consumer-derivatives-v2-s5-pre012/raw-capture.sql": "f02407bb59dc4bf5237e3252359978bc1d5708fa6a25ee258c88c7ff66dcd868",
+    "tests/consumer-derivatives-v2-sealing/fault-cases.json": "3e8664b1a5b606ef51ed0f799f62173e38f3bc97cb21450f299493cb52a3b80b",
+    "tests/consumer-derivatives-v2/pg-s0-s4-metadata.sql": "dde5bcd73f31618392ea10ac7dce83dcd603fdde319b99b104e3b8a9f8ecb732",
+    "tests/consumer-derivatives-v2/pg-s0-s4.py": "478790888adf7dea8a9ef4a06e5054eda79b2851ff9f9544699dcd831458d8f2",
+    "tests/consumer-derivatives-v2/predecessor-model.py": "21c9f5cc0f6f2b813b36b48ec89bd80ddec7bbecea5973f21955dab7780450c3"
+  },
+  "fullS5Qualified": false,
+  "localSha256": {
+    "README.md": "9147b84d6bb674a893b4ec7a1d73d852745d2c64402bf9494d18e7c0cb615fab",
+    "cases.json": "b772a586fc6c38168d22f1c2ec1e440a939ba93db53d605f834fa3bde91b62f9",
+    "cases.py": "b15ecfe2ca18676481c91119d1051ee65efbb5ae4d42e2e0e761d4a456acea2f",
+    "ctas.test.py": "5f986d55f1566ccb667700a88c7ca3c1b8ad4d3625684f206245eb170211634e",
+    "plan.json": "f10727e58c514ca94bd894d1a045f6616190d50a7ac3e66e47e428031138ceee",
+    "primary-sources.json": "96084f8e814925a1ee20b545dfd1bf808299901bb20d82c0709a133dd7b39c81",
+    "protocol.py": "2faf1faad9bd86b2f09f8bbb08a1b523de74de86e5ac49818c5c7ee01a9b7d0f"
+  },
+  "referenceBuiltinCapture": "artifacts/consumer-derivatives-v2-s5-pre012-supervised-runtime/1a0e2d3a-67a6-4ff4-9e22-cfe3f4eda9ee/builtin-trigger-identities-lomi_derivative_reference_old.json",
+  "referenceRawCapture": "artifacts/consumer-derivatives-v2-s5-pre012-runtime/4c20241b-e63a-49c0-bdb5-0d6cdc0a307e/pre012-baseline-lomi_derivative_reference_old.json",
+  "status": "SOURCE_ONLY_NOT_RUN"
+}

@@ -1,0 +1,9 @@
+__LOMI_HOST_ZDOTDIR=$ZDOTDIR
+LOMI_ZDOTDIR=${LOMI_ZDOTDIR:-$HOME}
+if [[ -f "$LOMI_ZDOTDIR/.zshenv" ]]; then
+  source "$LOMI_ZDOTDIR/.zshenv"
+fi
+if [[ -n ${ZDOTDIR:-} && $ZDOTDIR != $__LOMI_HOST_ZDOTDIR ]]; then
+  LOMI_ZDOTDIR=$ZDOTDIR
+fi
+ZDOTDIR=$__LOMI_HOST_ZDOTDIR

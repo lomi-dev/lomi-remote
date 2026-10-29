@@ -1,0 +1,2400 @@
+{
+  "$defs": {
+    "ApplicationMajor": {
+      "const": 2,
+      "type": "integer"
+    },
+    "BoundedList": {
+      "items": {
+        "$ref": "#/$defs/TerminalTab"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList10": {
+      "items": {
+        "$ref": "#/$defs/GitDiffFile"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList11": {
+      "items": {
+        "$ref": "#/$defs/GitDiffHunk"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList12": {
+      "items": {
+        "$ref": "#/$defs/GitDiffLine"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList13": {
+      "items": {
+        "$ref": "#/$defs/GitCommitSummary"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList2": {
+      "items": {
+        "$ref": "#/$defs/HostProfile"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList3": {
+      "items": {
+        "$ref": "#/$defs/FileMetadata"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList4": {
+      "items": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 1048576,
+      "type": "array"
+    },
+    "BoundedList5": {
+      "items": {
+        "$ref": "#/$defs/GitRepository"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList6": {
+      "items": {
+        "$ref": "#/$defs/GitRemote"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList7": {
+      "items": {
+        "$ref": "#/$defs/RefId"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList8": {
+      "items": {
+        "$ref": "#/$defs/GitRemoteSelector"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList9": {
+      "items": {
+        "$ref": "#/$defs/GitStatusEntry"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "ChunkCount": {
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ConsumerAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "DiffLineKind": {
+      "enum": [
+        "context",
+        "added",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "DiffLineText": {
+      "maxLength": 4096,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000A-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "DisplayText": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "Effect": {
+      "enum": [
+        "none",
+        "committed",
+        "partial",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "EmptyErrorDetails": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "EncodedPathId": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "EntryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EntryKind": {
+      "enum": [
+        "file",
+        "directory",
+        "symlink",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ErrorCode": {
+      "enum": [
+        "INVALID_ARGUMENT",
+        "AUTH_REQUIRED",
+        "SCOPE_DENIED",
+        "WORKSPACE_UNSHARED",
+        "REPOSITORY_EXECUTION_REQUIRED",
+        "PROTECTED_PATH",
+        "RESOURCE_NOT_FOUND",
+        "OPERATION_NOT_FOUND",
+        "STALE_EPOCH",
+        "REVISION_CONFLICT",
+        "FILE_CHANGED",
+        "IDEMPOTENCY_CONFLICT",
+        "HOST_BUSY",
+        "CONTROL_REQUIRED",
+        "CONTROL_REVOKED",
+        "SESSION_EXITED",
+        "RESYNC_REQUIRED",
+        "DIRECTORY_NOT_EMPTY",
+        "CREDENTIALS_REQUIRED",
+        "GIT_IDENTITY_REQUIRED",
+        "UNSUPPORTED_CAPABILITY",
+        "OUTCOME_UNKNOWN",
+        "OPERATION_EXPIRED",
+        "UPDATE_REQUIRED",
+        "RESOURCE_EXHAUSTED",
+        "FRESHNESS_REQUIRED",
+        "SERVICE_UNAVAILABLE",
+        "DEADLINE_EXCEEDED"
+      ],
+      "type": "string"
+    },
+    "ErrorDetails": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RevisionErrorDetails"
+        },
+        {
+          "$ref": "#/$defs/EmptyErrorDetails"
+        }
+      ]
+    },
+    "EventCursor": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FileEncoding": {
+      "enum": [
+        "utf8",
+        "utf16Le",
+        "utf16Be",
+        "binary",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "FileMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "fileRevision": {
+          "$ref": "#/$defs/FileRevision"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntryKind"
+        },
+        "pathId": {
+          "$ref": "#/$defs/EncodedPathId"
+        },
+        "size": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "entryId",
+        "pathId",
+        "displayName",
+        "kind",
+        "fileRevision",
+        "size"
+      ],
+      "type": "object"
+    },
+    "FileRevision": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FilesListResult": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/BoundedList3"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "FilesReadResult": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/BoundedList4"
+        },
+        "encoding": {
+          "$ref": "#/$defs/FileEncoding"
+        },
+        "lineEndings": {
+          "$ref": "#/$defs/LineEndings"
+        },
+        "metadata": {
+          "$ref": "#/$defs/FileMetadata"
+        },
+        "offset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "metadata",
+        "encoding",
+        "lineEndings",
+        "offset",
+        "bytes",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "FilesWatchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "cursor",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "GitChange": {
+      "enum": [
+        "unchanged",
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "unmerged",
+        "untracked"
+      ],
+      "type": "string"
+    },
+    "GitCommitSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "objectId": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "subject": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "timestampSeconds": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "objectId",
+        "subject",
+        "author",
+        "timestampSeconds"
+      ],
+      "type": "object"
+    },
+    "GitDiffFile": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "hunks": {
+          "$ref": "#/$defs/BoundedList11"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entryId",
+        "displayName",
+        "binary",
+        "hunks",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitDiffHunk": {
+      "additionalProperties": false,
+      "properties": {
+        "lines": {
+          "$ref": "#/$defs/BoundedList12"
+        },
+        "newStart": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "oldStart": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "oldStart",
+        "newStart",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "GitDiffLine": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DiffLineKind"
+        },
+        "text": {
+          "$ref": "#/$defs/DiffLineText"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "GitDiffResult": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/BoundedList10"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitLogResult": {
+      "additionalProperties": false,
+      "properties": {
+        "commits": {
+          "$ref": "#/$defs/BoundedList13"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "commits",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitRemote": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "refs": {
+          "$ref": "#/$defs/BoundedList7"
+        },
+        "refsStateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "remoteId": {
+          "$ref": "#/$defs/RemoteId"
+        },
+        "selectors": {
+          "$ref": "#/$defs/BoundedList8"
+        }
+      },
+      "required": [
+        "remoteId",
+        "displayName",
+        "refsStateToken",
+        "refs"
+      ],
+      "type": "object"
+    },
+    "GitRemoteSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "fetch": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/GitRemoteSelectorKind"
+        },
+        "pull": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "refId": {
+          "$ref": "#/$defs/RefId"
+        }
+      },
+      "required": [
+        "kind",
+        "refId",
+        "displayName",
+        "fetch",
+        "pull",
+        "push"
+      ],
+      "type": "object"
+    },
+    "GitRemoteSelectorKind": {
+      "enum": [
+        "head",
+        "fetch",
+        "push"
+      ],
+      "type": "string"
+    },
+    "GitRepositoriesResult": {
+      "additionalProperties": false,
+      "properties": {
+        "repositories": {
+          "$ref": "#/$defs/BoundedList5"
+        }
+      },
+      "required": [
+        "repositories"
+      ],
+      "type": "object"
+    },
+    "GitRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "remotes": {
+          "$ref": "#/$defs/BoundedList6"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "required": [
+        "repositoryId",
+        "displayName",
+        "remotes"
+      ],
+      "type": "object"
+    },
+    "GitShowResult": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/GitCommitSummary"
+        },
+        "diff": {
+          "$ref": "#/$defs/GitDiffResult"
+        }
+      },
+      "required": [
+        "commit",
+        "diff"
+      ],
+      "type": "object"
+    },
+    "GitStatusEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "fileRevision": {
+          "$ref": "#/$defs/FileRevision"
+        },
+        "index": {
+          "$ref": "#/$defs/GitChange"
+        },
+        "pathId": {
+          "$ref": "#/$defs/EncodedPathId"
+        },
+        "worktree": {
+          "$ref": "#/$defs/GitChange"
+        }
+      },
+      "required": [
+        "entryId",
+        "pathId",
+        "displayName",
+        "index",
+        "worktree",
+        "fileRevision"
+      ],
+      "type": "object"
+    },
+    "GitStatusResult": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/BoundedList9"
+        },
+        "head": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "index": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "head",
+        "index",
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "HostProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "profileId": {
+          "$ref": "#/$defs/HostProfileId"
+        }
+      },
+      "required": [
+        "profileId",
+        "name"
+      ],
+      "type": "object"
+    },
+    "HostProfileId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "InputBytes": {
+      "maximum": 16384,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "InputReceipt": {
+      "additionalProperties": false,
+      "description": "Ephemeral receipt in session-epoch RAM only. No input bytes or keystroke hash.\nAcceptance counts PTY bytes; it does not mean shell execution or permit replay.",
+      "properties": {
+        "acceptedBytes": {
+          "$ref": "#/$defs/InputBytes"
+        },
+        "inputId": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "inputSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "submittedBytes": {
+          "$ref": "#/$defs/InputBytes"
+        }
+      },
+      "required": [
+        "sessionId",
+        "sessionEpoch",
+        "inputId",
+        "inputSeq",
+        "submittedBytes",
+        "acceptedBytes"
+      ],
+      "type": "object"
+    },
+    "LeaseBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "$ref": "#/$defs/LeaseToken"
+        },
+        "version": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "token",
+        "version"
+      ],
+      "type": "object"
+    },
+    "LeaseToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 256
+    },
+    "LineEndings": {
+      "enum": [
+        "lf",
+        "crLf",
+        "cr",
+        "mixed",
+        "none"
+      ],
+      "type": "string"
+    },
+    "Method": {
+      "enum": [
+        "workspace.get",
+        "workspace.capabilities",
+        "workspace.subscribe",
+        "terminal.create",
+        "terminal.split",
+        "terminal.rename",
+        "terminal.move",
+        "terminal.close",
+        "terminal.restart",
+        "terminal.attach",
+        "terminal.snapshot",
+        "terminal.ack",
+        "terminal.claim",
+        "terminal.renew",
+        "terminal.release",
+        "terminal.input",
+        "terminal.resize",
+        "files.list",
+        "files.stat",
+        "files.read",
+        "files.searchNames",
+        "files.watch",
+        "files.create",
+        "files.mkdir",
+        "files.rename",
+        "files.remove",
+        "git.repositories",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.show",
+        "git.stage",
+        "git.unstage",
+        "git.commit",
+        "git.fetch",
+        "git.push",
+        "git.pull",
+        "operation.status",
+        "operation.cancel"
+      ],
+      "type": "string"
+    },
+    "ObjectId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "OperationLookup": {
+      "additionalProperties": false,
+      "description": "Status lookup route within the authenticated workspace channel. Never a URL.",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "OperationParameterHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "OperationReceipt": {
+      "additionalProperties": false,
+      "description": "Validated receipt DTO, not proof of persistence, admission, authority or fencing.\nA consumer must authenticate current rights and row binding before disclosure.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ConsumerAuthorizationId"
+        },
+        "actualRights": {
+          "$ref": "#/$defs/CapabilitySet"
+        },
+        "cancelRequested": {
+          "type": "boolean"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "originalMethod": {
+          "$ref": "#/$defs/Method"
+        },
+        "parameterHash": {
+          "$ref": "#/$defs/OperationParameterHash"
+        },
+        "repositoryExecution": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "operationId",
+        "actor",
+        "workspaceId",
+        "originalMethod",
+        "actualRights",
+        "repositoryExecution",
+        "parameterHash",
+        "state",
+        "cancelRequested",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "OperationResult": {
+      "description": "Only identifiers/revisions, no names, paths, commands or cached plaintext.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "domain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "terminal",
+              "type": "string"
+            },
+            "paneId": {
+              "$ref": "#/$defs/PaneId"
+            },
+            "sessionEpoch": {
+              "$ref": "#/$defs/SessionEpoch"
+            },
+            "sessionId": {
+              "$ref": "#/$defs/TerminalSessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision",
+            "paneId",
+            "sessionId",
+            "sessionEpoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entryId": {
+              "$ref": "#/$defs/EntryId"
+            },
+            "fileRevision": {
+              "$ref": "#/$defs/FileRevision"
+            },
+            "kind": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entryId",
+            "fileRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "repoStateToken": {
+              "$ref": "#/$defs/RepoStateToken"
+            }
+          },
+          "required": [
+            "kind",
+            "repoStateToken"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OperationState": {
+      "enum": [
+        "accepted",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "outcome_unknown"
+      ],
+      "type": "string"
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PaneState": {
+      "enum": [
+        "starting",
+        "publishing",
+        "running",
+        "exited",
+        "stopped",
+        "lost"
+      ],
+      "type": "string"
+    },
+    "RefId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 256
+    },
+    "RemoteError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "$ref": "#/$defs/ErrorDetails"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationLookup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "effect",
+        "details"
+      ],
+      "type": "object"
+    },
+    "RemoteId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "RepoStateToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RepositoryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RequestId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RevisionErrorDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "actualRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "expectedRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "actualRevision"
+      ],
+      "type": "object"
+    },
+    "RpcResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceState"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.capabilities",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceCapabilitiesResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.subscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.split",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.move",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.attach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.ack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalAckResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.claim",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalLeaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.renew",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalLeaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.release",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalReleaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.input",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/InputReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.resize",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalResizeResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesListResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.stat",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FileMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesReadResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.searchNames",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesListResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.watch",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesWatchResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.mkdir",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.repositories",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitRepositoriesResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitStatusResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.diff",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitDiffResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.log",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitLogResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.show",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitShowResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.stage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.unstage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.commit",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.fetch",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.push",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.pull",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "operation.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "operation.cancel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SplitAxis": {
+      "enum": [
+        "horizontal",
+        "vertical"
+      ],
+      "type": "string"
+    },
+    "SubscriptionId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "TabId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalAckResult": {
+      "additionalProperties": false,
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalContext": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "profile": {
+          "$ref": "#/$defs/TerminalProfile"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceContext"
+        }
+      },
+      "required": [
+        "workspace",
+        "paneId",
+        "sessionId",
+        "sessionEpoch",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "TerminalDimension": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TerminalLayout": {
+      "description": "The shared terminal projection contains no private desktop view descriptors.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "pane",
+              "type": "string"
+            },
+            "pane": {
+              "$ref": "#/$defs/TerminalPane"
+            }
+          },
+          "required": [
+            "kind",
+            "pane"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "axis": {
+              "$ref": "#/$defs/SplitAxis"
+            },
+            "first": {
+              "$ref": "#/$defs/TerminalLayout"
+            },
+            "kind": {
+              "const": "split",
+              "type": "string"
+            },
+            "second": {
+              "$ref": "#/$defs/TerminalLayout"
+            }
+          },
+          "required": [
+            "kind",
+            "axis",
+            "first",
+            "second"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalLeaseResult": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresInMs": {
+          "$ref": "#/$defs/TimeoutMs"
+        },
+        "lease": {
+          "$ref": "#/$defs/LeaseBinding"
+        },
+        "nextInputId": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "nextInputSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "nextResizeSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "lease",
+        "expiresInMs",
+        "nextInputId",
+        "nextInputSeq",
+        "nextResizeSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalPane": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/PaneState"
+        }
+      },
+      "required": [
+        "paneId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TerminalProfile": {
+      "enum": [
+        "lomi-rust-grid-v1-experimental"
+      ],
+      "type": "string"
+    },
+    "TerminalReleaseResult": {
+      "additionalProperties": false,
+      "properties": {
+        "released": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "released"
+      ],
+      "type": "object"
+    },
+    "TerminalResizeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "resizeSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "resizeSeq",
+        "columns",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TerminalSessionId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "outputOffset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/WorkingDirectoryValue"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq",
+        "outputOffset",
+        "columns",
+        "rows",
+        "chunkCount",
+        "totalBytes",
+        "workingDirectory"
+      ],
+      "type": "object"
+    },
+    "TerminalTab": {
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/TerminalLayout"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabId": {
+          "$ref": "#/$defs/TabId"
+        }
+      },
+      "required": [
+        "tabId",
+        "name",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "TimeoutMs": {
+      "maximum": 120000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WorkingDirectoryValue": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 1,
+          "not": {
+            "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+          },
+          "type": "string",
+          "x-lomi-maxUtf16CodeUnits": 4096
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "An absolute Host path or null when unknown"
+    },
+    "WorkspaceCapabilitiesResult": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitySet"
+        },
+        "profiles": {
+          "$ref": "#/$defs/BoundedList2"
+        }
+      },
+      "required": [
+        "capabilities",
+        "profiles"
+      ],
+      "type": "object"
+    },
+    "WorkspaceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "grantRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "hostAccessEpoch": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeGeneration": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        },
+        "workspaceEpoch": {
+          "$ref": "#/$defs/WorkspaceEpoch"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "workspaceEpoch",
+        "runtimeId",
+        "runtimeGeneration",
+        "hostAccessEpoch",
+        "grantRevision"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "subscriptionId",
+        "throughSeq",
+        "cursor",
+        "chunkCount",
+        "totalBytes"
+      ],
+      "type": "object"
+    },
+    "WorkspaceState": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabs": {
+          "$ref": "#/$defs/BoundedList"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "name",
+        "tabs"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "result": {
+          "$ref": "#/$defs/RpcResult"
+        },
+        "type": {
+          "const": "result",
+          "type": "string"
+        },
+        "v": {
+          "$ref": "#/$defs/ApplicationMajor"
+        }
+      },
+      "required": [
+        "type",
+        "v",
+        "requestId",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/RemoteError"
+        },
+        "operationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestId": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "type": {
+          "const": "error",
+          "type": "string"
+        },
+        "v": {
+          "$ref": "#/$defs/ApplicationMajor"
+        }
+      },
+      "required": [
+        "type",
+        "v",
+        "requestId",
+        "error"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "RpcResponse"
+}

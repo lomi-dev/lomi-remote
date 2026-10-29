@@ -1,0 +1,9 @@
+__LOMI_HOST_ZDOTDIR=${__LOMI_HOST_ZDOTDIR:-$ZDOTDIR}
+ZDOTDIR=$__LOMI_HOST_ZDOTDIR
+if [[ -f "${LOMI_ZDOTDIR:-$HOME}/.zprofile" ]]; then
+  source "${LOMI_ZDOTDIR:-$HOME}/.zprofile"
+fi
+if [[ -n ${ZDOTDIR:-} && $ZDOTDIR != $__LOMI_HOST_ZDOTDIR ]]; then
+  LOMI_ZDOTDIR=$ZDOTDIR
+fi
+ZDOTDIR=$__LOMI_HOST_ZDOTDIR

@@ -1,0 +1,4095 @@
+{
+  "$defs": {
+    "ApplicationMajor": {
+      "const": 2,
+      "type": "integer"
+    },
+    "BoundedList": {
+      "items": {
+        "$ref": "#/$defs/DoctorDiagnostic"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList10": {
+      "items": {
+        "$ref": "#/$defs/GitRepository"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList11": {
+      "items": {
+        "$ref": "#/$defs/GitRemote"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList12": {
+      "items": {
+        "$ref": "#/$defs/RefId"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList13": {
+      "items": {
+        "$ref": "#/$defs/GitRemoteSelector"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList14": {
+      "items": {
+        "$ref": "#/$defs/GitStatusEntry"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList15": {
+      "items": {
+        "$ref": "#/$defs/GitDiffFile"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList16": {
+      "items": {
+        "$ref": "#/$defs/GitDiffHunk"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList17": {
+      "items": {
+        "$ref": "#/$defs/GitDiffLine"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList18": {
+      "items": {
+        "$ref": "#/$defs/GitCommitSummary"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList2": {
+      "items": {
+        "$ref": "#/$defs/DiagnosticLogEntry"
+      },
+      "maxItems": 128,
+      "type": "array"
+    },
+    "BoundedList3": {
+      "items": {
+        "$ref": "#/$defs/LocalWorkspaceSummary"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList4": {
+      "items": {
+        "$ref": "#/$defs/LocalProfileSummary"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList5": {
+      "items": {
+        "$ref": "#/$defs/WorkspaceBinding"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "BoundedList6": {
+      "items": {
+        "$ref": "#/$defs/TerminalTab"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList7": {
+      "items": {
+        "$ref": "#/$defs/HostProfile"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList8": {
+      "items": {
+        "$ref": "#/$defs/FileMetadata"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList9": {
+      "items": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 1048576,
+      "type": "array"
+    },
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "ChunkCount": {
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ConsumerAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "DiagnosticCode": {
+      "enum": [
+        "hostStarted",
+        "hostStartRejected",
+        "ipcRequestRejected",
+        "ipcVersionMismatch",
+        "profileInvalid",
+        "serviceUnavailable",
+        "serviceRegistrationMissing",
+        "authenticationConfigurationMissing",
+        "authenticationRejected",
+        "networkUnavailable",
+        "networkConfigurationInvalid",
+        "dnsUnavailable",
+        "tlsUnavailable",
+        "networkTimeout",
+        "storageUnavailable",
+        "shellConfigurationMissing",
+        "shellExecutableUnavailable",
+        "builtInGitUnavailable",
+        "nativeGitUnavailable",
+        "activationPending",
+        "resourceLimitReached"
+      ],
+      "type": "string"
+    },
+    "DiagnosticComponent": {
+      "enum": [
+        "host",
+        "ipc",
+        "profile",
+        "service",
+        "authentication",
+        "network",
+        "storage",
+        "shell",
+        "git",
+        "updater",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "DiagnosticLogEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/DiagnosticCode"
+        },
+        "component": {
+          "$ref": "#/$defs/DiagnosticComponent"
+        },
+        "sequence": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "unixTimeMs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "severity",
+        "component",
+        "code"
+      ],
+      "type": "object"
+    },
+    "DiagnosticLogSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "entries": {
+          "$ref": "#/$defs/BoundedList2"
+        },
+        "nextCursor": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "nextCursor",
+        "truncated",
+        "available"
+      ],
+      "type": "object"
+    },
+    "DiagnosticSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
+    "DiffLineKind": {
+      "enum": [
+        "context",
+        "added",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "DiffLineText": {
+      "maxLength": 4096,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000A-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "DisplayText": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "DoctorCheck": {
+      "description": "Closed diagnostics vocabulary: no arbitrary error text, env, paths, terminal\ntranscripts, account credentials or file payloads can enter this export.",
+      "enum": [
+        "ipcVersion",
+        "profileOwner",
+        "service",
+        "autostart",
+        "clock",
+        "network",
+        "dns",
+        "tls",
+        "proxy",
+        "authorization",
+        "storage",
+        "shell",
+        "git",
+        "rootPermissions",
+        "limits"
+      ],
+      "type": "string"
+    },
+    "DoctorDiagnostic": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/DoctorCheck"
+        },
+        "health": {
+          "$ref": "#/$defs/DoctorHealth"
+        }
+      },
+      "required": [
+        "check",
+        "health"
+      ],
+      "type": "object"
+    },
+    "DoctorHealth": {
+      "enum": [
+        "healthy",
+        "unavailable",
+        "permissionDenied",
+        "incompatible",
+        "unknown",
+        "configurationInvalid",
+        "transportUnavailable",
+        "authorizationRejected",
+        "disabledByPolicy"
+      ],
+      "type": "string"
+    },
+    "Effect": {
+      "enum": [
+        "none",
+        "committed",
+        "partial",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "EmptyErrorDetails": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "EncodedPathId": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "EntryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EntryKind": {
+      "enum": [
+        "file",
+        "directory",
+        "symlink",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ErrorCode": {
+      "enum": [
+        "INVALID_ARGUMENT",
+        "AUTH_REQUIRED",
+        "SCOPE_DENIED",
+        "WORKSPACE_UNSHARED",
+        "REPOSITORY_EXECUTION_REQUIRED",
+        "PROTECTED_PATH",
+        "RESOURCE_NOT_FOUND",
+        "OPERATION_NOT_FOUND",
+        "STALE_EPOCH",
+        "REVISION_CONFLICT",
+        "FILE_CHANGED",
+        "IDEMPOTENCY_CONFLICT",
+        "HOST_BUSY",
+        "CONTROL_REQUIRED",
+        "CONTROL_REVOKED",
+        "SESSION_EXITED",
+        "RESYNC_REQUIRED",
+        "DIRECTORY_NOT_EMPTY",
+        "CREDENTIALS_REQUIRED",
+        "GIT_IDENTITY_REQUIRED",
+        "UNSUPPORTED_CAPABILITY",
+        "OUTCOME_UNKNOWN",
+        "OPERATION_EXPIRED",
+        "UPDATE_REQUIRED",
+        "RESOURCE_EXHAUSTED",
+        "FRESHNESS_REQUIRED",
+        "SERVICE_UNAVAILABLE",
+        "DEADLINE_EXCEEDED"
+      ],
+      "type": "string"
+    },
+    "ErrorDetails": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RevisionErrorDetails"
+        },
+        {
+          "$ref": "#/$defs/EmptyErrorDetails"
+        }
+      ]
+    },
+    "EventCursor": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FileEncoding": {
+      "enum": [
+        "utf8",
+        "utf16Le",
+        "utf16Be",
+        "binary",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "FileMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "fileRevision": {
+          "$ref": "#/$defs/FileRevision"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntryKind"
+        },
+        "pathId": {
+          "$ref": "#/$defs/EncodedPathId"
+        },
+        "size": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "entryId",
+        "pathId",
+        "displayName",
+        "kind",
+        "fileRevision",
+        "size"
+      ],
+      "type": "object"
+    },
+    "FileRevision": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FilesListResult": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/BoundedList8"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "FilesReadResult": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/BoundedList9"
+        },
+        "encoding": {
+          "$ref": "#/$defs/FileEncoding"
+        },
+        "lineEndings": {
+          "$ref": "#/$defs/LineEndings"
+        },
+        "metadata": {
+          "$ref": "#/$defs/FileMetadata"
+        },
+        "offset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "metadata",
+        "encoding",
+        "lineEndings",
+        "offset",
+        "bytes",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "FilesWatchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "cursor",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "GitChange": {
+      "enum": [
+        "unchanged",
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "unmerged",
+        "untracked"
+      ],
+      "type": "string"
+    },
+    "GitCommitSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "objectId": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "subject": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "timestampSeconds": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "objectId",
+        "subject",
+        "author",
+        "timestampSeconds"
+      ],
+      "type": "object"
+    },
+    "GitDiffFile": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "hunks": {
+          "$ref": "#/$defs/BoundedList16"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entryId",
+        "displayName",
+        "binary",
+        "hunks",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitDiffHunk": {
+      "additionalProperties": false,
+      "properties": {
+        "lines": {
+          "$ref": "#/$defs/BoundedList17"
+        },
+        "newStart": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "oldStart": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "oldStart",
+        "newStart",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "GitDiffLine": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DiffLineKind"
+        },
+        "text": {
+          "$ref": "#/$defs/DiffLineText"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "GitDiffResult": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/BoundedList15"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitLogResult": {
+      "additionalProperties": false,
+      "properties": {
+        "commits": {
+          "$ref": "#/$defs/BoundedList18"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "commits",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "GitRemote": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "refs": {
+          "$ref": "#/$defs/BoundedList12"
+        },
+        "refsStateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "remoteId": {
+          "$ref": "#/$defs/RemoteId"
+        },
+        "selectors": {
+          "$ref": "#/$defs/BoundedList13"
+        }
+      },
+      "required": [
+        "remoteId",
+        "displayName",
+        "refsStateToken",
+        "refs"
+      ],
+      "type": "object"
+    },
+    "GitRemoteSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "fetch": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/GitRemoteSelectorKind"
+        },
+        "pull": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "refId": {
+          "$ref": "#/$defs/RefId"
+        }
+      },
+      "required": [
+        "kind",
+        "refId",
+        "displayName",
+        "fetch",
+        "pull",
+        "push"
+      ],
+      "type": "object"
+    },
+    "GitRemoteSelectorKind": {
+      "enum": [
+        "head",
+        "fetch",
+        "push"
+      ],
+      "type": "string"
+    },
+    "GitRepositoriesResult": {
+      "additionalProperties": false,
+      "properties": {
+        "repositories": {
+          "$ref": "#/$defs/BoundedList10"
+        }
+      },
+      "required": [
+        "repositories"
+      ],
+      "type": "object"
+    },
+    "GitRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "remotes": {
+          "$ref": "#/$defs/BoundedList11"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "required": [
+        "repositoryId",
+        "displayName",
+        "remotes"
+      ],
+      "type": "object"
+    },
+    "GitShowResult": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/GitCommitSummary"
+        },
+        "diff": {
+          "$ref": "#/$defs/GitDiffResult"
+        }
+      },
+      "required": [
+        "commit",
+        "diff"
+      ],
+      "type": "object"
+    },
+    "GitStatusEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "entryId": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "fileRevision": {
+          "$ref": "#/$defs/FileRevision"
+        },
+        "index": {
+          "$ref": "#/$defs/GitChange"
+        },
+        "pathId": {
+          "$ref": "#/$defs/EncodedPathId"
+        },
+        "worktree": {
+          "$ref": "#/$defs/GitChange"
+        }
+      },
+      "required": [
+        "entryId",
+        "pathId",
+        "displayName",
+        "index",
+        "worktree",
+        "fileRevision"
+      ],
+      "type": "object"
+    },
+    "GitStatusResult": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/BoundedList14"
+        },
+        "head": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "index": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stateToken": {
+          "$ref": "#/$defs/RepoStateToken"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateToken",
+        "head",
+        "index",
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostKeyCommitmentHex": {
+      "maxLength": 64,
+      "minLength": 64,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^([0-9a-f]{2})+$",
+      "type": "string"
+    },
+    "HostProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "profileId": {
+          "$ref": "#/$defs/HostProfileId"
+        }
+      },
+      "required": [
+        "profileId",
+        "name"
+      ],
+      "type": "object"
+    },
+    "HostProfileId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "InputBytes": {
+      "maximum": 16384,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "InputReceipt": {
+      "additionalProperties": false,
+      "description": "Ephemeral receipt in session-epoch RAM only. No input bytes or keystroke hash.\nAcceptance counts PTY bytes; it does not mean shell execution or permit replay.",
+      "properties": {
+        "acceptedBytes": {
+          "$ref": "#/$defs/InputBytes"
+        },
+        "inputId": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "inputSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "submittedBytes": {
+          "$ref": "#/$defs/InputBytes"
+        }
+      },
+      "required": [
+        "sessionId",
+        "sessionEpoch",
+        "inputId",
+        "inputSeq",
+        "submittedBytes",
+        "acceptedBytes"
+      ],
+      "type": "object"
+    },
+    "LeaseBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "$ref": "#/$defs/LeaseToken"
+        },
+        "version": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "token",
+        "version"
+      ],
+      "type": "object"
+    },
+    "LeaseToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 256
+    },
+    "LineEndings": {
+      "enum": [
+        "lf",
+        "crLf",
+        "cr",
+        "mixed",
+        "none"
+      ],
+      "type": "string"
+    },
+    "LocalAuthNetwork": {
+      "enum": [
+        "idle",
+        "working",
+        "available",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "LocalAuthPhase": {
+      "enum": [
+        "unconfigured",
+        "idle",
+        "initializing",
+        "awaitingApproval",
+        "exchanging",
+        "registering",
+        "ready",
+        "refreshing",
+        "locked",
+        "pendingRevoke",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "LocalAuthStorage": {
+      "enum": [
+        "unconfigured",
+        "available",
+        "locked",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "LocalDoctorReport": {
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "$ref": "#/$defs/BoundedList"
+        },
+        "lastError": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logsAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checks",
+        "logsAvailable"
+      ],
+      "type": "object"
+    },
+    "LocalError": {
+      "oneOf": [
+        {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "PERMISSION_DENIED",
+            "VERSION_MISMATCH",
+            "CONFLICT",
+            "QUARANTINE",
+            "UNAVAILABLE"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "NATIVE_BIND_REJECTED",
+          "description": "The host atomically discarded a Registered native intent before any\nnative writer lease could be activated.",
+          "type": "string"
+        }
+      ]
+    },
+    "LocalHostName": {
+      "maxLength": 255,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 255
+    },
+    "LocalIpcMajor": {
+      "const": 1,
+      "type": "integer"
+    },
+    "LocalIpcVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "$ref": "#/$defs/LocalIpcMajor"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "LocalLoginAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        }
+      },
+      "required": [
+        "operationId",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "LocalLoginPresentation": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAt": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "nextPollAt": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "userCode": {
+          "$ref": "#/$defs/UserCode"
+        },
+        "verificationUrl": {
+          "$ref": "#/$defs/LocalRootPath"
+        }
+      },
+      "required": [
+        "userCode",
+        "verificationUrl",
+        "expiresAt",
+        "nextPollAt"
+      ],
+      "type": "object"
+    },
+    "LocalLoginStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "accessExpiresAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "network": {
+          "$ref": "#/$defs/LocalAuthNetwork"
+        },
+        "operationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pendingCloudRevoke": {
+          "type": "boolean"
+        },
+        "phase": {
+          "$ref": "#/$defs/LocalAuthPhase"
+        },
+        "refreshAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage": {
+          "$ref": "#/$defs/LocalAuthStorage"
+        }
+      },
+      "required": [
+        "phase",
+        "storage",
+        "network",
+        "generation",
+        "locked",
+        "pendingCloudRevoke"
+      ],
+      "type": "object"
+    },
+    "LocalMaintenanceStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "activeTerminals": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "profileSchema": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        }
+      },
+      "required": [
+        "hostId",
+        "runtimeId",
+        "profileSchema",
+        "activeTerminals"
+      ],
+      "type": "object"
+    },
+    "LocalNativeEditorResult": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "resultJson": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalNativeResultJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/LocalNativeEffectState"
+        }
+      },
+      "required": [
+        "operationId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "LocalNativeEffectChallenge": {
+      "additionalProperties": false,
+      "properties": {
+        "challenge": {
+          "$ref": "#/$defs/HostId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/HostId"
+        }
+      },
+      "required": [
+        "operationId",
+        "challenge"
+      ],
+      "type": "object"
+    },
+    "LocalNativeEffectState": {
+      "enum": [
+        "running",
+        "succeeded",
+        "failed",
+        "outcomeUnknown"
+      ],
+      "type": "string"
+    },
+    "LocalNativeFileStage": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "path": {
+          "$ref": "#/$defs/LocalRootPath"
+        }
+      },
+      "required": [
+        "operationId",
+        "path"
+      ],
+      "type": "object"
+    },
+    "LocalNativeGitResult": {
+      "additionalProperties": false,
+      "properties": {
+        "custodySettled": {
+          "type": "boolean"
+        },
+        "operationId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "planHash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostKeyCommitmentHex"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previewJson": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalNativeResultJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestHash": {
+          "$ref": "#/$defs/HostKeyCommitmentHex"
+        },
+        "resultJson": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalNativeResultJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/LocalNativeGitState"
+        }
+      },
+      "required": [
+        "operationId",
+        "requestHash",
+        "state",
+        "custodySettled"
+      ],
+      "type": "object"
+    },
+    "LocalNativeGitState": {
+      "enum": [
+        "preparing",
+        "prepared",
+        "running",
+        "succeeded",
+        "failed",
+        "outcomeUnknown"
+      ],
+      "type": "string"
+    },
+    "LocalNativeResultJson": {
+      "maxLength": 131072,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 131072
+    },
+    "LocalOperatorSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "activeTerminals": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "connectedClients": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "login": {
+          "$ref": "#/$defs/LocalLoginStatus"
+        },
+        "status": {
+          "$ref": "#/$defs/LocalStatus"
+        },
+        "uptimeSeconds": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "status",
+        "login",
+        "uptimeSeconds",
+        "activeTerminals"
+      ],
+      "type": "object"
+    },
+    "LocalProfileSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/LocalProjectName"
+        },
+        "profileId": {
+          "$ref": "#/$defs/HostId"
+        }
+      },
+      "required": [
+        "profileId",
+        "name"
+      ],
+      "type": "object"
+    },
+    "LocalProjectName": {
+      "maxLength": 255,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 255
+    },
+    "LocalPublicationState": {
+      "enum": [
+        "pending",
+        "acknowledged",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "LocalResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeFileStage",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalNativeFileStage"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeEditor",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalNativeEditorResult"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeEditorDisposition",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NativeEditorDisposition"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeGit",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalNativeGitResult"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeEffectChallenge",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalNativeEffectChallenge"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "authConfigured",
+              "type": "string"
+            },
+            "value": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "loginAccepted",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalLoginAccepted"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "loginStatus",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalLoginStatus"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "loginPresentation",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalLoginPresentation"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "stopping",
+              "type": "string"
+            },
+            "value": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "status",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalStatus"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "hostNameSet",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalHostName"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "maintenanceStatus",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalMaintenanceStatus"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "setupStartMode",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalStartModePreference"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "doctor",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/BoundedList"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "doctorReport",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalDoctorReport"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "operatorSnapshot",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalOperatorSnapshot"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "diagnosticLogs",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DiagnosticLogSnapshot"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaceDetails",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalWorkspaceDetails"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaceRemovalStatus",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalWorkspaceRemovalStatus"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspacePublication",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalWorkspacePublication"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaces",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/BoundedList3"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "profiles",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/BoundedList4"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspace",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalWorkspaceSummary"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaceImported",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalWorkspaceImportReceipt"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaceBindings",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkspaceBindingsSnapshot"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "shellProfileRegistered",
+              "type": "string"
+            },
+            "value": {
+              "additionalProperties": false,
+              "properties": {
+                "profileId": {
+                  "$ref": "#/$defs/HostProfileId"
+                }
+              },
+              "required": [
+                "profileId"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "workspaceState",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkspaceState"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "removed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkspaceId"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "rpc",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RpcResponse"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "streamAcknowledged",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/SubscriptionId"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeLease",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NativeLease"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeIntent",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/HostId"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeEditorAcknowledged",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/HostId"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "nativeAcknowledged",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/HostId"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LocalRootPath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "LocalSharing": {
+      "enum": [
+        "disabled",
+        "enabled"
+      ],
+      "type": "string"
+    },
+    "LocalStartMode": {
+      "description": "Saved local preference only. It does not install or start an OS service.",
+      "enum": [
+        "manual",
+        "login",
+        "boot"
+      ],
+      "type": "string"
+    },
+    "LocalStartModePreference": {
+      "additionalProperties": false,
+      "properties": {
+        "startMode": {
+          "$ref": "#/$defs/LocalStartMode"
+        }
+      },
+      "required": [
+        "startMode"
+      ],
+      "type": "object"
+    },
+    "LocalStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "hostName": {
+          "$ref": "#/$defs/LocalHostName"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        },
+        "sharing": {
+          "$ref": "#/$defs/LocalSharing"
+        }
+      },
+      "required": [
+        "hostName",
+        "hostId",
+        "runtimeId",
+        "sharing"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspaceDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "remoteWebUrl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalWorkspaceWebUrl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rootPath": {
+          "$ref": "#/$defs/LocalRootPath"
+        },
+        "workspace": {
+          "$ref": "#/$defs/LocalWorkspaceSummary"
+        }
+      },
+      "required": [
+        "workspace",
+        "rootPath"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspaceImportReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "importId": {
+          "$ref": "#/$defs/WorkspaceId"
+        },
+        "workspace": {
+          "$ref": "#/$defs/LocalWorkspaceSummary"
+        }
+      },
+      "required": [
+        "importId",
+        "workspace"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspacePublication": {
+      "additionalProperties": false,
+      "properties": {
+        "authGeneration": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "consent": {
+          "$ref": "#/$defs/LocalSharing"
+        },
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "publication": {
+          "$ref": "#/$defs/LocalPublicationState"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "hostId",
+        "workspaceId",
+        "authGeneration",
+        "consent",
+        "publication"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspaceRemovalPhase": {
+      "enum": [
+        "not_started",
+        "stopping",
+        "uncertain",
+        "complete"
+      ],
+      "type": "string"
+    },
+    "LocalWorkspaceRemovalStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "attemptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmedSessions": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "phase": {
+          "$ref": "#/$defs/LocalWorkspaceRemovalPhase"
+        },
+        "totalSessions": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "phase",
+        "totalSessions",
+        "confirmedSessions"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspaceSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/LocalProjectName"
+        },
+        "sharing": {
+          "$ref": "#/$defs/LocalSharing"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "name",
+        "sharing"
+      ],
+      "type": "object"
+    },
+    "LocalWorkspaceWebUrl": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "Method": {
+      "enum": [
+        "workspace.get",
+        "workspace.capabilities",
+        "workspace.subscribe",
+        "terminal.create",
+        "terminal.split",
+        "terminal.rename",
+        "terminal.move",
+        "terminal.close",
+        "terminal.restart",
+        "terminal.attach",
+        "terminal.snapshot",
+        "terminal.ack",
+        "terminal.claim",
+        "terminal.renew",
+        "terminal.release",
+        "terminal.input",
+        "terminal.resize",
+        "files.list",
+        "files.stat",
+        "files.read",
+        "files.searchNames",
+        "files.watch",
+        "files.create",
+        "files.mkdir",
+        "files.rename",
+        "files.remove",
+        "git.repositories",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.show",
+        "git.stage",
+        "git.unstage",
+        "git.commit",
+        "git.fetch",
+        "git.push",
+        "git.pull",
+        "operation.status",
+        "operation.cancel"
+      ],
+      "type": "string"
+    },
+    "NativeEditorDisposition": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "retirement": {
+          "$ref": "#/$defs/NativeEditorRetirement"
+        },
+        "state": {
+          "$ref": "#/$defs/LocalNativeEffectState"
+        }
+      },
+      "required": [
+        "operationId",
+        "state",
+        "retirement"
+      ],
+      "type": "object"
+    },
+    "NativeEditorRetirement": {
+      "enum": [
+        "unresolved",
+        "joined",
+        "notStarted",
+        "recovered"
+      ],
+      "type": "string"
+    },
+    "NativeLease": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresAtMs": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "fence": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "intentId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "state": {
+          "$ref": "#/$defs/NativeWriterState"
+        }
+      },
+      "required": [
+        "intentId",
+        "fence",
+        "expiresAtMs",
+        "state"
+      ],
+      "type": "object"
+    },
+    "NativeWriterState": {
+      "enum": [
+        "registered",
+        "active",
+        "quarantine",
+        "finished"
+      ],
+      "type": "string"
+    },
+    "ObjectId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "OperationLookup": {
+      "additionalProperties": false,
+      "description": "Status lookup route within the authenticated workspace channel. Never a URL.",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "OperationParameterHash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "OperationReceipt": {
+      "additionalProperties": false,
+      "description": "Validated receipt DTO, not proof of persistence, admission, authority or fencing.\nA consumer must authenticate current rights and row binding before disclosure.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ConsumerAuthorizationId"
+        },
+        "actualRights": {
+          "$ref": "#/$defs/CapabilitySet"
+        },
+        "cancelRequested": {
+          "type": "boolean"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "originalMethod": {
+          "$ref": "#/$defs/Method"
+        },
+        "parameterHash": {
+          "$ref": "#/$defs/OperationParameterHash"
+        },
+        "repositoryExecution": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/OperationState"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "operationId",
+        "actor",
+        "workspaceId",
+        "originalMethod",
+        "actualRights",
+        "repositoryExecution",
+        "parameterHash",
+        "state",
+        "cancelRequested",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "OperationResult": {
+      "description": "Only identifiers/revisions, no names, paths, commands or cached plaintext.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "domain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "domainRevision": {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            "kind": {
+              "const": "terminal",
+              "type": "string"
+            },
+            "paneId": {
+              "$ref": "#/$defs/PaneId"
+            },
+            "sessionEpoch": {
+              "$ref": "#/$defs/SessionEpoch"
+            },
+            "sessionId": {
+              "$ref": "#/$defs/TerminalSessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "domainRevision",
+            "paneId",
+            "sessionId",
+            "sessionEpoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entryId": {
+              "$ref": "#/$defs/EntryId"
+            },
+            "fileRevision": {
+              "$ref": "#/$defs/FileRevision"
+            },
+            "kind": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entryId",
+            "fileRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "repoStateToken": {
+              "$ref": "#/$defs/RepoStateToken"
+            }
+          },
+          "required": [
+            "kind",
+            "repoStateToken"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OperationState": {
+      "enum": [
+        "accepted",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "outcome_unknown"
+      ],
+      "type": "string"
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PaneState": {
+      "enum": [
+        "starting",
+        "publishing",
+        "running",
+        "exited",
+        "stopped",
+        "lost"
+      ],
+      "type": "string"
+    },
+    "RefId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 256
+    },
+    "RemoteError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "$ref": "#/$defs/ErrorDetails"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationLookup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "effect",
+        "details"
+      ],
+      "type": "object"
+    },
+    "RemoteId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "RepoStateToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RepositoryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RequestId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "Result_of_LocalResult_or_LocalError": {
+      "oneOf": [
+        {
+          "properties": {
+            "Ok": {
+              "$ref": "#/$defs/LocalResult"
+            }
+          },
+          "required": [
+            "Ok"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "Err": {
+              "$ref": "#/$defs/LocalError"
+            }
+          },
+          "required": [
+            "Err"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RevisionErrorDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "actualRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "expectedRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "actualRevision"
+      ],
+      "type": "object"
+    },
+    "RpcResponse": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "requestId": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "result": {
+              "$ref": "#/$defs/RpcResult"
+            },
+            "type": {
+              "const": "result",
+              "type": "string"
+            },
+            "v": {
+              "$ref": "#/$defs/ApplicationMajor"
+            }
+          },
+          "required": [
+            "type",
+            "v",
+            "requestId",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/RemoteError"
+            },
+            "operationId": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requestId": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            },
+            "v": {
+              "$ref": "#/$defs/ApplicationMajor"
+            }
+          },
+          "required": [
+            "type",
+            "v",
+            "requestId",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RpcResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceState"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.capabilities",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceCapabilitiesResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "workspace.subscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/WorkspaceSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.split",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.move",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.attach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalSnapshotMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.ack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalAckResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.claim",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalLeaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.renew",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalLeaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.release",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalReleaseResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.input",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/InputReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "terminal.resize",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/TerminalResizeResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesListResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.stat",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FileMetadata"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesReadResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.searchNames",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesListResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.watch",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/FilesWatchResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.mkdir",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "files.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.repositories",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitRepositoriesResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitStatusResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.diff",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitDiffResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.log",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitLogResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.show",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/GitShowResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.stage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.unstage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.commit",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.fetch",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.push",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "git.pull",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "operation.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "operation.cancel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/OperationReceipt"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SplitAxis": {
+      "enum": [
+        "horizontal",
+        "vertical"
+      ],
+      "type": "string"
+    },
+    "SubscriptionId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "TabId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalAckResult": {
+      "additionalProperties": false,
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "throughSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalContext": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "profile": {
+          "$ref": "#/$defs/TerminalProfile"
+        },
+        "sessionEpoch": {
+          "$ref": "#/$defs/SessionEpoch"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/TerminalSessionId"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceContext"
+        }
+      },
+      "required": [
+        "workspace",
+        "paneId",
+        "sessionId",
+        "sessionEpoch",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "TerminalDimension": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "TerminalLayout": {
+      "description": "The shared terminal projection contains no private desktop view descriptors.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "pane",
+              "type": "string"
+            },
+            "pane": {
+              "$ref": "#/$defs/TerminalPane"
+            }
+          },
+          "required": [
+            "kind",
+            "pane"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "axis": {
+              "$ref": "#/$defs/SplitAxis"
+            },
+            "first": {
+              "$ref": "#/$defs/TerminalLayout"
+            },
+            "kind": {
+              "const": "split",
+              "type": "string"
+            },
+            "second": {
+              "$ref": "#/$defs/TerminalLayout"
+            }
+          },
+          "required": [
+            "kind",
+            "axis",
+            "first",
+            "second"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminalLeaseResult": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresInMs": {
+          "$ref": "#/$defs/TimeoutMs"
+        },
+        "lease": {
+          "$ref": "#/$defs/LeaseBinding"
+        },
+        "nextInputId": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "nextInputSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "nextResizeSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "lease",
+        "expiresInMs",
+        "nextInputId",
+        "nextInputSeq",
+        "nextResizeSeq"
+      ],
+      "type": "object"
+    },
+    "TerminalPane": {
+      "additionalProperties": false,
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/PaneState"
+        }
+      },
+      "required": [
+        "paneId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TerminalProfile": {
+      "enum": [
+        "lomi-rust-grid-v1-experimental"
+      ],
+      "type": "string"
+    },
+    "TerminalReleaseResult": {
+      "additionalProperties": false,
+      "properties": {
+        "released": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "released"
+      ],
+      "type": "object"
+    },
+    "TerminalResizeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "resizeSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        }
+      },
+      "required": [
+        "terminal",
+        "resizeSeq",
+        "columns",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TerminalSessionId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "columns": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "outputOffset": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "rows": {
+          "$ref": "#/$defs/TerminalDimension"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "terminal": {
+          "$ref": "#/$defs/TerminalContext"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workingDirectory": {
+          "$ref": "#/$defs/WorkingDirectoryValue"
+        }
+      },
+      "required": [
+        "terminal",
+        "subscriptionId",
+        "throughSeq",
+        "outputOffset",
+        "columns",
+        "rows",
+        "chunkCount",
+        "totalBytes",
+        "workingDirectory"
+      ],
+      "type": "object"
+    },
+    "TerminalTab": {
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/TerminalLayout"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabId": {
+          "$ref": "#/$defs/TabId"
+        }
+      },
+      "required": [
+        "tabId",
+        "name",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "TimeoutMs": {
+      "maximum": 120000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UserCode": {
+      "maxLength": 64,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "WorkingDirectoryValue": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 1,
+          "not": {
+            "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+          },
+          "type": "string",
+          "x-lomi-maxUtf16CodeUnits": 4096
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "An absolute Host path or null when unknown"
+    },
+    "WorkspaceBinding": {
+      "description": "Owner-local resolution of stable import IDs. `Missing` is distinct from\n`Retired`: an import may not have been committed yet.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "import_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            },
+            "state": {
+              "const": "missing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "import_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "import_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            },
+            "root_path": {
+              "$ref": "#/$defs/LocalRootPath"
+            },
+            "state": {
+              "const": "active",
+              "type": "string"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            }
+          },
+          "required": [
+            "state",
+            "import_id",
+            "workspace_id",
+            "root_path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "import_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            },
+            "state": {
+              "const": "pending",
+              "type": "string"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            }
+          },
+          "required": [
+            "state",
+            "import_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "import_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            },
+            "state": {
+              "const": "retired",
+              "type": "string"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/WorkspaceId"
+            }
+          },
+          "required": [
+            "state",
+            "import_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceBindingsSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "$ref": "#/$defs/BoundedList5"
+        },
+        "hostId": {
+          "$ref": "#/$defs/HostId"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        }
+      },
+      "required": [
+        "hostId",
+        "runtimeId",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "WorkspaceCapabilitiesResult": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitySet"
+        },
+        "profiles": {
+          "$ref": "#/$defs/BoundedList7"
+        }
+      },
+      "required": [
+        "capabilities",
+        "profiles"
+      ],
+      "type": "object"
+    },
+    "WorkspaceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "grantRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "hostAccessEpoch": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeGeneration": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "runtimeId": {
+          "$ref": "#/$defs/RuntimeId"
+        },
+        "workspaceEpoch": {
+          "$ref": "#/$defs/WorkspaceEpoch"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/WorkspaceId"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "workspaceEpoch",
+        "runtimeId",
+        "runtimeGeneration",
+        "hostAccessEpoch",
+        "grantRevision"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceSnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "chunkCount": {
+          "$ref": "#/$defs/ChunkCount"
+        },
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/SubscriptionId"
+        },
+        "throughSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "subscriptionId",
+        "throughSeq",
+        "cursor",
+        "chunkCount",
+        "totalBytes"
+      ],
+      "type": "object"
+    },
+    "WorkspaceState": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        "domainRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabs": {
+          "$ref": "#/$defs/BoundedList6"
+        }
+      },
+      "required": [
+        "context",
+        "domainRevision",
+        "name",
+        "tabs"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "requestId": {
+      "$ref": "#/$defs/RequestId"
+    },
+    "result": {
+      "$ref": "#/$defs/Result_of_LocalResult_or_LocalError"
+    },
+    "version": {
+      "$ref": "#/$defs/LocalIpcVersion"
+    }
+  },
+  "required": [
+    "version",
+    "requestId",
+    "result"
+  ],
+  "title": "LocalResponse",
+  "type": "object"
+}

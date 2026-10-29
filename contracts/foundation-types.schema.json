@@ -1,0 +1,456 @@
+{
+  "$defs": {
+    "AccountId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "AccountSessionId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "ApplicationMajor": {
+      "const": 2,
+      "type": "integer"
+    },
+    "ChannelId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "ConsumerAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "EnrollmentId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EntryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "EventCursor": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "FileRevision": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "GrantContextVersion": {
+      "const": 3,
+      "type": "integer"
+    },
+    "GrantId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostAuthorizationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "HostId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "LocalIpcMajor": {
+      "const": 1,
+      "type": "integer"
+    },
+    "LocalIpcVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "$ref": "#/$defs/LocalIpcMajor"
+        },
+        "minor": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "Method": {
+      "enum": [
+        "workspace.get",
+        "workspace.capabilities",
+        "workspace.subscribe",
+        "terminal.create",
+        "terminal.split",
+        "terminal.rename",
+        "terminal.move",
+        "terminal.close",
+        "terminal.restart",
+        "terminal.attach",
+        "terminal.snapshot",
+        "terminal.ack",
+        "terminal.claim",
+        "terminal.renew",
+        "terminal.release",
+        "terminal.input",
+        "terminal.resize",
+        "files.list",
+        "files.stat",
+        "files.read",
+        "files.searchNames",
+        "files.watch",
+        "files.create",
+        "files.mkdir",
+        "files.rename",
+        "files.remove",
+        "git.repositories",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "git.show",
+        "git.stage",
+        "git.unstage",
+        "git.commit",
+        "git.fetch",
+        "git.push",
+        "git.pull",
+        "operation.status",
+        "operation.cancel"
+      ],
+      "type": "string"
+    },
+    "OperationId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PairingId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RemoteApiMajor": {
+      "const": 2,
+      "type": "integer"
+    },
+    "RepoStateToken": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RepositoryId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RequestId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "RuntimeId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TabId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalProfile": {
+      "enum": [
+        "lomi-rust-grid-v1-experimental"
+      ],
+      "type": "string"
+    },
+    "TerminalSessionId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "VersionAxes": {
+      "additionalProperties": false,
+      "properties": {
+        "applicationMajor": {
+          "$ref": "#/$defs/ApplicationMajor"
+        },
+        "grantContextVersion": {
+          "$ref": "#/$defs/GrantContextVersion"
+        },
+        "localIpc": {
+          "$ref": "#/$defs/LocalIpcVersion"
+        },
+        "remoteApiMajor": {
+          "$ref": "#/$defs/RemoteApiMajor"
+        },
+        "terminalProfile": {
+          "$ref": "#/$defs/TerminalProfile"
+        }
+      },
+      "required": [
+        "remoteApiMajor",
+        "applicationMajor",
+        "grantContextVersion",
+        "localIpc",
+        "terminalProfile"
+      ],
+      "type": "object"
+    },
+    "WindowIdentityId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "account_id": {
+      "$ref": "#/$defs/AccountId"
+    },
+    "account_session_id": {
+      "$ref": "#/$defs/AccountSessionId"
+    },
+    "channel_id": {
+      "$ref": "#/$defs/ChannelId"
+    },
+    "consumer_authorization_id": {
+      "$ref": "#/$defs/ConsumerAuthorizationId"
+    },
+    "decimal_u64": {
+      "$ref": "#/$defs/DecimalU64"
+    },
+    "enrollment_id": {
+      "$ref": "#/$defs/EnrollmentId"
+    },
+    "entry_id": {
+      "$ref": "#/$defs/EntryId"
+    },
+    "event_cursor": {
+      "$ref": "#/$defs/EventCursor"
+    },
+    "file_revision": {
+      "$ref": "#/$defs/FileRevision"
+    },
+    "grant_id": {
+      "$ref": "#/$defs/GrantId"
+    },
+    "host_authorization_id": {
+      "$ref": "#/$defs/HostAuthorizationId"
+    },
+    "host_id": {
+      "$ref": "#/$defs/HostId"
+    },
+    "method": {
+      "$ref": "#/$defs/Method"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "pairing_id": {
+      "$ref": "#/$defs/PairingId"
+    },
+    "pane_id": {
+      "$ref": "#/$defs/PaneId"
+    },
+    "repo_state_token": {
+      "$ref": "#/$defs/RepoStateToken"
+    },
+    "repository_id": {
+      "$ref": "#/$defs/RepositoryId"
+    },
+    "request_id": {
+      "$ref": "#/$defs/RequestId"
+    },
+    "runtime_id": {
+      "$ref": "#/$defs/RuntimeId"
+    },
+    "session_epoch": {
+      "$ref": "#/$defs/SessionEpoch"
+    },
+    "tab_id": {
+      "$ref": "#/$defs/TabId"
+    },
+    "terminal_session_id": {
+      "$ref": "#/$defs/TerminalSessionId"
+    },
+    "versions": {
+      "$ref": "#/$defs/VersionAxes"
+    },
+    "window_identity_id": {
+      "$ref": "#/$defs/WindowIdentityId"
+    },
+    "workspace_epoch": {
+      "$ref": "#/$defs/WorkspaceEpoch"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId"
+    }
+  },
+  "required": [
+    "account_id",
+    "host_id",
+    "host_authorization_id",
+    "consumer_authorization_id",
+    "window_identity_id",
+    "grant_id",
+    "workspace_id",
+    "workspace_epoch",
+    "runtime_id",
+    "operation_id",
+    "channel_id",
+    "pane_id",
+    "terminal_session_id",
+    "session_epoch",
+    "tab_id",
+    "entry_id",
+    "repository_id",
+    "pairing_id",
+    "enrollment_id",
+    "request_id",
+    "account_session_id",
+    "event_cursor",
+    "file_revision",
+    "repo_state_token",
+    "versions",
+    "method",
+    "decimal_u64"
+  ],
+  "title": "FoundationTypes",
+  "type": "object"
+}

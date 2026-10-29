@@ -1,0 +1,606 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Cross-client coverage inventory for canonical Rust RPC methods. Source presence is not acceptance evidence.",
+  "canonicalSource": "crates/lomi-remote-protocol/src/lib.rs (methods! macro; Method variants and wire names)",
+  "statusDefinitions": {
+    "source_call_present": "A method call is present in the cited client source; behavior and acceptance are not established.",
+    "unverified": "No current repository evidence was located for this client method.",
+    "blocked": "Git RPC support is explicitly excluded from this foundation inventory."
+  },
+  "methods": {
+    "workspace.get": {
+      "rustVariant": "WorkspaceGet",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "workspace.capabilities": {
+      "rustVariant": "WorkspaceCapabilities",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "workspace.subscribe": {
+      "rustVariant": "WorkspaceSubscribe",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.create": {
+      "rustVariant": "TerminalCreate",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.split": {
+      "rustVariant": "TerminalSplit",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.rename": {
+      "rustVariant": "TerminalRename",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.move": {
+      "rustVariant": "TerminalMove",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.close": {
+      "rustVariant": "TerminalClose",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.restart": {
+      "rustVariant": "TerminalRestart",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.attach": {
+      "rustVariant": "TerminalAttach",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.snapshot": {
+      "rustVariant": "TerminalSnapshot",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.ack": {
+      "rustVariant": "TerminalAck",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.claim": {
+      "rustVariant": "TerminalClaim",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.renew": {
+      "rustVariant": "TerminalRenew",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.release": {
+      "rustVariant": "TerminalRelease",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.input": {
+      "rustVariant": "TerminalInput",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/consumer-window.worker.ts"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "terminal.resize": {
+      "rustVariant": "TerminalResize",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/consumer-window.worker.ts"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.list": {
+      "rustVariant": "FilesList",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.stat": {
+      "rustVariant": "FilesStat",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.read": {
+      "rustVariant": "FilesRead",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.searchNames": {
+      "rustVariant": "FilesSearchNames",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.watch": {
+      "rustVariant": "FilesWatch",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.create": {
+      "rustVariant": "FilesCreate",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.mkdir": {
+      "rustVariant": "FilesMkdir",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.rename": {
+      "rustVariant": "FilesRename",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "files.remove": {
+      "rustVariant": "FilesRemove",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.repositories": {
+      "rustVariant": "GitRepositories",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.status": {
+      "rustVariant": "GitStatus",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.diff": {
+      "rustVariant": "GitDiff",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.log": {
+      "rustVariant": "GitLog",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.show": {
+      "rustVariant": "GitShow",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.stage": {
+      "rustVariant": "GitStage",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.unstage": {
+      "rustVariant": "GitUnstage",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.commit": {
+      "rustVariant": "GitCommit",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.fetch": {
+      "rustVariant": "GitFetch",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.push": {
+      "rustVariant": "GitPush",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "git.pull": {
+      "rustVariant": "GitPull",
+      "clients": {
+        "desktop": {
+          "status": "blocked"
+        },
+        "remote-web": {
+          "status": "blocked"
+        },
+        "mobile": {
+          "status": "blocked"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "operation.status": {
+      "rustVariant": "OperationStatus",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "source_call_present",
+          "evidence": "../remote-web/src/RemoteV2Workspace.tsx"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    },
+    "operation.cancel": {
+      "rustVariant": "OperationCancel",
+      "clients": {
+        "desktop": {
+          "status": "unverified"
+        },
+        "remote-web": {
+          "status": "unverified"
+        },
+        "mobile": {
+          "status": "unverified"
+        }
+      },
+      "acceptanceTest": "not_claimed"
+    }
+  }
+}

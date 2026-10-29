@@ -1,0 +1,21 @@
+{
+  "status": "SOURCE_ONLY_NOT_RUN_REQUIRES_INDEPENDENT_REVIEW_AND_ROOT_ADMISSION",
+  "localSha256": {
+    "README.md": "341a9e85206cb42a8cf67f90a5b0713f5d978164adefa2b2a88f540663dd7030",
+    "builtin-trigger-identities.sql": "bb02218ffd56dd461517170a9493c36589ae069f47821ef07a433746007dddf8",
+    "cases.py": "9362945e547eeed818b2f30df55aff9036823ceae40dcd957bf4ec95c5dab20d",
+    "excluded.json": "ca38cde838a09358d4a841e9a581a8271b5d12daba9b8ffa7e049c9bab5fa27d",
+    "prefix.py": "1f4411a6630a0266068cdce4a491bb3cf8fa4f07e0b89011a295830683226cc2",
+    "resource_policy.py": "1d631ec27f30f7b969ed32ab4504300a8932123401b0d5713a65b3a84a53cb3e",
+    "s5.py": "fe4ee91a7404a67b47f9f29db91d169660a597e96237360610e8278f810cfa6e",
+    "supervised.test.py": "357e4af3a152ce640ca5094650bf52dc021f2fa71a9a191353303166eaa20e98"
+  },
+  "dependenciesSha256": {
+    "tests/consumer-pg-guardian/guardian.py": "24e3963ce7af07b6708ac7bd315e7f1d681186acb002bf934faa618d2f5caa47",
+    "tests/consumer-fixture-evidence/recording.py": "14312e038a7e1333d6efad810711b585678b9166c86015d7bf56194e7ea57933",
+    "artifacts/consumer-pg-guardian-preparation/8bcb9cfe-acd1-4915-a09b-7dd6ce393d50/api-contract.json": "c438d42f13fad0b98c3d16d3102f31f455f53a8b9273bff3e654559454471392",
+    "artifacts/consumer-pg-guardian-preparation/8bcb9cfe-acd1-4915-a09b-7dd6ce393d50/freeze-sha256.json": "7ae2b6b5d510a0e4eaa47043eccd4e1a1c3871875f9a3e031918a933f5d64eb6"
+  },
+  "fullS5Qualified": false,
+  "driverInProcess": true
+}
