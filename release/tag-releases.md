@@ -65,8 +65,9 @@ version and actual executable path. `NO_COLOR` disables completion colors.
 
 ### macOS service ownership recovery
 
-Version 0.1.1 fixes service setup for protected install directories owned by
-`root:admin`. The executable directory keeps its root ownership and permission
+Version 0.1.2 fixes protected install directories owned by `root:admin` and
+uses the correct Security framework options for authenticating running peer
+processes. The executable directory keeps its root ownership and permission
 checks; custody state directories still require `root:wheel`.
 If version 0.1.0 activated the program and then reported
 `SERVICE_OWNERSHIP_CONFLICT`, rerun the public installation command for the same
@@ -171,7 +172,7 @@ keep their existing deployments.
 ```sh
 python3 -m unittest discover -s release -p 'test_*.py'
 node --test release/gateway/worker.test.mjs release/bootstrap/render.test.mjs
-python3 release/ci_build.py --tag v0.1.1 --check
+python3 release/ci_build.py --tag v0.1.2 --check
 ```
 
 These checks cover signing, archive integrity, version-pinned origins, gateway

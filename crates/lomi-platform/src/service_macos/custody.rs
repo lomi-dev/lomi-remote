@@ -39,7 +39,10 @@ const STATE_MODE: u32 = 0o700;
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const LIMIT: usize = 16 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+// Used only with SecStaticCode. SecCode's dynamic validity API rejects
+// CHECK_ALL_ARCHITECTURES as a static-code-only flag.
 const STRICT_FLAGS: Flags = Flags::STRICT_VALIDATE.union(Flags::CHECK_ALL_ARCHITECTURES);
+const DYNAMIC_VALIDATION_FLAGS: Flags = Flags::NONE;
 const BROKER_ARGUMENT: &str = "--internal-privileged-pty-broker";
 const APPLE_REQUIREMENT: &str = "anchor apple generic";
 const REGISTRATION_VERSION: u8 = 1;
@@ -725,7 +728,7 @@ fn capture_code_peer(
     if require_self {
         let self_code = SecCode::for_self(Flags::NONE).map_err(|_| Error::Conflict)?;
         self_code
-            .check_validity(STRICT_FLAGS, &apple_requirement)
+            .check_validity(DYNAMIC_VALIDATION_FLAGS, &apple_requirement)
             .map_err(|_| Error::Conflict)?;
         let self_info = signing_information(self_code.as_CFTypeRef().cast())?;
         if !same_code_identity(&self_info.identity, signing_identity)
@@ -736,7 +739,7 @@ fn capture_code_peer(
     }
 
     guest
-        .check_validity(STRICT_FLAGS, &apple_requirement)
+        .check_validity(DYNAMIC_VALIDATION_FLAGS, &apple_requirement)
         .map_err(|_| Error::Conflict)?;
     let peer_info = signing_information(guest.as_CFTypeRef().cast())?;
     if !same_code_identity(&peer_info.identity, signing_identity)
@@ -2048,5 +2051,20 @@ mod tests {
             false,
             protected_policy,
         ));
+    }
+
+    #[test]
+    fn dynamic_code_validation_uses_dynamic_api_flags() {
+        let code = SecCode::for_self(Flags::NONE).expect("current process should have SecCode");
+        let requirement: SecRequirement = "true".parse().expect("true is a valid requirement");
+
+        assert!(
+            code.check_validity(DYNAMIC_VALIDATION_FLAGS, &requirement)
+                .is_ok()
+        );
+        assert!(
+            code.check_validity(Flags::CHECK_ALL_ARCHITECTURES, &requirement)
+                .is_err()
+        );
     }
 }
