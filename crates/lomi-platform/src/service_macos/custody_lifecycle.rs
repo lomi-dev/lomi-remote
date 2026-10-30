@@ -195,19 +195,36 @@ fn start_registered(
         Some(_) => {}
     }
     let deadline = Instant::now() + MANAGER_DEADLINE;
-    loop {
-        match observe_job(registration)? {
-            Some(observation) if observation.running => break,
-            Some(_) => {}
-            None => return Err(Error::NotReady),
+    wait_until_ready(deadline, || {
+        if !observe_job(registration)?.is_some_and(|observation| observation.running) {
+            return Ok(false);
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Deadline);
+        }
+        admin_status_with_timeout(registration, remaining.min(HELPER_DEADLINE))?;
+        custody::validate_privileged_custodian(guard, registration)?;
+        Ok(true)
+    })
+}
+
+fn wait_until_ready(deadline: Instant, mut probe: impl FnMut() -> Result<bool>) -> Result<()> {
+    loop {
         if Instant::now() >= deadline {
             return Err(Error::NotReady);
         }
-        thread::sleep(Duration::from_millis(50));
+        match probe() {
+            Ok(true) if Instant::now() < deadline => return Ok(()),
+            Ok(true) | Ok(false) | Err(Error::NotReady) => {}
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::NotReady);
+        }
+        thread::sleep(Duration::from_millis(50).min(remaining));
     }
-    admin_status(registration)?;
-    custody::validate_privileged_custodian(guard, registration)
 }
 
 fn drain_and_bootout(
@@ -260,13 +277,23 @@ fn drain_and_bootout(
 fn admin_status(
     registration: &custody::PrivilegedCustodianRegistration,
 ) -> Result<AdminStatusResponse> {
-    let response: AdminStatusResponse = run_helper(registration, ADMIN_STATUS_ARGUMENT)?;
+    admin_status_with_timeout(registration, HELPER_DEADLINE)
+}
+
+fn admin_status_with_timeout(
+    registration: &custody::PrivilegedCustodianRegistration,
+    timeout: Duration,
+) -> Result<AdminStatusResponse> {
+    let response: AdminStatusResponse =
+        run_helper_with_timeout(registration, ADMIN_STATUS_ARGUMENT, timeout)?;
     if response.version != 1
-        || response.state != "ready"
         || response.registration_key != registration.registration_key()
         || !valid_uuid(&response.request_id)
         || !valid_uuid(&response.runtime_id)
     {
+        return Err(Error::Conflict);
+    }
+    if response.state != "ready" {
         return Err(Error::NotReady);
     }
     Ok(response)
@@ -292,6 +319,14 @@ fn run_helper<T: for<'de> Deserialize<'de> + Serialize>(
     registration: &custody::PrivilegedCustodianRegistration,
     operation: &str,
 ) -> Result<T> {
+    run_helper_with_timeout(registration, operation, HELPER_DEADLINE)
+}
+
+fn run_helper_with_timeout<T: for<'de> Deserialize<'de> + Serialize>(
+    registration: &custody::PrivilegedCustodianRegistration,
+    operation: &str,
+    timeout: Duration,
+) -> Result<T> {
     crate::process::require_child_ownership().map_err(|_| Error::Manager)?;
     if !matches!(operation, ADMIN_STATUS_ARGUMENT | ADMIN_DRAIN_ARGUMENT) {
         return Err(Error::Invalid);
@@ -306,7 +341,7 @@ fn run_helper<T: for<'de> Deserialize<'de> + Serialize>(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = bounded_helper(&mut command, HELPER_DEADLINE)?;
+    let output = bounded_helper(&mut command, timeout)?;
     let body = output.strip_suffix(b"\n").ok_or(Error::NotReady)?;
     if body.is_empty() || body.contains(&b'\n') || body.contains(&b'\r') {
         return Err(Error::NotReady);
@@ -494,7 +529,13 @@ fn parse_job_observation(
             if state.replace(value).is_some()
                 || !matches!(
                     value,
-                    "running" | "not running" | "waiting" | "spawn scheduled" | "SIGTERMed"
+                    "running"
+                        | "not running"
+                        | "waiting"
+                        | "spawn scheduled"
+                        | "spawning"
+                        | "xpcproxy"
+                        | "SIGTERMed"
                 )
             {
                 return Err(Error::Conflict);
@@ -505,10 +546,138 @@ fn parse_job_observation(
         return Err(Error::Conflict);
     }
     let running = state == Some("running");
-    if running != pid.is_some() || seen_pid != pid.is_some() {
+    if seen_pid != pid.is_some()
+        || (running && pid.is_none())
+        || (pid.is_some()
+            && !matches!(
+                state,
+                Some("running" | "spawning" | "xpcproxy" | "SIGTERMed")
+            ))
+    {
         return Err(Error::Conflict);
     }
     Ok(JobObservation { running })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const TARGET: &str = "system/dev.lomi.custodian.test";
+    const PLIST: &str = "/Library/LaunchDaemons/dev.lomi.custodian.test.plist";
+    const EXECUTABLE: &str = "/Library/LomiRemote/pty-broker";
+    const REGISTRATION: &str = "/var/db/lomi/custodian.json";
+
+    fn launchctl_output(state: &str, pids: &[&str]) -> String {
+        let mut output = format!(
+            "{TARGET} = {{\n\
+\tactive count = 1\n\
+\tpath = {PLIST}\n\
+\ttype = LaunchDaemon\n\
+\tstate = {state}\n\
+\tprogram = {EXECUTABLE}\n\
+\targuments = {{\n\
+\t\t{EXECUTABLE}\n\
+\t\t--internal-privileged-pty-broker\n\
+\t\t{REGISTRATION}\n\
+\t}}\n"
+        );
+        for pid in pids {
+            output.push_str(&format!("\tpid = {pid}\n"));
+        }
+        output.push_str("}\n");
+        output
+    }
+
+    #[test]
+    fn sigtermed_custodian_with_retained_pid_remains_a_present_nonrunning_job() {
+        let output = launchctl_output("SIGTERMed", &["55784"]);
+        assert!(matches!(
+            parse_job_observation(&output, TARGET, PLIST, EXECUTABLE, REGISTRATION),
+            Ok(JobObservation { running: false })
+        ));
+    }
+
+    #[test]
+    fn spawning_custodian_with_optional_pid_remains_present_but_nonrunning() {
+        for pids in [&[][..], &["55784"][..]] {
+            let output = launchctl_output("spawning", pids);
+            assert!(matches!(
+                parse_job_observation(&output, TARGET, PLIST, EXECUTABLE, REGISTRATION),
+                Ok(JobObservation { running: false })
+            ));
+        }
+    }
+
+    #[test]
+    fn captured_xpcproxy_custodian_job_with_pid_is_present_but_nonrunning() {
+        const CAPTURED_TARGET: &str = "system/dev.lomi.remote.privileged-custody.e6af516fd6c875813813931a86d68134affb59ba5a86205a183c73be2b422ccd";
+        let output = launchctl_output("xpcproxy", &["22359"]).replace(TARGET, CAPTURED_TARGET);
+        assert!(matches!(
+            parse_job_observation(&output, CAPTURED_TARGET, PLIST, EXECUTABLE, REGISTRATION),
+            Ok(JobObservation { running: false })
+        ));
+    }
+
+    #[test]
+    fn custodian_observation_rejects_other_nonrunning_and_invalid_pids() {
+        for output in [
+            launchctl_output("waiting", &["55784"]),
+            launchctl_output("new-launchd-state", &[]),
+            launchctl_output("SIGTERMed", &["0"]),
+            launchctl_output("SIGTERMed", &["55784", "55785"]),
+            launchctl_output("running", &[]),
+        ] {
+            assert!(matches!(
+                parse_job_observation(&output, TARGET, PLIST, EXECUTABLE, REGISTRATION),
+                Err(Error::Conflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn readiness_retries_transient_not_ready_and_job_absence_until_status_is_ready() {
+        let attempts = Cell::new(0);
+        let result = wait_until_ready(Instant::now() + Duration::from_secs(1), || {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            match attempt {
+                0 => Err(Error::NotReady),
+                1 => Ok(false),
+                _ => Ok(true),
+            }
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
+    fn readiness_times_out_when_job_and_status_never_become_ready() {
+        let attempts = Cell::new(0);
+        let result = wait_until_ready(Instant::now() + Duration::from_millis(20), || {
+            attempts.set(attempts.get() + 1);
+            Ok(false)
+        });
+
+        assert_eq!(result, Err(Error::NotReady));
+        assert!(attempts.get() > 0);
+    }
+
+    #[test]
+    fn readiness_does_not_retry_security_or_deadline_errors() {
+        for error in [Error::Conflict, Error::Disabled, Error::Deadline] {
+            let attempts = Cell::new(0);
+            let result = wait_until_ready(Instant::now() + Duration::from_secs(1), || {
+                attempts.set(attempts.get() + 1);
+                Err(error)
+            });
+
+            assert_eq!(result, Err(error));
+            assert_eq!(attempts.get(), 1);
+        }
+    }
 }
 
 fn launch_target(registration: &custody::PrivilegedCustodianRegistration) -> String {

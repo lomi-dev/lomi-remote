@@ -1048,7 +1048,13 @@ fn observation(
         } else if let Some(value) = line.strip_prefix("\tstate = ")
             && (!matches!(
                 value,
-                "running" | "not running" | "waiting" | "spawn scheduled" | "SIGTERMed"
+                "running"
+                    | "not running"
+                    | "waiting"
+                    | "spawn scheduled"
+                    | "spawning"
+                    | "xpcproxy"
+                    | "SIGTERMed"
             ) || state.replace(value).is_some())
         {
             return Err(Error::Conflict);
@@ -1058,7 +1064,13 @@ fn observation(
         return Err(Error::Conflict);
     }
     let running = state == Some("running");
-    if running != pid.is_some() {
+    if (running && pid.is_none())
+        || (pid.is_some()
+            && !matches!(
+                state,
+                Some("running" | "spawning" | "xpcproxy" | "SIGTERMed")
+            ))
+    {
         return Err(Error::Conflict);
     }
     Ok(Observation { pid, running })
@@ -1181,6 +1193,91 @@ mod launchctl_observation_tests {
             ));
         }
     }
+
+    #[test]
+    fn sigtermed_job_with_retained_pid_is_present_but_not_running() {
+        let reg = registration();
+        let output = running_launchctl_output().replace("state = running", "state = SIGTERMed");
+        assert!(matches!(
+            observation(&output, TARGET, PLIST_PATH, &reg),
+            Ok(Observation {
+                pid: Some(55784),
+                running: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn spawning_job_with_optional_pid_is_present_but_not_running() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        for (output, expected_pid) in [
+            (
+                fixture
+                    .replace("state = running", "state = spawning")
+                    .replace("\tpid = 55784\n", ""),
+                None,
+            ),
+            (
+                fixture.replace("state = running", "state = spawning"),
+                Some(55784),
+            ),
+        ] {
+            assert!(matches!(
+                observation(&output, TARGET, PLIST_PATH, &reg),
+                Ok(Observation {
+                    pid,
+                    running: false,
+                }) if pid == expected_pid
+            ));
+        }
+    }
+
+    #[test]
+    fn xpcproxy_job_with_observed_pid_is_present_but_not_running() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        for (output, expected_pid) in [
+            (
+                fixture
+                    .replace("state = running", "state = xpcproxy")
+                    .replace("pid = 55784", "pid = 22359"),
+                Some(22359),
+            ),
+            (
+                fixture
+                    .replace("state = running", "state = xpcproxy")
+                    .replace("\tpid = 55784\n", ""),
+                None,
+            ),
+        ] {
+            assert!(matches!(
+                observation(&output, TARGET, PLIST_PATH, &reg),
+                Ok(Observation { pid, running: false }) if pid == expected_pid
+            ));
+        }
+    }
+
+    #[test]
+    fn boot_observation_rejects_unexpected_nonrunning_and_invalid_pids() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        let cases = [
+            fixture.replace("state = running", "state = waiting"),
+            fixture.replace("state = running", "state = new-launchd-state"),
+            fixture.replace("pid = 55784", "pid = 0"),
+            fixture.replace(
+                "\tlast exit code = 0",
+                "\tpid = 55785\n\tlast exit code = 0",
+            ),
+        ];
+        for output in cases {
+            assert!(matches!(
+                observation(&output, TARGET, PLIST_PATH, &reg),
+                Err(Error::Conflict)
+            ));
+        }
+    }
 }
 
 fn observe(reg: &Registration, path: &str) -> Result<Option<Observation>> {
@@ -1214,6 +1311,7 @@ fn bounded_status(reg: &Registration, account: &Account, expected_pid: u32) -> R
         .arg("--internal-host-status")
         .arg(&reg.profile)
         .arg(expected_pid.to_string())
+        .current_dir("/")
         .env_clear()
         .env("HOME", &account.home)
         .env("USER", &account.name)
@@ -1393,6 +1491,7 @@ fn run_as_account(
         .arg("--profile-dir")
         .arg(profile)
         .args(args)
+        .current_dir("/")
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("LC_ALL", "C");

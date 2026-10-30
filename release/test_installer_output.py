@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import pty
 import select
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -122,6 +123,8 @@ elif command == "install-release-admin-boot":
     cli.write_text(cli_source, encoding="utf-8")
     cli.chmod(0o755)
     print('{"activeObject":{"version":"1.2.3"}}')
+elif command == "uninstall-admin-host":
+    raise SystemExit(int(os.environ.get("ADMIN_UNINSTALL_EXIT", "0")))
 elif command in ("validate-admin-boot-install-dir", "bind-admin-boot-profile", "status-release", "uninstall-release-admin-boot", "verify-admin-installed-maintenance-cli"):
     pass
 else:
@@ -168,6 +171,9 @@ else:
         admin_status_exit: int = 0,
         service_active: bool = False,
         maintenance_response: dict | None = None,
+        mode: str = "admin-install",
+        purge: bool = False,
+        admin_uninstall_exit: int = 0,
     ) -> tuple[int, bytes, bytes]:
         environment = os.environ.copy()
         environment.update({
@@ -181,6 +187,7 @@ else:
             "SERVICE_INSTALL_EXIT": str(service_install_exit),
             "SERVICE_START_EXIT": str(service_start_exit),
             "SERVICE_ACTIVE": "active" if service_active else "inactive",
+            "ADMIN_UNINSTALL_EXIT": str(admin_uninstall_exit),
             "FIXTURE_MAINTENANCE_RESPONSE": json.dumps(
                 MAINTENANCE_RESPONSE if maintenance_response is None else maintenance_response
             ),
@@ -192,9 +199,19 @@ else:
         if no_color:
             environment["NO_COLOR"] = "1"
 
+        installer_args = [
+            "/bin/sh",
+            str(self.installer_path),
+            mode,
+            "fixture-account",
+            "boot",
+        ]
+        if purge:
+            installer_args.append("--purge")
+
         if not tty:
             result = subprocess.run(
-                ["/bin/sh", str(self.installer_path), "admin-install", "fixture-account", "boot"],
+                installer_args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -206,7 +223,7 @@ else:
         master, slave = pty.openpty()
         try:
             process = subprocess.Popen(
-                ["/bin/sh", str(self.installer_path), "admin-install", "fixture-account", "boot"],
+                installer_args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=slave,
@@ -288,6 +305,36 @@ else:
         self.assertNotIn(b"Host is running (boot mode)", stderr)
         self.assertNotIn(b"\x1b", stderr)
 
+    def prepare_admin_uninstall_install(self) -> None:
+        self.install_dir.mkdir(parents=True)
+        self._write_executable(self.cli_path, self.cli_source)
+
+    def test_admin_uninstall_routes_to_updater_and_propagates_exit_7(self) -> None:
+        self.prepare_admin_uninstall_install()
+        returncode, _stdout, stderr = self.run_installer(
+            mode="admin-uninstall", purge=True, admin_uninstall_exit=7,
+        )
+
+        self.assertEqual(returncode, 7, stderr.decode(errors="replace"))
+        self.assertIn(
+            f"uninstall-admin-host {self.profile_dir} {self.install_dir.resolve()} "
+            "macos-aarch64 fixture-account boot 1",
+            self.updater_log.read_text(),
+        )
+        self.assertFalse(self.cli_log.exists(), "uninstall must use the updater handoff")
+
+    def test_admin_uninstall_passes_purge_zero_by_default(self) -> None:
+        self.prepare_admin_uninstall_install()
+        returncode, _stdout, stderr = self.run_installer(mode="admin-uninstall")
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(
+            f"uninstall-admin-host {self.profile_dir} {self.install_dir.resolve()} "
+            "macos-aarch64 fixture-account boot 0",
+            self.updater_log.read_text(),
+        )
+        self.assertFalse(self.cli_log.exists(), "uninstall must use the updater handoff")
+
 
     def prepare_old_service_install(self) -> None:
         self.install_dir.mkdir(parents=True)
@@ -301,7 +348,7 @@ else:
 
     def test_retry_observes_old_service_with_bundled_updater(self) -> None:
         self.prepare_old_service_install()
-        returncode, _stdout, stderr = self.run_installer()
+        returncode, stdout, stderr = self.run_installer()
 
         self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
         self.assertIn(b"Installed Lomi Remote v1.2.3", stderr)
@@ -348,6 +395,261 @@ else:
         self.assertIn(b"selected account host returned malformed maintenance status", stderr)
         self.assertNotIn("install-release-admin-boot ", self.updater_log.read_text())
         self.assertNotIn(b"Installed Lomi Remote", stderr)
+
+
+class UnixRetainedProfileInstallerTests(unittest.TestCase):
+    """Exercise Unix installer schema selection without an installed CLI."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="lomi-retained-profile-install-")
+        self.directory = Path(self.temporary.name)
+        self.bundle = self.directory / "bundle"
+        self.bundle.mkdir()
+        self.profile_dir = self.directory / "retained-profile"
+        self.profile_dir.mkdir(mode=0o700)
+        os.chmod(self.profile_dir, 0o700)
+        (self.profile_dir / "host.sqlite3").write_bytes(b"retained SQLite fixture")
+        os.chmod(self.profile_dir / "host.sqlite3", 0o600)
+        self.install_dir = self.directory / "install"
+        self.updater_log = self.directory / "updater-arguments.jsonl"
+        self.cli_log = self.directory / "cli-arguments.jsonl"
+
+        cli_source = """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ['FIXTURE_CLI_LOG'], 'a', encoding='utf-8') as log:
+    log.write(json.dumps(args) + '\\n')
+if 'maintenance' in args:
+    print(os.environ['FIXTURE_MAINTENANCE_RESPONSE'])
+elif 'daemon' in args:
+    operation = args[args.index('daemon') + 1]
+    if operation not in ('start', 'stop'):
+        raise SystemExit(2)
+else:
+    raise SystemExit(2)
+"""
+        updater_source = """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+command = args[0] if args else ''
+with open(os.environ['FIXTURE_UPDATER_LOG'], 'a', encoding='utf-8') as log:
+    log.write(json.dumps(args) + '\\n')
+if command == 'root-pin':
+    print(%r)
+elif command == 'release-recovery-needed':
+    print(os.environ.get('FIXTURE_RECOVERY_STATE', 'clear'))
+elif command == 'recover-release':
+    print(os.environ.get('FIXTURE_RECOVERY_SCHEMA', '14'))
+elif command == 'initialize-release':
+    pathlib.Path(args[1]).mkdir(parents=True, exist_ok=True)
+elif command == 'status-release' or command == 'validate-install-dir':
+    pass
+elif command == 'maintenance-schema':
+    response = json.load(sys.stdin)
+    value = response['result']['Ok']['value']
+    print(value['profileSchema'] + '\\n' + value['activeTerminals'])
+elif command == 'install-release':
+    install = pathlib.Path(args[5])
+    install.mkdir(parents=True, exist_ok=True)
+    cli = install / 'lomiremote'
+    cli.write_text(%r, encoding='utf-8')
+    cli.chmod(0o700)
+else:
+    print('unexpected updater command: ' + command, file=sys.stderr)
+    raise SystemExit(2)
+""" % (ROOT_PIN, cli_source)
+        updater = self.bundle / "lomi-update-trust"
+        updater.write_text(updater_source, encoding="utf-8")
+        updater.chmod(0o700)
+
+        rendered = TEMPLATE.read_text(encoding="utf-8")
+        replacements = {
+            "@@RELEASE_ORIGIN_SHELL@@": "'https://example.test/releases/'",
+            "@@VERSION_SHELL@@": "'1.2.3'",
+            "@@TARGET_NAME_SHELL@@": "'linux/x86_64/lomiremote'",
+            "@@PLATFORM_SHELL@@": "'linux-x86_64'",
+            "@@ROOT_SHA256_SHELL@@": f"'{ROOT_PIN}'",
+            "@@TEAM_ID_SHELL@@": "'TESTTEAM'",
+            "GRACE_SECONDS=20": "GRACE_SECONDS=0",
+        }
+        for placeholder, value in replacements.items():
+            self.assertIn(placeholder, rendered)
+            rendered = rendered.replace(placeholder, value)
+        self.installer_path = self.bundle / "install.sh"
+        self.installer_path.write_text(rendered, encoding="utf-8")
+        self.installer_path.chmod(0o700)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def run_installer(self, *, recovery_state: str = "clear") -> tuple[int, bytes, bytes]:
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(self.directory),
+            "LOMI_PROFILE_DIR": str(self.profile_dir),
+            "LOMI_INSTALL_DIR": str(self.install_dir),
+            "FIXTURE_UPDATER_LOG": str(self.updater_log),
+            "FIXTURE_CLI_LOG": str(self.cli_log),
+            "FIXTURE_RECOVERY_STATE": recovery_state,
+            "FIXTURE_RECOVERY_SCHEMA": "14",
+            "FIXTURE_MAINTENANCE_RESPONSE": json.dumps(MAINTENANCE_RESPONSE),
+            "TERM": "dumb",
+        })
+        result = subprocess.run(
+            ["/bin/sh", str(self.installer_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+            timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def updater_calls(self) -> list[list[str]]:
+        return [json.loads(line) for line in self.updater_log.read_text().splitlines()]
+
+    def install_call(self) -> list[str]:
+        return next(call for call in self.updater_calls() if call[0] == "install-release")
+
+    def test_retained_profile_without_cli_uses_auto_schema_argument(self) -> None:
+        self.assertFalse((self.install_dir / "lomiremote").exists())
+        self.assertFalse((self.profile_dir / "service-registration.json").exists())
+
+        returncode, stdout, stderr = self.run_installer()
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(
+            b"The updater will read any retained SQLite schema under the native owner lock",
+            stderr,
+        )
+        self.assertIn(b"Complete account, workspace and sharing setup", stdout)
+        install = self.install_call()
+        self.assertEqual(install[7], "-")
+        self.assertEqual(install[8], "1.2.3")
+        self.assertFalse(self.cli_log.exists(), "offline install must not invoke a missing CLI")
+
+    def test_authenticated_schema_hint_remains_numeric(self) -> None:
+        self.install_dir.mkdir(mode=0o700)
+        cli = self.install_dir / "lomiremote"
+        cli.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args=sys.argv[1:]\n"
+            "with open(os.environ['FIXTURE_CLI_LOG'],'a') as log: log.write(json.dumps(args)+'\\n')\n"
+            "if 'maintenance' in args: print(os.environ['FIXTURE_MAINTENANCE_RESPONSE'])\n",
+            encoding="utf-8",
+        )
+        cli.chmod(0o700)
+
+        returncode, _stdout, stderr = self.run_installer()
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertEqual(self.install_call()[7], "14")
+        cli_calls = [json.loads(line) for line in self.cli_log.read_text().splitlines()]
+        self.assertTrue(any("maintenance" in call for call in cli_calls))
+        self.assertTrue(any("daemon" in call and "stop" in call for call in cli_calls))
+        self.assertTrue(any("daemon" in call and "start" in call for call in cli_calls))
+
+    def test_recovery_schema_remains_numeric_without_an_installed_cli(self) -> None:
+        returncode, _stdout, stderr = self.run_installer(recovery_state="pending")
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertEqual(self.install_call()[7], "14")
+        self.assertTrue(any(call[0] == "recover-release" for call in self.updater_calls()))
+
+
+@unittest.skipUnless(REAL_UPDATER, "requires the compiled release-root updater")
+class RetainedProfileUpdaterTests(unittest.TestCase):
+    """Drive install-release through the compiled Unix updater CLI."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.updater = Path(REAL_UPDATER or "")
+        if not cls.updater.is_file():
+            raise unittest.SkipTest("compiled release-root updater is not available")
+        try:
+            result = subprocess.run(
+                [str(cls.updater), "root-pin"], capture_output=True, timeout=10, check=False,
+            )
+        except OSError as error:
+            raise unittest.SkipTest(f"compiled updater cannot run on this build host: {error}")
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.decode(errors="replace"))
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="lomi-retained-profile-updater-")
+        self.directory = Path(self.temporary.name).resolve()
+        self.profile_dir = self.directory / "profile"
+        self.profile_dir.mkdir(mode=0o700)
+        os.chmod(self.profile_dir, 0o700)
+        database = self.profile_dir / "host.sqlite3"
+        connection = sqlite3.connect(database)
+        connection.execute("PRAGMA user_version = 14")
+        connection.commit()
+        connection.close()
+        os.chmod(database, 0o600)
+        self.install_dir = self.directory / "install"
+        self.install_dir.mkdir(mode=0o700)
+        self.trust_dir = self.directory / "trust"
+        initialized = subprocess.run(
+            [str(self.updater), "initialize-release", str(self.trust_dir)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        self.assertFalse((self.profile_dir / "service-registration.json").exists())
+        self.assertFalse((self.install_dir / "lomiremote").exists())
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def install_attempt(self, schema: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                str(self.updater), "install-release", str(self.trust_dir),
+                "http://example.test/releases/", "linux/x86_64/lomiremote",
+                str(self.profile_dir), str(self.install_dir), "linux-x86_64",
+                schema, "0.1.4",
+            ],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+
+    def test_auto_schema_reads_retained_database_without_installed_cli(self) -> None:
+        result = self.install_attempt("-")
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            b"release origin must be a credential-free HTTPS directory URL",
+            output,
+        )
+        self.assertNotIn(b"maintenance profile schema does not match", output)
+        self.assertNotIn(b"InvalidDigit", output)
+        self.assertFalse((self.install_dir / "active").exists())
+
+    def test_numeric_schema_hint_mismatch_still_fails_before_transport(self) -> None:
+        result = self.install_attempt("13")
+        output = result.stdout + result.stderr
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            b"maintenance profile schema does not match the owner-locked database",
+            output,
+        )
+        self.assertNotIn(b"release origin must be a credential-free HTTPS directory URL", output)
+        self.assertFalse((self.install_dir / "active").exists())
 
 
 if __name__ == "__main__":

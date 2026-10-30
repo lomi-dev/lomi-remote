@@ -19,7 +19,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::MetadataExt},
     },
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -269,6 +269,18 @@ pub fn run_admin_host(
     selected_account: &str,
 ) -> Result<String> {
     boot::run_admin_host(profile, executable, operation, mode, selected_account)
+}
+
+/// Inspect whether the selected administrator-managed Host is active without
+/// formatting the native service observation as user-facing status text.
+pub fn inspect_admin_host_active(
+    profile: &Path,
+    executable: &Path,
+    selected_account: &str,
+    mode: AdminHostMode,
+) -> Result<bool> {
+    boot::inspect_admin_host_typed(profile, executable, selected_account, mode)
+        .map(|inspection| inspection.active)
 }
 
 /// Opaque prior custody state retained while the selected boot service's
@@ -597,7 +609,10 @@ fn uninstall_files(
 
 // No shell. Both output streams are nonblocking and capped; on failure we kill
 // and reap the still-owned Child, never a remembered/reused PID.
-pub(super) fn bounded(command: &mut Command, timeout: Duration) -> Result<Option<String>> {
+fn bounded_result(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     // Reject inherited auto-reaping and custom reapers before creating children.
     // A library must not reset process-global dispositions behind its caller.
     crate::process::require_child_ownership().map_err(|_| Error::Manager)?;
@@ -659,15 +674,7 @@ pub(super) fn bounded(command: &mut Command, timeout: Duration) -> Result<Option
                         }
                     }
                 }
-                return if status.success() {
-                    String::from_utf8(output)
-                        .map(Some)
-                        .map_err(|_| Error::Manager)
-                } else if status.code() == Some(113) {
-                    Ok(None)
-                } else {
-                    Err(Error::Manager)
-                };
+                return Ok((status, output, errors));
             }
             if Instant::now() >= deadline {
                 return Err(Error::Deadline);
@@ -699,6 +706,18 @@ pub(super) fn bounded(command: &mut Command, timeout: Duration) -> Result<Option
     }
     result
 }
+pub(super) fn bounded(command: &mut Command, timeout: Duration) -> Result<Option<String>> {
+    let (status, output, _) = bounded_result(command, timeout)?;
+    if status.success() {
+        String::from_utf8(output)
+            .map(Some)
+            .map_err(|_| Error::Manager)
+    } else if status.code() == Some(113) {
+        Ok(None)
+    } else {
+        Err(Error::Manager)
+    }
+}
 fn account() -> Result<String> {
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buffer = vec![0u8; 16384];
@@ -728,8 +747,78 @@ fn account() -> Result<String> {
     }
     Ok(name.to_owned())
 }
+fn valid_decimal_uid(value: &str) -> bool {
+    value
+        .parse::<u32>()
+        .is_ok_and(|uid| uid.to_string() == value)
+}
+
+fn valid_lomi_label(value: &str) -> bool {
+    value
+        .strip_prefix("dev.lomi.remote.")
+        .is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+/// Only the read-only per-user GUI queries used by this adapter may treat
+/// launchctl's translated GUI-domain error 125 as an unavailable domain.
+fn gui_query_absence_diagnostic(args: &[&str]) -> Option<&'static [u8]> {
+    match args {
+        ["print", target] => {
+            let target = target.strip_prefix("gui/")?;
+            let uid = match target.split_once('/') {
+                Some((uid, label)) if valid_lomi_label(label) => uid,
+                None => target,
+                _ => return None,
+            };
+            valid_decimal_uid(uid).then_some(
+                b"Could not print domain: 125: Domain does not support specified action\n",
+            )
+        }
+        ["print-disabled", domain] => {
+            let uid = domain.strip_prefix("gui/")?;
+            if valid_decimal_uid(uid) {
+                Some(b"Could not print cache: 125: Domain does not support specified action\n")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn classify_manager_result(
+    args: &[&str],
+    success: bool,
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Option<String>> {
+    if success {
+        return String::from_utf8(stdout.to_vec())
+            .map(Some)
+            .map_err(|_| Error::Manager);
+    }
+    if code == Some(113) {
+        return Ok(None);
+    }
+    if code == Some(125) && stdout.is_empty() && gui_query_absence_diagnostic(args) == Some(stderr)
+    {
+        return Ok(None);
+    }
+    Err(Error::Manager)
+}
+
 pub(super) fn manager(args: &[&str]) -> Result<Option<String>> {
-    bounded(Command::new("/bin/launchctl").args(args), DEADLINE)
+    let (status, stdout, stderr) = bounded_result(
+        Command::new("/bin/launchctl").args(args).current_dir("/"),
+        DEADLINE,
+    )?;
+    classify_manager_result(args, status.success(), status.code(), &stdout, &stderr)
 }
 pub(super) fn required(args: &[&str]) -> Result<()> {
     manager(args)?.ok_or(Error::Manager).map(|_| ())
@@ -766,9 +855,9 @@ pub(super) fn disabled_override(domain: &str, label: &str) -> Result<Option<bool
 }
 
 /// Query a per-user launchd override while distinguishing a logged-out GUI
-/// domain (launchctl's exact exit-113 result) from malformed output or manager
-/// failure. `None` means the domain is unavailable; `Some(None)` means its
-/// label has no explicit override.
+/// domain (launchctl's exit-113 result or its exact translated exit-125
+/// diagnostic) from malformed output or manager failure. `None` means the
+/// domain is unavailable; `Some(None)` means its label has no explicit override.
 pub(super) fn available_disabled_override(
     domain: &str,
     label: &str,
@@ -904,21 +993,32 @@ fn observation(text: &str, target: &str, path: &str, reg: &Registration) -> Resu
         } else if let Some(value) = line.strip_prefix("\tstate = ")
             && (!matches!(
                 value,
-                "running" | "not running" | "waiting" | "spawn scheduled" | "SIGTERMed"
+                "running"
+                    | "not running"
+                    | "waiting"
+                    | "spawn scheduled"
+                    | "spawning"
+                    | "xpcproxy"
+                    | "SIGTERMed"
             ) || state.replace(value).is_some())
         {
             return Err(Error::Conflict);
         }
     }
-    if !seen_path
-        || !seen_program
-        || !seen_args
-        || state.is_none()
-        || state == Some("running") && pid.is_none()
+    if !seen_path || !seen_program || !seen_args || state.is_none() {
+        return Err(Error::Conflict);
+    }
+    let running = state == Some("running");
+    if (running && pid.is_none())
+        || (pid.is_some()
+            && !matches!(
+                state,
+                Some("running" | "spawning" | "xpcproxy" | "SIGTERMed")
+            ))
     {
         return Err(Error::Conflict);
     }
-    Ok(pid)
+    Ok(if running { pid } else { None })
 }
 
 #[cfg(test)]
@@ -928,6 +1028,7 @@ mod launchctl_observation_tests {
     const EXECUTABLE: &str = "/Applications/Lomi.app/Contents/MacOS/lomi";
     const PROFILE: &str = "/Users/alice/Library/Application Support/Lomi/Profile";
     const LABEL: &str = "dev.lomi.remote.test";
+    const VALID_LABEL: &str = "dev.lomi.remote.0123456789abcdef0123456789abcdef";
     const PLIST_PATH: &str = "/Users/alice/Library/LaunchAgents/dev.lomi.remote.test.plist";
     const TARGET: &str = "gui/501/dev.lomi.remote.test";
 
@@ -1025,9 +1126,183 @@ mod launchctl_observation_tests {
             );
         }
     }
+
+    #[test]
+    fn sigtermed_login_job_with_retained_pid_is_not_ready() {
+        let reg = registration();
+        let output = running_launchctl_output().replace("state = running", "state = SIGTERMed");
+        assert_eq!(
+            observe_manager_output(Some(output), TARGET, PLIST_PATH, &reg),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            observe_manager_output(None, TARGET, PLIST_PATH, &reg),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn spawning_login_job_with_optional_pid_is_present_but_not_ready() {
+        let reg = registration();
+        for output in [
+            running_launchctl_output().replace("state = running", "state = spawning"),
+            running_launchctl_output()
+                .replace("state = running", "state = spawning")
+                .replace("\tpid = 55784\n", ""),
+        ] {
+            assert_eq!(
+                observe_manager_output(Some(output), TARGET, PLIST_PATH, &reg),
+                Ok(Some(None))
+            );
+        }
+    }
+
+    #[test]
+    fn xpcproxy_login_job_with_observed_pid_is_present_but_not_ready() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        for output in [
+            fixture
+                .replace("state = running", "state = xpcproxy")
+                .replace("pid = 55784", "pid = 22359"),
+            fixture
+                .replace("state = running", "state = xpcproxy")
+                .replace("\tpid = 55784\n", ""),
+        ] {
+            assert_eq!(
+                observe_manager_output(Some(output), TARGET, PLIST_PATH, &reg),
+                Ok(Some(None))
+            );
+        }
+    }
+
+    #[test]
+    fn login_observation_rejects_other_nonrunning_and_invalid_pids() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        let cases = [
+            fixture.replace("state = running", "state = waiting"),
+            fixture.replace("state = running", "state = new-launchd-state"),
+            fixture.replace("pid = 55784", "pid = 0"),
+            fixture.replace(
+                "\tlast exit code = 0",
+                "\tpid = 55785\n\tlast exit code = 0",
+            ),
+            fixture.replace("\tpid = 55784\n", ""),
+        ];
+        for output in cases {
+            assert!(matches!(
+                observation(&output, TARGET, PLIST_PATH, &reg),
+                Err(Error::Conflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn manager_accepts_exact_gui_domain_unavailable_diagnostics() {
+        let print_diagnostic =
+            b"Could not print domain: 125: Domain does not support specified action\n";
+        let cache_diagnostic =
+            b"Could not print cache: 125: Domain does not support specified action\n";
+
+        assert_eq!(
+            classify_manager_result(
+                &["print", "gui/503"],
+                false,
+                Some(125),
+                b"",
+                print_diagnostic,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_manager_result(
+                &["print", &format!("gui/503/{VALID_LABEL}")],
+                false,
+                Some(125),
+                b"",
+                print_diagnostic,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_manager_result(
+                &["print-disabled", "gui/503"],
+                false,
+                Some(125),
+                b"",
+                cache_diagnostic,
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn manager_keeps_exit_113_and_rejects_other_exit_125_results() {
+        assert_eq!(
+            classify_manager_result(&["print", "system"], false, Some(113), b"", b""),
+            Ok(None)
+        );
+
+        let print_diagnostic =
+            b"Could not print domain: 125: Domain does not support specified action\n";
+        let cache_diagnostic =
+            b"Could not print cache: 125: Domain does not support specified action\n";
+        let cases: &[(&[&str], &[u8], &[u8], i32)] = &[
+            // Read-only diagnostics for unrelated launchctl domains stay strict.
+            (&["print", "system"], b"", print_diagnostic, 125),
+            (&["print", "user/503"], b"", print_diagnostic, 125),
+            (&["print-disabled", "system"], b"", cache_diagnostic, 125),
+            // Mutating commands are never treated as domain absence.
+            (
+                &["bootstrap", "system", "/tmp/job.plist"],
+                b"",
+                print_diagnostic,
+                125,
+            ),
+            // A valid query must also have exact streams and exact diagnostics.
+            (&["print", "gui/503"], b"unexpected", print_diagnostic, 125),
+            (
+                &["print", "gui/503"],
+                b"",
+                b"Could not print domain: 125",
+                125,
+            ),
+            (
+                &["print", "gui/503"],
+                b"",
+                b"Could not print cache: 125: Domain does not support specified action\n",
+                125,
+            ),
+            (
+                &["print", "gui/503/dev.lomi.remote.invalid"],
+                b"",
+                print_diagnostic,
+                125,
+            ),
+            // Permission errors remain manager failures even for a valid GUI query.
+            (&["print", "gui/503"], b"", print_diagnostic, 1),
+        ];
+        for (args, stdout, stderr, code) in cases {
+            assert_eq!(
+                classify_manager_result(args, false, Some(*code), stdout, stderr),
+                Err(Error::Manager),
+                "unexpected result for launchctl arguments {args:?}"
+            );
+        }
+    }
 }
 pub(super) fn observe(target: &str, path: &str, reg: &Registration) -> Result<Option<Option<u32>>> {
-    manager(&["print", target])?
+    observe_manager_output(manager(&["print", target])?, target, path, reg)
+}
+
+fn observe_manager_output(
+    output: Option<String>,
+    target: &str,
+    path: &str,
+    reg: &Registration,
+) -> Result<Option<Option<u32>>> {
+    output
         .map(|text| observation(&text, target, path, reg))
         .transpose()
 }
@@ -1376,7 +1651,7 @@ pub(crate) fn inspect_read_only(
     )
     .map_err(service_observation_error)?;
     let Some(bytes) = existing else {
-        if plist.is_some() || manager.flatten().is_some() {
+        if plist.is_some() || manager.is_some() {
             return Err(PublicError::Conflict);
         }
         if binding.mode == ServiceMode::Manual {

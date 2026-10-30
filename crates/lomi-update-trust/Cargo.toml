@@ -27,6 +27,9 @@ url = "=2.5.8"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 lomi-platform = { path = "../lomi-platform" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+uuid = { version = "=1.26.1", features = ["v4"] }
+
 [build-dependencies]
 sha2 = "=0.10.9"
 

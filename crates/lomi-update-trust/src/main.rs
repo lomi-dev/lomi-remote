@@ -1,6 +1,22 @@
+#[cfg(all(feature = "release-root", target_os = "macos"))]
+mod admin_host_uninstall;
+
 #[cfg(any(unix, windows))]
 fn main() -> lomi_update_trust::Result<()> {
+    #[cfg(unix)]
+    lomi_platform::process::initialize_child_ownership()?;
+
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(all(feature = "release-root", target_os = "macos"))]
+    if args.get(1).map(String::as_str) == Some("uninstall-admin-host") {
+        if args.len() != 8 {
+            return Err(
+                "usage: uninstall-admin-host PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT MODE PURGE"
+                    .into(),
+            );
+        }
+        return admin_host_uninstall::run(&args[2..]);
+    }
     #[cfg(all(feature = "release-root", target_os = "macos"))]
     if args.get(1).map(String::as_str) == Some("prepare-admin-profile") {
         if args.len() != 4 {
@@ -220,31 +236,50 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
         }
         #[cfg(all(feature = "release-root", unix))]
         Some("install-release") if args.len() == 9 || args.len() == 10 => {
-            let profile_schema = args[8].parse::<u64>()?;
-            let mut store = TrustStore::open_embedded(Path::new(&args[2]))?;
-            let object = if let Some(version) = args.get(9) {
-                store
-                    .install_release_https_pinned(
-                        &args[3],
-                        &args[4],
-                        Path::new(&args[5]),
-                        Path::new(&args[6]),
-                        &args[7],
-                        profile_schema,
-                        version,
-                    )
-                    .await?
+            let profile_schema = if args[8] == "-" {
+                None
             } else {
-                store
-                    .install_release_https(
-                        &args[3],
-                        &args[4],
-                        Path::new(&args[5]),
-                        Path::new(&args[6]),
-                        &args[7],
-                        profile_schema,
-                    )
-                    .await?
+                Some(args[8].parse::<u64>()?)
+            };
+            let mut store = TrustStore::open_embedded(Path::new(&args[2]))?;
+            let object = match (profile_schema, args.get(9)) {
+                (None, expected_version) => {
+                    store
+                        .install_release_https_pinned_auto_schema(
+                            &args[3],
+                            &args[4],
+                            Path::new(&args[5]),
+                            Path::new(&args[6]),
+                            &args[7],
+                            expected_version.map(String::as_str),
+                        )
+                        .await?
+                }
+                (Some(profile_schema), Some(version)) => {
+                    store
+                        .install_release_https_pinned(
+                            &args[3],
+                            &args[4],
+                            Path::new(&args[5]),
+                            Path::new(&args[6]),
+                            &args[7],
+                            profile_schema,
+                            version,
+                        )
+                        .await?
+                }
+                (Some(profile_schema), None) => {
+                    store
+                        .install_release_https(
+                            &args[3],
+                            &args[4],
+                            Path::new(&args[5]),
+                            Path::new(&args[6]),
+                            &args[7],
+                            profile_schema,
+                        )
+                        .await?
+                }
             };
             println!(
                 "{}",
@@ -411,7 +446,7 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
         }
         _ => {
             #[cfg(feature = "release-root")]
-            let usage = "usage: lomi-update-trust root-pin | maintenance-schema | validate-install-dir INSTALL_DIR | verify-installed-maintenance-cli INSTALL_DIR PLATFORM | verify-admin-installed-maintenance-cli INSTALL_DIR PLATFORM | release-recovery-needed INSTALL_DIR | recover-release PROFILE_DIR INSTALL_DIR PLATFORM | install-release TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | install-release-pair TRUST_DIR HTTPS_ORIGIN PRIMARY COMPANION PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | rollback-release TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA | uninstall-release PROFILE_DIR INSTALL_DIR | file-security install|upgrade --owner-sid SID --confirm-system-service HTTPS_ORIGIN TARGET PLATFORM | file-security uninstall --owner-sid SID | prepare-admin-profile ACCOUNT PROFILE | admin-host-status PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | admin-macos-profile ACCOUNT | admin-macos-install-dir ACCOUNT | bind-admin-boot-profile PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] | validate-admin-boot-install-dir INSTALL_DIR | admin-boot-recovery-needed INSTALL_DIR | recover-release-admin-boot PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | install-release-admin-boot TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE [EXPECTED_VERSION]] | rollback-release-admin-boot TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE] | uninstall-release-admin-boot PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] (MODE: manual|login|boot; omitted means boot)";
+            let usage = "usage: lomi-update-trust root-pin | maintenance-schema | validate-install-dir INSTALL_DIR | verify-installed-maintenance-cli INSTALL_DIR PLATFORM | verify-admin-installed-maintenance-cli INSTALL_DIR PLATFORM | release-recovery-needed INSTALL_DIR | recover-release PROFILE_DIR INSTALL_DIR PLATFORM | install-release TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA|- [EXPECTED_VERSION] | install-release-pair TRUST_DIR HTTPS_ORIGIN PRIMARY COMPANION PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | rollback-release TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA | uninstall-release PROFILE_DIR INSTALL_DIR | file-security install|upgrade --owner-sid SID --confirm-system-service HTTPS_ORIGIN TARGET PLATFORM | file-security uninstall --owner-sid SID | prepare-admin-profile ACCOUNT PROFILE | admin-host-status PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | admin-macos-profile ACCOUNT | admin-macos-install-dir ACCOUNT | bind-admin-boot-profile PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] | validate-admin-boot-install-dir INSTALL_DIR | admin-boot-recovery-needed INSTALL_DIR | recover-release-admin-boot PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | install-release-admin-boot TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE [EXPECTED_VERSION]] | rollback-release-admin-boot TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE] | uninstall-release-admin-boot PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] (MODE: manual|login|boot; omitted means boot)";
             #[cfg(not(feature = "release-root"))]
             let usage = "usage: lomi-update-trust initialize DIR ROOT | status DIR | update DIR METADATA TARGETS [TARGET] | activate DIR METADATA TARGETS TARGET INSTALL_DIR";
             return Err(usage.into());

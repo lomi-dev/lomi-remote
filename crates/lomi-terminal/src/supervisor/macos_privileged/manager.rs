@@ -1169,7 +1169,13 @@ fn parse_observation(
             if seen_state
                 || !matches!(
                     value,
-                    "running" | "not running" | "waiting" | "spawn scheduled" | "SIGTERMed"
+                    "running"
+                        | "not running"
+                        | "waiting"
+                        | "spawn scheduled"
+                        | "spawning"
+                        | "xpcproxy"
+                        | "SIGTERMed"
                 )
             {
                 return Err(Error::CleanupFailed);
@@ -1194,9 +1200,120 @@ fn parse_observation(
         || !seen_arguments
         || !seen_state
         || seen_pid != pid.is_some()
-        || running != pid.is_some()
+        || (running && pid.is_none())
+        || (pid.is_some()
+            && !matches!(
+                state,
+                Some("running" | "spawning" | "xpcproxy" | "SIGTERMed")
+            ))
     {
         return Err(Error::CleanupFailed);
     }
     Ok(ManagerObservation)
+}
+
+#[cfg(test)]
+mod launchctl_observation_tests {
+    use super::*;
+
+    const TARGET: &str = "system/dev.lomi.pty.test";
+    const PLIST: &str = "/Library/LaunchDaemons/dev.lomi.pty.test.plist";
+    const EXECUTABLE: &str = "/Library/LomiRemote/lomiremote";
+    const REGISTRATION: &str = "/var/db/lomi/registration.json";
+    const GENERATION: &str = "/var/db/lomi/generations/0123456789abcdef0123456789abcdef";
+
+    fn launchctl_output(state: &str, pids: &[&str]) -> String {
+        let mut output = format!(
+            "{TARGET} = {{\n\
+\tactive count = 1\n\
+\tpath = {PLIST}\n\
+\ttype = LaunchDaemon\n\
+\tstate = {state}\n\
+\tprogram = {EXECUTABLE}\n\
+\targuments = {{\n\
+\t\t{EXECUTABLE}\n\
+\t\t{CONTROLLER_ARGUMENT}\n\
+\t\t{REGISTRATION}\n\
+\t\t{GENERATION}\n\
+\t}}\n"
+        );
+        for pid in pids {
+            output.push_str(&format!("\tpid = {pid}\n"));
+        }
+        output.push_str("}\n");
+        output
+    }
+
+    #[test]
+    fn sigtermed_pty_manager_with_retained_pid_remains_present() {
+        let output = launchctl_output("SIGTERMed", &["55784"]);
+        assert!(matches!(
+            parse_observation(
+                &output,
+                TARGET,
+                Path::new(PLIST),
+                Path::new(EXECUTABLE),
+                Path::new(REGISTRATION),
+                Path::new(GENERATION),
+            ),
+            Ok(ManagerObservation)
+        ));
+    }
+
+    #[test]
+    fn spawning_pty_manager_with_optional_pid_remains_present() {
+        for pids in [&[][..], &["55784"][..]] {
+            let output = launchctl_output("spawning", pids);
+            assert!(matches!(
+                parse_observation(
+                    &output,
+                    TARGET,
+                    Path::new(PLIST),
+                    Path::new(EXECUTABLE),
+                    Path::new(REGISTRATION),
+                    Path::new(GENERATION),
+                ),
+                Ok(ManagerObservation)
+            ));
+        }
+    }
+
+    #[test]
+    fn xpcproxy_pty_manager_with_observed_pid_remains_present() {
+        let output = launchctl_output("xpcproxy", &["22359"]);
+        assert!(matches!(
+            parse_observation(
+                &output,
+                TARGET,
+                Path::new(PLIST),
+                Path::new(EXECUTABLE),
+                Path::new(REGISTRATION),
+                Path::new(GENERATION),
+            ),
+            Ok(ManagerObservation)
+        ));
+    }
+
+    #[test]
+    fn pty_manager_observation_rejects_other_nonrunning_and_invalid_pids() {
+        for output in [
+            launchctl_output("waiting", &["55784"]),
+            launchctl_output("new-launchd-state", &[]),
+            launchctl_output("SIGTERMed", &["0"]),
+            launchctl_output("SIGTERMed", &["55784", "55785"]),
+            launchctl_output("running", &[]),
+        ] {
+            assert!(matches!(
+                parse_observation(
+                    &output,
+                    TARGET,
+                    Path::new(PLIST),
+                    Path::new(EXECUTABLE),
+                    Path::new(REGISTRATION),
+                    Path::new(GENERATION),
+                ),
+                Err(Error::CleanupFailed)
+            ));
+        }
+    }
 }

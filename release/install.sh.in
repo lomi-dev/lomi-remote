@@ -267,9 +267,11 @@ admin_boot_install() {
             || fail 'the installed CLI does not match its verified activation; restore the signed release before uninstall, or revoke this Host from the central Lomi account access settings'
         verify_admin_cli \
             || fail 'the installed protected CLI is missing or untrusted; restore it with a verified installer and retry. If recovery cannot restore it, revoke this Host from the central Lomi account access settings.'
-        set --
-        if [ "$lomi_purge_seen" -eq 1 ]; then set -- --purge; fi
-        exec "$CLI" --profile-dir "$PROFILE_DIR" uninstall --confirm "$@"
+        purge=0
+        if [ "$lomi_purge_seen" -eq 1 ]; then purge=1; fi
+        exec "$UPDATER" uninstall-admin-host \
+            "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" \
+            "$ADMIN_HOST_MODE" "$purge"
     fi
 
     recovery_schema=
@@ -576,7 +578,7 @@ case "$recovery_state" in
     *) fail 'updater returned an invalid activation recovery state' ;;
 esac
 
-profile_schema=${recovery_schema:-0}
+profile_schema=${recovery_schema:--}
 active_terminals=0
 service_managed=0
 profile_owner_authenticated=0
@@ -619,7 +621,7 @@ elif [ "$profile_exists" -eq 1 ]; then
         if [ -e "$record" ] || [ -L "$record" ]; then
             fail 'profile-owned service registration cannot be authenticated without the installed CLI'
         fi
-        printf '%s\n' 'No authenticated live profile owner is available. The updater will continue only if the owner-locked profile has no SQLite database; otherwise no activation occurs.' >&2
+        printf '%s\n' 'No authenticated live profile owner is available. The updater will read any retained SQLite schema under the native owner lock and enforce the signed release compatibility policy.' >&2
     fi
 fi
 

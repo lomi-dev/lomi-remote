@@ -868,6 +868,27 @@ def main() -> None:
         "-p", "lomi-update-trust", "--features", updater_features,
         "--bin", "lomi-update-trust",
     ], env=env)
+    if platform.startswith("macos-"):
+        run([
+            "cargo", "test", "--locked", "--release", "--target", target,
+            "-p", "lomi-platform", "--lib",
+        ], env=env)
+        run([
+            "cargo", "test", "--locked", "--release", "--target", target,
+            "-p", "lomi-terminal", "--lib", "launchctl_observation_tests",
+        ], env=env)
+    if not platform.startswith("windows-"):
+        # Keep the same dependency features as the shipped CLI when testing
+        # its Host dependency, rather than compiling a second feature graph.
+        host_test_features = ",".join(
+            "lomiremote/" + feature
+            for feature in app_build[app_build.index("--features") + 1].split(",")
+        )
+        run([
+            "cargo", "test", "--locked", "--release", "--target", target,
+            "-p", "lomi-host", "-p", "lomiremote", "--lib",
+            "--features", host_test_features, "unix::auth::tests",
+        ], env=env)
     if local_test_ca_path is not None:
         run([
             "cargo", "test", "--locked", "--release", "--target", target,
