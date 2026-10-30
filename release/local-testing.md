@@ -58,6 +58,9 @@ an existing local cache when building macOS if desired.
 `assemble` requires both completed bundles for the same snapshot and version.
 Each source snapshot gets immutable artifact URLs. Promotion changes the
 local latest pointer and retains older pinned artifacts.
+Use `assemble --stage-only` to prepare a candidate without changing the
+local latest version, for example while checking an older installation.
+Run `assemble --snapshot ID` afterward to promote the verified candidate.
 
 The build prints its snapshot ID. To repeat a captured build after editing
 the working tree, pass `--snapshot ID` to both `build` and `assemble`.

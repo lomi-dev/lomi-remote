@@ -102,6 +102,25 @@ class LocalReleaseTests(unittest.TestCase):
         return publish_release.write_index(
             flat, files, ["linux-x86_64"], "v1.2.3", self.config, self.paths["keys"])
 
+    def test_incomplete_macos_bundle_retains_notarization_evidence(self):
+        for suffix in (".notarization.pending", ".notarization.json", ".notarization-log.json"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory(dir=self.base) as temporary:
+                output = Path(temporary) / "bundle-output"
+                output.mkdir()
+                evidence = output / ("release.zip" + suffix)
+                evidence.write_bytes(b"preserved evidence")
+                with self.assertRaisesRegex(driver.LocalReleaseError, "notarization evidence"):
+                    driver._remove_incomplete_bundle(output, "macos-aarch64")
+                self.assertEqual(evidence.read_bytes(), b"preserved evidence")
+
+    def test_incomplete_bundle_without_notarization_can_be_rebuilt(self):
+        with tempfile.TemporaryDirectory(dir=self.base) as temporary:
+            output = Path(temporary) / "bundle-output"
+            output.mkdir()
+            (output / "partial.zip").write_bytes(b"incomplete archive")
+            driver._remove_incomplete_bundle(output, "macos-aarch64")
+            self.assertFalse(output.exists())
+
     def test_tracked_parent_symlink_cannot_copy_data_outside_checkout(self):
         with tempfile.TemporaryDirectory(dir=self.base) as temporary:
             base = Path(temporary)

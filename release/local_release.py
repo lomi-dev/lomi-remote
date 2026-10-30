@@ -584,6 +584,15 @@ def selected_snapshot(state, version=None, snapshot_id=None):
     return {**descriptor, "path": source}
 
 
+def _remove_incomplete_bundle(output: Path, platform_name: str) -> None:
+    if platform_name.startswith("macos-") and any(
+        path.name.endswith((".notarization.pending", ".notarization.json", ".notarization-log.json"))
+        for path in output.rglob("*")
+    ):
+        fail("incomplete macOS bundle contains notarization evidence; retain it for inspection before retrying")
+    shutil.rmtree(output)
+
+
 def build(platform_name: str, state: Path | None = None, *, version: str | None = None,
           snapshot_id: str | None = None,
           ssh: str | None = None, ssh_options: tuple[str, ...] = ()) -> Path:
@@ -622,7 +631,7 @@ def _build(platform_name: str, state: Path | None = None, *, version: str | None
                            artifact_url=run_origin, revision=snapshot["snapshotRevision"], config=config):
             print(f"Reusing completed {platform_name} bundle: {output}")
             return output
-        shutil.rmtree(output)
+        _remove_incomplete_bundle(output, platform_name)
 
     if platform_name == "macos-aarch64":
         host_config = read_json(snapshot["path"] / "release/host-config.json", 64 * 1024)
@@ -855,7 +864,7 @@ def _promote(web_root: Path, candidate: Path, index: dict) -> None:
 
 
 def assemble(state: Path | None = None, *, version: str | None = None,
-             snapshot_id: str | None = None) -> Path:
+             snapshot_id: str | None = None, promote: bool = True) -> Path:
     paths = secure_state(state)
     config = local_config(paths)
     snapshot = selected_snapshot(state, version, snapshot_id)
@@ -879,7 +888,8 @@ def assemble(state: Path | None = None, *, version: str | None = None,
             fail("existing candidate path is not a real directory")
         index = _verify_candidate(candidate, version=version, tag=tag,
                                   platforms=selected, config=config)
-        _promote(web, candidate, index)
+        if promote:
+            _promote(web, candidate, index)
         print(f"Reused immutable local candidate: {candidate}")
         return candidate
 
@@ -894,7 +904,8 @@ def assemble(state: Path | None = None, *, version: str | None = None,
         except TypeError as error:
             fail(f"local assembly requires origin overrides in publish_release: {error}")
         _write_candidate(flat, index, candidate, version=version, tag=tag, config=config)
-    _promote(web, candidate, index)
+    if promote:
+        _promote(web, candidate, index)
     print(f"Assembled immutable local candidate: {candidate}")
     return candidate
 
@@ -1121,6 +1132,8 @@ def _arguments(argv: list[str] | None = None):
     assemble_parser = commands.add_parser("assemble", help="make a local immutable candidate")
     assemble_parser.add_argument("--version", help="snapshot workspace version override")
     assemble_parser.add_argument("--snapshot", help="assemble a specific built source snapshot")
+    assemble_parser.add_argument("--stage-only", action="store_true",
+                                 help="prepare versioned artifacts without changing local latest")
 
     serve_parser = commands.add_parser("serve", help="serve loopback HTTPS on port 18443")
     serve_parser.add_argument("--ssh", help="open a reverse tunnel to a Linux test host")
@@ -1144,7 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
             build(args.platform, args.state, version=args.version, ssh=args.ssh,
                   ssh_options=tuple(args.ssh_option), snapshot_id=args.snapshot)
         elif args.command == "assemble":
-            assemble(args.state, version=args.version, snapshot_id=args.snapshot)
+            assemble(args.state, version=args.version, snapshot_id=args.snapshot,
+                     promote=not args.stage_only)
         elif args.command == "serve":
             serve(args.state, ssh=args.ssh, ssh_options=tuple(args.ssh_option))
         elif args.command == "install":
