@@ -1096,7 +1096,7 @@ fn executable_identity(
     }
     let parent_path = path.parent().ok_or(Error::Invalid)?;
     let name = path.file_name().ok_or(Error::Invalid)?;
-    let parent = Directory::open(parent_path, None, Some((selected_uid, selected_gid)))?;
+    let parent = Directory::open_executable_parent(parent_path, selected_uid, selected_gid)?;
     let encoded_name = c(name)?;
     let fd = unsafe {
         libc::openat(
@@ -1154,7 +1154,8 @@ fn executable_identity(
         return Err(Error::Conflict);
     }
     let after = file.metadata().map_err(|_| Error::Conflict)?;
-    let current_parent = Directory::open(parent_path, None, Some((selected_uid, selected_gid)))?;
+    let current_parent =
+        Directory::open_executable_parent(parent_path, selected_uid, selected_gid)?;
     let current_fd = unsafe {
         libc::openat(
             current_parent.0.as_raw_fd(),
@@ -1302,6 +1303,62 @@ fn hex(bytes: &[u8]) -> String {
 
 struct Directory(File);
 
+#[derive(Clone, Copy)]
+enum RootLeafGroupPolicy {
+    /// Root-owned leaves managed by custody stay root:wheel.
+    Wheel,
+    /// Protected executable parents may use the installer's existing group.
+    Protected,
+}
+
+fn valid_directory_component(
+    is_directory: bool,
+    owner_uid: u32,
+    owner_gid: u32,
+    mode: u32,
+    final_component: bool,
+    final_owner: u32,
+    final_mode: Option<u32>,
+    accessible_user: Option<(u32, u32)>,
+    allow_profile_ancestors: bool,
+    root_leaf_group_policy: RootLeafGroupPolicy,
+) -> bool {
+    let owner_ok = if final_component {
+        owner_uid == final_owner
+    } else if allow_profile_ancestors {
+        owner_uid == 0 || owner_uid == final_owner
+    } else {
+        owner_uid == 0
+    };
+    let group_ok = if !final_component || final_owner != 0 {
+        true
+    } else {
+        match root_leaf_group_policy {
+            RootLeafGroupPolicy::Wheel => owner_gid == 0,
+            RootLeafGroupPolicy::Protected => true,
+        }
+    };
+
+    is_directory
+        && owner_ok
+        && group_ok
+        && mode & 0o022 == 0
+        && (!final_component || final_mode.is_none_or(|expected| mode & 0o777 == expected))
+        && accessible_user.is_none_or(|(uid, gid)| {
+            access_bits_from_metadata(owner_uid, owner_gid, mode, uid, gid) & 0o1 != 0
+        })
+}
+
+fn access_bits_from_metadata(owner_uid: u32, owner_gid: u32, mode: u32, uid: u32, gid: u32) -> u32 {
+    if owner_uid == uid {
+        (mode >> 6) & 0o7
+    } else if owner_gid == gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    }
+}
+
 impl Directory {
     fn open_optional_root(path: &Path, final_mode: Option<u32>) -> Result<Option<Self>> {
         if !path.is_absolute()
@@ -1425,7 +1482,25 @@ impl Directory {
         final_mode: Option<u32>,
         accessible_user: Option<(u32, u32)>,
     ) -> Result<Self> {
-        Self::open_with_owner(path, 0, final_mode, accessible_user, false)
+        Self::open_with_owner(
+            path,
+            0,
+            final_mode,
+            accessible_user,
+            false,
+            RootLeafGroupPolicy::Wheel,
+        )
+    }
+
+    fn open_executable_parent(path: &Path, selected_uid: u32, selected_gid: u32) -> Result<Self> {
+        Self::open_with_owner(
+            path,
+            0,
+            None,
+            Some((selected_uid, selected_gid)),
+            false,
+            RootLeafGroupPolicy::Protected,
+        )
     }
 
     fn open_profile(path: &Path, owner_uid: u32, owner_gid: u32) -> Result<Self> {
@@ -1435,6 +1510,7 @@ impl Directory {
             Some(STATE_MODE),
             Some((owner_uid, owner_gid)),
             true,
+            RootLeafGroupPolicy::Wheel,
         )
     }
 
@@ -1444,6 +1520,7 @@ impl Directory {
         final_mode: Option<u32>,
         accessible_user: Option<(u32, u32)>,
         allow_profile_ancestors: bool,
+        root_leaf_group_policy: RootLeafGroupPolicy,
     ) -> Result<Self> {
         if !path.is_absolute()
             || path
@@ -1473,24 +1550,20 @@ impl Directory {
             let next = unsafe { File::from_raw_fd(fd) };
             let metadata = next.metadata().map_err(|_| Error::Conflict)?;
             let final_component = index + 1 == components.len();
-            let owner_ok = if final_component {
-                metadata.uid() == final_owner
-            } else if allow_profile_ancestors {
-                metadata.uid() == 0 || metadata.uid() == final_owner
-            } else {
-                metadata.uid() == 0
-            };
             // Standard protected ancestors may be root:admin or root:daemon.
-            // Custody-owned leaves still use the exact root:wheel metadata.
-            let group_ok = !final_component || final_owner != 0 || metadata.gid() == 0;
-            if !metadata.is_dir()
-                || !owner_ok
-                || !group_ok
-                || metadata.mode() & 0o022 != 0
-                || final_mode.is_some_and(|mode| final_component && metadata.mode() & 0o777 != mode)
-                || accessible_user
-                    .is_some_and(|(uid, gid)| access_bits(&metadata, uid, gid) & 0o1 == 0)
-            {
+            // Custody-owned root leaves still use the exact root:wheel metadata.
+            if !valid_directory_component(
+                metadata.is_dir(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.mode(),
+                final_component,
+                final_owner,
+                final_mode,
+                accessible_user,
+                allow_profile_ancestors,
+                root_leaf_group_policy,
+            ) {
                 return Err(Error::Conflict);
             }
             crate::unix::reject_acl_grants(&next).map_err(|_| Error::Conflict)?;
@@ -1500,10 +1573,18 @@ impl Directory {
             return Err(Error::Conflict);
         }
         let metadata = current.metadata().map_err(|_| Error::Conflict)?;
-        if metadata.uid() != final_owner
-            || final_mode.is_some_and(|mode| metadata.mode() & 0o777 != mode)
-            || metadata.mode() & 0o022 != 0
-        {
+        if !valid_directory_component(
+            metadata.is_dir(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            true,
+            final_owner,
+            final_mode,
+            accessible_user,
+            allow_profile_ancestors,
+            root_leaf_group_policy,
+        ) {
             return Err(Error::Conflict);
         }
         Ok(Self(current))
@@ -1877,4 +1958,95 @@ unsafe extern "C" {
 #[link(name = "bsm")]
 unsafe extern "C" {
     fn audit_token_to_pid(token: AuditToken) -> libc::pid_t;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_parent_accepts_protected_root_admin_directory() {
+        assert!(valid_directory_component(
+            true,
+            0,
+            80,
+            0o755,
+            true,
+            0,
+            None,
+            Some((501, 20)),
+            false,
+            RootLeafGroupPolicy::Protected,
+        ));
+    }
+
+    #[test]
+    fn custody_root_leaf_still_requires_wheel_group() {
+        assert!(!valid_directory_component(
+            true,
+            0,
+            80,
+            STATE_MODE,
+            true,
+            0,
+            Some(STATE_MODE),
+            None,
+            false,
+            RootLeafGroupPolicy::Wheel,
+        ));
+        assert!(valid_directory_component(
+            true,
+            0,
+            0,
+            STATE_MODE,
+            true,
+            0,
+            Some(STATE_MODE),
+            None,
+            false,
+            RootLeafGroupPolicy::Wheel,
+        ));
+    }
+
+    #[test]
+    fn executable_parent_rejects_unsafe_metadata_or_missing_traversal() {
+        let selected_user = Some((501, 20));
+        let protected_policy = RootLeafGroupPolicy::Protected;
+        assert!(!valid_directory_component(
+            true,
+            501,
+            80,
+            0o755,
+            true,
+            0,
+            None,
+            selected_user,
+            false,
+            protected_policy,
+        ));
+        assert!(!valid_directory_component(
+            true,
+            0,
+            80,
+            0o775,
+            true,
+            0,
+            None,
+            selected_user,
+            false,
+            protected_policy,
+        ));
+        assert!(!valid_directory_component(
+            true,
+            0,
+            80,
+            0o700,
+            true,
+            0,
+            None,
+            selected_user,
+            false,
+            protected_policy,
+        ));
+    }
 }
