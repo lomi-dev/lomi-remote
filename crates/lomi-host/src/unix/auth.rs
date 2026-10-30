@@ -70,6 +70,39 @@ fn login_start_snapshot(
         }
     }
 }
+// Local status reads can briefly contend with another OwnerDomain or Store
+// turn. Retry only that typed Domain contention under the same request
+// operation; this keeps the original deadline and cancellation latch intact.
+fn read_owner_status_with_busy_retry<T>(
+    operation: &OwnerOperation<'_>,
+    read: impl FnMut() -> Result<T, OwnerError>,
+) -> Result<T, LocalError> {
+    read_owner_status_with_busy_retry_and_wait(operation, read, std::thread::park_timeout)
+}
+
+fn read_owner_status_with_busy_retry_and_wait<T>(
+    operation: &OwnerOperation<'_>,
+    mut read: impl FnMut() -> Result<T, OwnerError>,
+    mut wait: impl FnMut(Duration),
+) -> Result<T, LocalError> {
+    loop {
+        operation.check().map_err(|_| LocalError::Unavailable)?;
+        match read() {
+            Ok(value) => return Ok(value),
+            Err(OwnerError::Domain(DomainError::Busy)) => {
+                let remaining = operation
+                    .deadline()
+                    .saturating_duration_since(std::time::Instant::now());
+                let delay = remaining.min(Duration::from_millis(10));
+                if !delay.is_zero() {
+                    wait(delay);
+                }
+            }
+            Err(error) => return Err(owner_local_error(error)),
+        }
+    }
+}
+
 // Retry only typed read contention, outside both owner guards. Never repeat a
 // provider/effect stage, admit another operation, or turn ordinary Busy into a
 // permanent authorization failure.
@@ -360,10 +393,9 @@ impl Handle {
                 Ok(LocalResult::LoginStatus(view.status.clone()))
             }
             LocalCall::LoginStatus {} | LocalCall::LoginPresentation {} => {
-                let snapshot = self
-                    .owner
-                    .auth_status(operation)
-                    .map_err(owner_local_error)?;
+                let snapshot = read_owner_status_with_busy_retry(operation, || {
+                    self.owner.auth_status(operation)
+                })?;
                 let state = snapshot.authorization;
                 let intent = snapshot.intent;
                 let deferred_intent = snapshot.deferred_intent;
@@ -400,6 +432,84 @@ impl Handle {
             }
             _ => Err(LocalError::InvalidArgument),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DomainError, OwnerError, OwnerOperation, read_owner_status_with_busy_retry,
+        read_owner_status_with_busy_retry_and_wait,
+    };
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn status_read_retries_typed_domain_busy_under_the_same_operation() {
+        let cancelled = AtomicBool::new(false);
+        let operation = OwnerOperation::new(Instant::now() + Duration::from_secs(1), &cancelled);
+        let mut attempts = 0;
+
+        let value = read_owner_status_with_busy_retry(&operation, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(OwnerError::Domain(DomainError::Busy))
+            } else {
+                Ok(17)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(value, 17);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn persistent_status_contention_stops_at_the_request_deadline() {
+        let cancelled = AtomicBool::new(false);
+        let operation = OwnerOperation::new(Instant::now() + Duration::from_millis(25), &cancelled);
+        let mut attempts = 0;
+
+        let result = read_owner_status_with_busy_retry(&operation, || {
+            attempts += 1;
+            Err::<(), _>(OwnerError::Domain(DomainError::Busy))
+        });
+
+        assert!(result.is_err());
+        assert!(attempts > 0);
+    }
+
+    #[test]
+    fn status_retry_honors_cancellation_and_does_not_retry_hard_errors() {
+        let cancelled = AtomicBool::new(false);
+        let operation = OwnerOperation::new(Instant::now() + Duration::from_secs(1), &cancelled);
+        let mut attempts = 0;
+
+        let cancelled_result = read_owner_status_with_busy_retry_and_wait(
+            &operation,
+            || {
+                attempts += 1;
+                Err::<(), _>(OwnerError::Domain(DomainError::Busy))
+            },
+            |_| cancelled.store(true, Ordering::SeqCst),
+        );
+
+        assert!(cancelled_result.is_err());
+        assert_eq!(attempts, 1);
+
+        cancelled.store(false, Ordering::SeqCst);
+        let hard_error_operation =
+            OwnerOperation::new(Instant::now() + Duration::from_secs(1), &cancelled);
+        let mut hard_error_attempts = 0;
+        let hard_error = read_owner_status_with_busy_retry(&hard_error_operation, || {
+            hard_error_attempts += 1;
+            Err::<(), _>(OwnerError::Domain(DomainError::Poisoned))
+        });
+
+        assert!(hard_error.is_err());
+        assert_eq!(hard_error_attempts, 1);
     }
 }
 
