@@ -17,6 +17,15 @@ function Stop-Installer([string] $Message) {
     exit 1
 }
 
+function Write-Installed([string] $Path) {
+    $message = ([char]0x2713).ToString() + " Installed Lomi Remote v$ReleaseVersion to $Path."
+    if (-not [Console]::IsOutputRedirected -and -not (Test-Path Env:NO_COLOR)) {
+        Write-Host $message -ForegroundColor Green
+    } else {
+        [Console]::Out.WriteLine($message)
+    }
+}
+
 function Test-FullyQualifiedInstallPath([string] $Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path -match '[\x00-\x1f\x7f]') { return $false }
     try {
@@ -837,6 +846,7 @@ if ($HostServiceMode) {
             $installedRootPin = (Invoke-Checked $installedCli @('--internal-public-update-root') | Out-String).Trim()
         } catch { Stop-Installer 'installed protected Host CLI public release root could not be read' }
         if ($installedRootPin -cne $PinnedRootSha256) { Stop-Installer 'installed protected Host CLI public release root does not match the package pin' }
+        Write-Installed $installedCli
         $quotedInstalledCli = $installedCli.Replace("'", "''")
         Write-Host "Next step: in '$($HostServiceRequest.Account)'s normal, non-elevated Windows session, run:"
         Write-Host "  & '$quotedInstalledCli' setup"
@@ -1042,6 +1052,7 @@ if (Test-Path -LiteralPath $TrustDir) {
 }
 
 try {
+    Write-Host "  Verifying and installing Lomi Remote v$ReleaseVersion..."
     Invoke-Checked $Updater @('install-release-pair', $TrustDir, $ReleaseOrigin, $TargetName, $CompanionTargetName, $ProfileDir, $InstallDir, $Platform, $profileSchema, $ReleaseVersion) | Out-Null
 } catch { Stop-Installer 'signed release verification or activation failed' }
 
@@ -1062,7 +1073,7 @@ if (-not (Test-PlatformSignature)) {
 }
 
 if (-not $profileOwnerAuthenticated) {
-    Write-Host 'Signed release installed. A private profile directory is reserved; no host database was created or started.'
+    Write-Installed $Cli
     $setupCommand = "& '" + $Cli.Replace("'", "''") + "'"
     if ($env:LOMI_PROFILE_DIR) { $setupCommand += " --profile-dir '" + $ProfileDir.Replace("'", "''") + "'" }
     Write-Host 'Complete account, workspace and sharing setup with:'
@@ -1079,7 +1090,8 @@ function Start-Host {
 }
 try {
     Start-Host
-    Write-Host 'Signed release installed and the previous host mode is running.'
+    Write-Installed $Cli
+    Write-Host '  Host is running.'
     exit 0
 } catch {
     [Console]::Error.WriteLine('Updated host did not start. Querying the authenticated current profile schema before considering rollback.')

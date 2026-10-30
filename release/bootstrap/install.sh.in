@@ -15,6 +15,10 @@ lomi_remote_install_main() {
         exit 1
     }
 
+    status() {
+        printf '%s\n' "Lomi Remote: $1" >&2
+    }
+
     usage() {
         cat <<EOF
 Usage: sh -s [install|uninstall] [--version VERSION] [--install-dir ABSOLUTE_PATH] [--no-path]
@@ -181,11 +185,26 @@ EOF
     artifact="$work/release-asset"
     # Older curl versions enforce --max-filesize only for a known Content-Length.
     # Bound the stream too, and retain curl's status without requiring pipefail.
+    show_download_progress=0
+    if [ -t 2 ] && [ "${TERM:-}" != dumb ]; then
+        show_download_progress=1
+    fi
+    if [ "$platform_os" = linux ]; then
+        status "Fetching the Lomi Remote v$RELEASE_VERSION installer for $platform..."
+    else
+        status "Downloading Lomi Remote v$RELEASE_VERSION for $platform..."
+    fi
     (
         set +e
-        curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
-            --connect-timeout 20 --max-time 600 --max-filesize "$asset_size" \
-            "$asset_url"
+        if [ "$show_download_progress" -eq 1 ]; then
+            curl --fail --show-error --progress-bar --proto '=https' --tlsv1.2 \
+                --connect-timeout 20 --max-time 600 --max-filesize "$asset_size" \
+                "$asset_url"
+        else
+            curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+                --connect-timeout 20 --max-time 600 --max-filesize "$asset_size" \
+                "$asset_url"
+        fi
         curl_result=$?
         printf '%s\n' "$curl_result" > "$work/download-status"
     ) | head -c "$((asset_size + 1))" > "$artifact" \
@@ -194,6 +213,7 @@ EOF
         || fail 'could not read the release download status'
     [ "$curl_result" = 0 ] || fail 'pinned release download failed'
 
+    status "Verifying the pinned $platform download..."
     actual_size=$(LC_ALL=C wc -c < "$artifact" | tr -d '[:space:]') \
         || fail 'could not measure the downloaded release'
     [ "$actual_size" = "$asset_size" ] \
@@ -216,9 +236,11 @@ EOF
         linux)
             # The generated preflight performs its own Ed25519 verification
             # before it fetches or executes the larger Linux release bundle.
+            status "Starting the verified Linux bootstrap..."
             /bin/sh "$artifact" "$@" </dev/null
             ;;
         macos)
+            status 'Preparing the verified macOS installer...'
             extracted="$work/extracted"
             mkdir "$extracted" || fail 'could not prepare a private extraction directory'
             ditto -x -k "$artifact" "$extracted" \
@@ -234,6 +256,7 @@ EOF
                 || fail 'macOS installer code signature is invalid'
             codesign --verify --strict "$updater" >/dev/null 2>&1 \
                 || fail 'macOS updater code signature is invalid'
+            status "Starting the verified macOS installer for v$RELEASE_VERSION..."
             sudo /bin/sh "$installer" "$macos_mode" "$macos_account" \
                 "$macos_host_mode" "$@" </dev/null
             ;;

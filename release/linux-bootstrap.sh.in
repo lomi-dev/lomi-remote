@@ -22,6 +22,10 @@ fail() {
     exit 1
 }
 
+status() {
+    printf '%s\n' "Lomi Remote: $1" >&2
+}
+
 case "$EXPECTED_PLATFORM" in
     linux-x86_64|linux-aarch64) ;;
     *) fail 'unsupported Linux target' ;;
@@ -70,10 +74,24 @@ download_bounded() {
     url=$1
     destination=$2
     expected_size=$3
+    show_progress=${4:-0}
     limit=$((expected_size + 1))
-    curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
-        --connect-timeout 20 --max-time 600 "$url" | \
-        head -c "$limit" > "$destination"
+    (
+        set +e
+        if [ "$show_progress" -eq 1 ] && [ -t 2 ] && [ "${TERM:-}" != dumb ]; then
+            curl --fail --show-error --progress-bar --proto '=https' --tlsv1.2 \
+                --connect-timeout 20 --max-time 600 "$url"
+        else
+            curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+                --connect-timeout 20 --max-time 600 "$url"
+        fi
+        curl_result=$?
+        printf '%s\n' "$curl_result" > "$work/download-status"
+    ) | head -c "$limit" > "$destination" \
+        || fail 'could not write a bounded signed release download'
+    IFS= read -r curl_result < "$work/download-status" \
+        || fail 'could not read the signed release download status'
+    [ "$curl_result" = 0 ] || fail 'signed release download failed'
     actual_size=$(LC_ALL=C wc -c < "$destination" | tr -d '[:space:]')
     [ "$actual_size" = "$expected_size" ] \
         || fail 'download size did not match the signed release'
@@ -83,9 +101,11 @@ fetch() {
     asset=$1
     destination=$2
     expected_size=$3
-    download_bounded "${BOOTSTRAP_ORIGIN}${asset}" "$destination" "$expected_size"
+    show_progress=${4:-0}
+    download_bounded "${BOOTSTRAP_ORIGIN}${asset}" "$destination" "$expected_size" "$show_progress"
 }
 
+status "Fetching Linux release metadata for v$EXPECTED_VERSION..."
 fetch "$MANIFEST_NAME" "$work/manifest" "$MANIFEST_SIZE"
 cat > "$work/expected-manifest" <<LOMI_BOOTSTRAP_MANIFEST
 LOMI-LINUX-BOOTSTRAP-V1
@@ -118,16 +138,20 @@ esac
     || fail 'pinned archive exceeds the supported size limit'
 [ "$ARCHIVE_SIZE" -le "$ARCHIVE_MAX_BYTES" ] \
     || fail 'pinned archive exceeds the supported size limit'
-fetch "$ARCHIVE_NAME" "$work/archive.zip" "$ARCHIVE_SIZE"
+status "Downloading Lomi Remote v$EXPECTED_VERSION for $EXPECTED_PLATFORM..."
+fetch "$ARCHIVE_NAME" "$work/archive.zip" "$ARCHIVE_SIZE" 1
+status 'Verifying the signed Linux release archive...'
 actual_archive_sha256=$(sha256sum "$work/archive.zip")
 actual_archive_sha256=${actual_archive_sha256%% *}
 [ "$actual_archive_sha256" = "$ARCHIVE_SHA256" ] \
     || fail 'release archive digest is invalid'
 
+status 'Extracting the verified Linux release...'
 unzip -tq "$work/archive.zip" >/dev/null \
     || fail 'release archive is not a valid ZIP file'
 unzip -q "$work/archive.zip" -d "$work/extracted" \
     || fail 'release archive could not be extracted'
 [ -f "$work/extracted/install.sh" ] \
     || fail 'authenticated release archive lacks install.sh'
+status 'Starting the authenticated Linux installer...'
 /bin/sh "$work/extracted/install.sh" "$@"

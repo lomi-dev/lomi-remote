@@ -59,6 +59,20 @@ maintenance path checks active sessions, waits its grace period, verifies
 signed metadata, retains profile data and restarts the existing service mode.
 Updates require an explicit command; no background update scheduler is added.
 
+The installer shows a download progress bar in an interactive terminal and
+plain stage messages in logs. Its completion line includes the verified
+version and actual executable path. `NO_COLOR` disables completion colors.
+
+### macOS service ownership recovery
+
+Version 0.1.1 fixes service setup for protected install directories owned by
+`root:admin`. The executable directory keeps its root ownership and permission
+checks; custody state directories still require `root:wheel`.
+If version 0.1.0 activated the program and then reported
+`SERVICE_OWNERSHIP_CONFLICT`, rerun the public installation command for the same
+account and Host mode. The updater verifies and reuses the initialized profile,
+identity and trust state, then completes the missing service registration.
+
 ## Runners and signing
 
 Linux uses GitHub-hosted Ubuntu 22.04 runners for both architectures. Its
@@ -157,7 +171,7 @@ keep their existing deployments.
 ```sh
 python3 -m unittest discover -s release -p 'test_*.py'
 node --test release/gateway/worker.test.mjs release/bootstrap/render.test.mjs
-python3 release/ci_build.py --tag v0.1.0 --check
+python3 release/ci_build.py --tag v0.1.1 --check
 ```
 
 These checks cover signing, archive integrity, version-pinned origins, gateway

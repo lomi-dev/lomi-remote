@@ -14,9 +14,22 @@
     $PreviousLastExitCode = $null
     $LastExitCodeWasReset = $false
     $BundledInstallerExitCode = $null
+    $ShowDownloadProgress = $false
+    if ($ProgressPreference -ne 'SilentlyContinue') {
+        try {
+            $ShowDownloadProgress = ($Host.Name -ceq 'ConsoleHost' -and
+                -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected)
+        } catch {
+            $ShowDownloadProgress = $false
+        }
+    }
 
     function Stop-Bootstrap([string] $Message) {
         throw [System.InvalidOperationException]::new($Message)
+    }
+
+    function Write-BootstrapStatus([string] $Message) {
+        [Console]::Error.WriteLine('Lomi Remote: ' + $Message)
     }
 
     function Get-NativeArchitecture {
@@ -129,6 +142,8 @@
         $response = $null
         $input = $null
         $output = $null
+        $progressStarted = $false
+        $showProgress = $ShowDownloadProgress
         try {
             $timer = [Diagnostics.Stopwatch]::StartNew()
             $response = [Net.HttpWebResponse]$request.GetResponse()
@@ -148,6 +163,17 @@
             )
             $buffer = New-Object byte[] 65536
             [long]$downloaded = 0
+            [long]$lastProgressMilliseconds = -100
+            if ($showProgress) {
+                try {
+                    Write-Progress -Id 1 -Activity "Downloading Lomi Remote v$ReleaseVersion for Windows $Architecture" `
+                        -Status "0 / $($artifact.Size) bytes (0%)" -PercentComplete 0
+                    $progressStarted = $true
+                    $lastProgressMilliseconds = $timer.ElapsedMilliseconds
+                } catch {
+                    $showProgress = $false
+                }
+            }
             while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
                 if ($timer.ElapsedMilliseconds -gt $DownloadTimeoutMilliseconds) {
                     Stop-Bootstrap 'approved release download exceeded its time limit'
@@ -157,6 +183,19 @@
                 }
                 $output.Write($buffer, 0, $read)
                 $downloaded += $read
+                if ($showProgress -and
+                    ($timer.ElapsedMilliseconds - $lastProgressMilliseconds -ge 100 -or
+                        $downloaded -eq [long]$artifact.Size)) {
+                    $percent = [int][Math]::Floor(($downloaded * 100.0) / [long]$artifact.Size)
+                    try {
+                        Write-Progress -Id 1 -Activity "Downloading Lomi Remote v$ReleaseVersion for Windows $Architecture" `
+                            -Status "$downloaded / $($artifact.Size) bytes ($percent%)" -PercentComplete $percent
+                        $progressStarted = $true
+                        $lastProgressMilliseconds = $timer.ElapsedMilliseconds
+                    } catch {
+                        $showProgress = $false
+                    }
+                }
             }
             if ($timer.ElapsedMilliseconds -gt $DownloadTimeoutMilliseconds) {
                 Stop-Bootstrap 'approved release download exceeded its time limit'
@@ -165,12 +204,27 @@
             if ($downloaded -ne [long]$artifact.Size) {
                 Stop-Bootstrap 'approved release download is incomplete'
             }
+            if ($showProgress) {
+                try {
+                    Write-Progress -Id 1 -Activity "Downloading Lomi Remote v$ReleaseVersion for Windows $Architecture" `
+                        -Status "$downloaded / $($artifact.Size) bytes (100%)" -PercentComplete 100
+                    $progressStarted = $true
+                } catch {
+                    $showProgress = $false
+                }
+            }
         } finally {
+            if ($progressStarted) {
+                try {
+                    Write-Progress -Id 1 -Activity "Downloading Lomi Remote v$ReleaseVersion for Windows $Architecture" -Completed
+                } catch { }
+            }
             if ($null -ne $output) { $output.Dispose() }
             if ($null -ne $input) { $input.Dispose() }
             if ($null -ne $response) { $response.Dispose() }
         }
 
+        Write-BootstrapStatus 'Verifying the downloaded Windows release...'
         $file = $null
         $sha256 = $null
         try {
@@ -350,16 +404,19 @@
             Stop-Bootstrap "no approved Windows release is available for native architecture $architecture"
         }
 
+        Write-BootstrapStatus "Downloading Lomi Remote v$ReleaseVersion for Windows $architecture..."
         $StagingDirectory = New-PrivateStagingDirectory
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $archivePath = Join-Path $StagingDirectory 'release.zip'
         Get-VerifiedArchive $architecture $archivePath
+        Write-BootstrapStatus 'Expanding the verified Windows release...'
         Expand-VerifiedArchive $archivePath $StagingDirectory
 
         $installerPath = Join-Path $StagingDirectory 'install.ps1'
         if (-not [IO.File]::Exists($installerPath)) {
             Stop-Bootstrap 'approved release archive does not contain its root installer'
         }
+        Write-BootstrapStatus 'Checking the bundled installer signature...'
         $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
             $null -eq $signature.SignerCertificate) {
@@ -368,6 +425,7 @@
 
         # Invoke the verified on-disk script so its own signature check sees
         # the real MyInvocation.MyCommand.Path value.
+        Write-BootstrapStatus "Starting the verified Windows installer for v$ReleaseVersion..."
         $PreviousLastExitCode = $global:LASTEXITCODE
         $global:LASTEXITCODE = $null
         $LastExitCodeWasReset = $true

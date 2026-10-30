@@ -17,6 +17,18 @@ fail() {
     exit 1
 }
 
+info() {
+    printf '  %s\n' "$1" >&2
+}
+
+installed() {
+    if [ -t 2 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_COLOR+x}" ]; then
+        printf '\033[32m✓\033[0m Installed Lomi Remote v%s to %s.\n' "$RELEASE_VERSION" "$CLI" >&2
+    else
+        printf '✓ Installed Lomi Remote v%s to %s.\n' "$RELEASE_VERSION" "$CLI" >&2
+    fi
+}
+
 print_shell_argument() {
     lomi_quote_remainder=$1
     printf "'"
@@ -393,9 +405,10 @@ admin_boot_install() {
             || fail 'could not initialize private admin trust state'
     fi
 
+    info "Verifying and installing Lomi Remote v$RELEASE_VERSION..."
     "$UPDATER" install-release-admin-boot "$TRUST_DIR" "$RELEASE_ORIGIN" \
         "$TARGET_NAME" "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" \
-        "$schema_hint" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" "$RELEASE_VERSION" \
+        "$schema_hint" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" "$RELEASE_VERSION" >/dev/null \
         || fail 'signed release verification or admin profile activation failed'
     verify_admin_cli || {
         if [ "$had_installed_cli" -eq 1 ]; then
@@ -418,12 +431,15 @@ admin_boot_install() {
         if [ "$admin_custodian_ready" != yes ]; then install_service=1; fi
     fi
     if [ "$install_service" -eq 1 ]; then
+        info "Configuring the macOS $ADMIN_HOST_MODE service for $ADMIN_ACCOUNT..."
         "$CLI" --profile-dir "$PROFILE_DIR" service install --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT" \
-            || fail 'could not prepare the selected Host mode and terminal custodian'
+            >/dev/null || fail "could not configure the macOS $ADMIN_HOST_MODE service for $ADMIN_ACCOUNT; the verified program is at $CLI"
     fi
     if [ "$should_start" -eq 1 ]; then
-        if "$CLI" --profile-dir "$PROFILE_DIR" service start --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT"; then
-            printf '%s\n' 'Signed admin-managed release installed and the selected account Host is running.'
+        info 'Starting Lomi Remote...'
+        if "$CLI" --profile-dir "$PROFILE_DIR" service start --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT" >/dev/null; then
+            installed
+            info "Host is running ($ADMIN_HOST_MODE mode)."
             return 0
         fi
         if [ "$had_installed_cli" -eq 1 ]; then
@@ -437,15 +453,16 @@ admin_boot_install() {
         fi
         fail 'updated LaunchDaemon did not start; the previous signed release was restored when available'
     fi
+    installed
     case "$ADMIN_HOST_MODE" in
         manual)
-            printf '%s\n' 'Signed admin-managed release and terminal custodian installed. Manual Host mode has no autostart; an existing running Host keeps its prior state.'
+            info 'Manual mode configured. Start the Host when you need it.'
             ;;
         login)
-            printf '%s\n' 'Signed admin-managed release and terminal custodian installed. The Host starts at account login; an existing Host keeps its prior running state.'
+            info 'Login mode configured. The Host starts when you sign in.'
             ;;
         boot)
-            printf '%s\n' 'Signed admin-managed release installed. The Host keeps its prior running state.'
+            info 'Boot mode configured. The Host keeps its current running state.'
             ;;
     esac
 }
@@ -614,8 +631,9 @@ else
         || fail 'could not initialize private updater trust state'
 fi
 
+info "Verifying and installing Lomi Remote v$RELEASE_VERSION..."
 "$UPDATER" install-release "$TRUST_DIR" "$RELEASE_ORIGIN" "$TARGET_NAME" \
-    "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" "$profile_schema" "$RELEASE_VERSION" \
+    "$PROFILE_DIR" "$INSTALL_DIR" "$PLATFORM" "$profile_schema" "$RELEASE_VERSION" >/dev/null \
     || fail 'signed release verification or activation failed'
 
 start_host() {
@@ -654,7 +672,7 @@ if ! verify_platform_signature; then
 fi
 
 if [ "$profile_owner_authenticated" -eq 0 ]; then
-    printf '%s\n' 'Signed release installed. A private profile directory is reserved; no host database was created or started.'
+    installed
     printf '%s\n' 'Complete account, workspace and sharing setup with:'
     printf '  '
     print_shell_argument "$CLI"
@@ -667,7 +685,8 @@ if [ "$profile_owner_authenticated" -eq 0 ]; then
 fi
 
 if start_host; then
-    printf '%s\n' 'Signed release installed and the previous host mode is running.'
+    installed
+    info 'Host is running.'
     exit 0
 fi
 
