@@ -297,8 +297,8 @@ admin_boot_install() {
     fi
 
     check_admin_service() {
-        admin_service_status=$("$CLI" --profile-dir "$PROFILE_DIR" service status \
-            --mode "$ADMIN_HOST_MODE" --account "$ADMIN_ACCOUNT") \
+        admin_service_status=$("$UPDATER" admin-host-status "$PROFILE_DIR" \
+            "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") \
             || fail 'selected account Host mode and registration could not be authenticated'
         admin_service_account=$(printf '%s\n' "$admin_service_status" | sed -n 's/^Account: //p')
         [ "$admin_service_account" = "$ADMIN_ACCOUNT" ] \
@@ -445,7 +445,7 @@ admin_boot_install() {
         if [ "$had_installed_cli" -eq 1 ]; then
             "$UPDATER" rollback-release-admin-boot "$TRUST_DIR" "$PROFILE_DIR" \
                 "$INSTALL_DIR" "$PLATFORM" - "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \
-                || fail 'updated LaunchDaemon failed and a schema-compatible rollback was unavailable'
+                || fail 'service readiness verification failed and automatic rollback could not complete; retry with a verified installer. Profile data were preserved'
             verify_admin_cli || fail 'restored admin executable signature validation failed'
         else
             "$UPDATER" uninstall-release-admin-boot "$PROFILE_DIR" "$INSTALL_DIR" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE" \

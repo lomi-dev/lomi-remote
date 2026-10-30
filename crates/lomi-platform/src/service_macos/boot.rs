@@ -616,8 +616,7 @@ impl Registration {
     }
 
     fn plist(&self, account: &Account) -> Result<Vec<u8>> {
-        let binary = super::xml(&self.executable)?;
-        let profile = super::xml(&self.profile)?;
+        let arguments = super::launch_arguments_xml(&self.executable, &self.profile)?;
         let label = super::xml(&self.label)?;
         let user = super::xml(&account.name)?;
         let group = super::xml(&account.group)?;
@@ -626,7 +625,7 @@ impl Registration {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>{label}</string>
-<key>ProgramArguments</key><array><string>{binary}</string><string>--profile-dir</string><string>{profile}</string><string>daemon</string><string>run</string><string>--existing-profile</string></array>
+<key>ProgramArguments</key><array>{arguments}</array>
 <key>UserName</key><string>{user}</string>
 <key>GroupName</key><string>{group}</string>
 <key>RunAtLoad</key><true/>
@@ -1029,13 +1028,7 @@ fn observation(
                 return Err(Error::Conflict);
             }
             seen_args = true;
-            for argument in [
-                &reg.executable,
-                "--profile-dir",
-                &reg.profile,
-                "daemon",
-                "run",
-            ] {
+            for argument in super::launch_arguments(&reg.executable, &reg.profile) {
                 if lines.next() != Some(format!("\t\t{argument}").as_str()) {
                     return Err(Error::Conflict);
                 }
@@ -1069,6 +1062,125 @@ fn observation(
         return Err(Error::Conflict);
     }
     Ok(Observation { pid, running })
+}
+
+#[cfg(test)]
+mod launchctl_observation_tests {
+    use super::*;
+
+    const EXECUTABLE: &str = "/Users/alice/Applications/Lomi.app/Contents/MacOS/lomi";
+    const PROFILE: &str = "/Users/alice/Library/Application Support/Lomi/Profile";
+    const LABEL: &str = "dev.lomi.remote.test";
+    const PLIST_PATH: &str = "/Library/LaunchDaemons/dev.lomi.remote.test.plist";
+    const TARGET: &str = "system/dev.lomi.remote.test";
+
+    fn registration() -> Registration {
+        Registration {
+            version: 1,
+            profile: PROFILE.into(),
+            executable: EXECUTABLE.into(),
+            account: "alice".into(),
+            label: LABEL.into(),
+            directory: LAUNCH_DAEMONS.into(),
+            mode: "boot".into(),
+        }
+    }
+
+    fn account() -> Account {
+        Account {
+            name: "alice".into(),
+            uid: 501,
+            gid: 20,
+            group: "staff".into(),
+            home: PathBuf::from("/Users/alice"),
+        }
+    }
+
+    fn running_launchctl_output() -> String {
+        format!(
+            "{TARGET} = {{\n\
+\tactive count = 1\n\
+\tpath = {PLIST_PATH}\n\
+\ttype = LaunchDaemon\n\
+\tstate = running\n\
+\tprogram = {EXECUTABLE}\n\
+\targuments = {{\n\
+\t\t{EXECUTABLE}\n\
+\t\t--profile-dir\n\
+\t\t{PROFILE}\n\
+\t\tdaemon\n\
+\t\trun\n\
+\t\t--existing-profile\n\
+\t}}\n\
+\tpid = 55784\n\
+\tlast exit code = 0\n\
+\tproperties = {{\n\
+\t\tkeepalive = 1\n\
+\t}}\n\
+}}"
+        )
+    }
+
+    fn plist_arguments(plist: &[u8]) -> Vec<String> {
+        let text = std::str::from_utf8(plist).unwrap();
+        let args = text
+            .split_once("<key>ProgramArguments</key><array>")
+            .unwrap()
+            .1
+            .split_once("</array>")
+            .unwrap()
+            .0;
+        args.split("<string>")
+            .skip(1)
+            .map(|argument| argument.split_once("</string>").unwrap().0.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn boot_plist_and_launchctl_arguments_match_exactly() {
+        let reg = registration();
+        let expected = super::super::launch_arguments(&reg.executable, &reg.profile)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(plist_arguments(&reg.plist(&account()).unwrap()), expected);
+        assert!(matches!(
+            observation(&running_launchctl_output(), TARGET, PLIST_PATH, &reg),
+            Ok(Observation {
+                pid: Some(55784),
+                running: true,
+            })
+        ));
+    }
+
+    #[test]
+    fn boot_observation_rejects_nonmatching_argument_vectors() {
+        let reg = registration();
+        let fixture = running_launchctl_output();
+        let cases = [
+            fixture.replace("\t\t--existing-profile\n", ""),
+            fixture.replace(
+                PROFILE,
+                "/Users/alice/Library/Application Support/Lomi/Other",
+            ),
+            fixture.replace("\t\trun\n", "\t\trun\n\t\t--verbose\n"),
+            fixture.replacen(
+                &format!("\t\t{EXECUTABLE}\n"),
+                "\t\t/Users/alice/Applications/Other.app/Contents/MacOS/lomi\n",
+                1,
+            ),
+            fixture.replace(
+                &format!("\tprogram = {EXECUTABLE}\n"),
+                "\tprogram = /Users/alice/Applications/Other.app/Contents/MacOS/lomi\n",
+            ),
+        ];
+        for output in cases {
+            assert!(matches!(
+                observation(&output, TARGET, PLIST_PATH, &reg),
+                Err(Error::Conflict)
+            ));
+        }
+    }
 }
 
 fn observe(reg: &Registration, path: &str) -> Result<Option<Observation>> {

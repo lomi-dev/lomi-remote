@@ -117,6 +117,23 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
             )?;
         }
         #[cfg(all(feature = "release-root", target_os = "macos"))]
+        Some("admin-host-status") if args.len() == 6 || args.len() == 7 => {
+            let host_mode = admin_host_mode(args.get(6).map(String::as_str))?;
+            let install_dir = Path::new(&args[3]);
+            lomi_update_trust::verify_admin_installed_maintenance_cli(install_dir, &args[4])?;
+            // Inspect with the verified installer's current service adapter.
+            // Older installed CLIs may be unable to observe their own jobs;
+            // their exact activated image and native bindings still apply.
+            let status = lomi_platform::service_macos::run_admin_host(
+                Path::new(&args[2]),
+                &install_dir.join("lomiremote"),
+                "status",
+                host_mode,
+                &args[5],
+            )?;
+            println!("{status}");
+        }
+        #[cfg(all(feature = "release-root", target_os = "macos"))]
         Some("validate-admin-boot-install-dir") if args.len() == 3 => {
             lomi_update_trust::validate_admin_boot_install_directory(Path::new(&args[2]))?;
         }
@@ -394,7 +411,7 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
         }
         _ => {
             #[cfg(feature = "release-root")]
-            let usage = "usage: lomi-update-trust root-pin | maintenance-schema | validate-install-dir INSTALL_DIR | verify-installed-maintenance-cli INSTALL_DIR PLATFORM | verify-admin-installed-maintenance-cli INSTALL_DIR PLATFORM | release-recovery-needed INSTALL_DIR | recover-release PROFILE_DIR INSTALL_DIR PLATFORM | install-release TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | install-release-pair TRUST_DIR HTTPS_ORIGIN PRIMARY COMPANION PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | rollback-release TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA | uninstall-release PROFILE_DIR INSTALL_DIR | file-security install|upgrade --owner-sid SID --confirm-system-service HTTPS_ORIGIN TARGET PLATFORM | file-security uninstall --owner-sid SID | prepare-admin-profile ACCOUNT PROFILE | admin-macos-profile ACCOUNT | admin-macos-install-dir ACCOUNT | bind-admin-boot-profile PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] | validate-admin-boot-install-dir INSTALL_DIR | admin-boot-recovery-needed INSTALL_DIR | recover-release-admin-boot PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | install-release-admin-boot TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE [EXPECTED_VERSION]] | rollback-release-admin-boot TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE] | uninstall-release-admin-boot PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] (MODE: manual|login|boot; omitted means boot)";
+            let usage = "usage: lomi-update-trust root-pin | maintenance-schema | validate-install-dir INSTALL_DIR | verify-installed-maintenance-cli INSTALL_DIR PLATFORM | verify-admin-installed-maintenance-cli INSTALL_DIR PLATFORM | release-recovery-needed INSTALL_DIR | recover-release PROFILE_DIR INSTALL_DIR PLATFORM | install-release TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | install-release-pair TRUST_DIR HTTPS_ORIGIN PRIMARY COMPANION PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA [EXPECTED_VERSION] | rollback-release TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM PROFILE_SCHEMA | uninstall-release PROFILE_DIR INSTALL_DIR | file-security install|upgrade --owner-sid SID --confirm-system-service HTTPS_ORIGIN TARGET PLATFORM | file-security uninstall --owner-sid SID | prepare-admin-profile ACCOUNT PROFILE | admin-host-status PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | admin-macos-profile ACCOUNT | admin-macos-install-dir ACCOUNT | bind-admin-boot-profile PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] | validate-admin-boot-install-dir INSTALL_DIR | admin-boot-recovery-needed INSTALL_DIR | recover-release-admin-boot PROFILE_DIR INSTALL_DIR PLATFORM ACCOUNT [MODE] | install-release-admin-boot TRUST_DIR HTTPS_ORIGIN TARGET PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE [EXPECTED_VERSION]] | rollback-release-admin-boot TRUST_DIR PROFILE_DIR INSTALL_DIR PLATFORM SCHEMA_HINT|- ACCOUNT [MODE] | uninstall-release-admin-boot PROFILE_DIR INSTALL_DIR ACCOUNT [MODE] (MODE: manual|login|boot; omitted means boot)";
             #[cfg(not(feature = "release-root"))]
             let usage = "usage: lomi-update-trust initialize DIR ROOT | status DIR | update DIR METADATA TARGETS [TARGET] | activate DIR METADATA TARGETS TARGET INSTALL_DIR";
             return Err(usage.into());

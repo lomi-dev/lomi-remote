@@ -65,6 +65,16 @@ version and actual executable path. `NO_COLOR` disables completion colors.
 
 ### macOS service ownership recovery
 
+Version 0.1.3 fixes observation of the exact `--existing-profile` argument
+used by both Boot and Login services. Earlier versions could start the Host
+successfully, then report `SERVICE_OWNERSHIP_CONFLICT` while checking its job.
+The same incorrect observation could prevent rollback before its schema check.
+Rerun the public installer with the same account and Host mode to upgrade.
+The new verified updater inspects the old service itself, so recovery does not
+depend on the older CLI's broken service observer. Active Hosts still require
+authenticated maintenance status and the update grace period; profile, identity
+and trust state are retained. Do not unload the custodian or delete its state.
+
 Version 0.1.2 fixes protected install directories owned by `root:admin` and
 uses the correct Security framework options for authenticating running peer
 processes. The executable directory keeps its root ownership and permission

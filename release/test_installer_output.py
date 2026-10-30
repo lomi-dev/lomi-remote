@@ -35,6 +35,7 @@ class InstallerOutputTests(unittest.TestCase):
         self.cli_path = self.install_dir / "lomiremote"
         self.actual_cli_path = self.cli_path.resolve()
         self.cli_log = self.directory / "cli-arguments.log"
+        self.updater_log = self.directory / "updater-arguments.log"
 
         rendered = TEMPLATE.read_text(encoding="utf-8")
         replacements = {
@@ -45,6 +46,8 @@ class InstallerOutputTests(unittest.TestCase):
             "@@ROOT_SHA256_SHELL@@": f"'{ROOT_PIN}'",
             "@@TEAM_ID_SHELL@@": f"'{TEAM_ID}'",
             "base='/Library/Application Support'": f"base='{self.support_base}'",
+            "/usr/bin/sudo": str(self.bin_directory / "sudo"),
+            "GRACE_SECONDS=20": "GRACE_SECONDS=0",
         }
         for placeholder, value in replacements.items():
             self.assertIn(placeholder, rendered)
@@ -67,7 +70,11 @@ if "service" in args:
     if exit_code:
         print("native service " + operation + " failure", file=sys.stderr)
         raise SystemExit(exit_code)
+if "maintenance" in args:
+    print('{"authenticatedMaintenance":true}')
+    raise SystemExit(0)
 """
+        self.cli_source = cli_source
         updater_source = """#!/usr/bin/env python3
 import os
 import pathlib
@@ -75,6 +82,8 @@ import sys
 
 args = sys.argv[1:]
 command = args[0] if args else ""
+with open(os.environ["FIXTURE_UPDATER_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\\n")
 root_pin = %r
 cli_source = %r
 if command == "root-pin":
@@ -85,6 +94,15 @@ elif command == "admin-macos-profile":
     print(os.environ["FIXTURE_PROFILE_DIR"])
 elif command == "admin-boot-recovery-needed":
     print("clear")
+elif command == "admin-host-status":
+    if os.environ.get("ADMIN_STATUS_EXIT"):
+        print("native service inspection failure", file=sys.stderr)
+        raise SystemExit(int(os.environ["ADMIN_STATUS_EXIT"]))
+    print("Account: fixture-account\\nMode: boot\\nRegistration: registered\\nActive: " + os.environ.get("SERVICE_ACTIVE", "inactive") + "\\nAutostart: enabled\\nCustodian ready: yes")
+elif command == "maintenance-schema":
+    if sys.stdin.read().strip() != '{"authenticatedMaintenance":true}':
+        raise SystemExit(2)
+    print("14\\n0")
 elif command == "initialize-release":
     pathlib.Path(args[1]).mkdir(parents=True, exist_ok=True)
 elif command == "install-release-admin-boot":
@@ -93,7 +111,7 @@ elif command == "install-release-admin-boot":
     cli.write_text(cli_source, encoding="utf-8")
     cli.chmod(0o755)
     print('{"activeObject":{"version":"1.2.3"}}')
-elif command in ("validate-admin-boot-install-dir", "bind-admin-boot-profile", "status-release", "uninstall-release-admin-boot"):
+elif command in ("validate-admin-boot-install-dir", "bind-admin-boot-profile", "status-release", "uninstall-release-admin-boot", "verify-admin-installed-maintenance-cli"):
     pass
 else:
     print("unexpected updater command: " + command, file=sys.stderr)
@@ -110,6 +128,12 @@ else:
             "  --verify) exit 0 ;;\n"
             "  *) exit 2 ;;\n"
             "esac\n",
+        )
+        self._write_executable(
+            self.bin_directory / "sudo",
+            "#!/bin/sh\n"
+            "[ \"$1 $2 $3 $4 $5\" = '-n -H -u fixture-account --' ] || exit 2\n"
+            "shift 5\nexec \"$@\"\n",
         )
         self._write_executable(
             self.bin_directory / "id",
@@ -130,6 +154,8 @@ else:
         no_color: bool = False,
         service_install_exit: int = 0,
         service_start_exit: int = 0,
+        admin_status_exit: int = 0,
+        service_active: bool = False,
     ) -> tuple[int, bytes, bytes]:
         environment = os.environ.copy()
         environment.update({
@@ -139,9 +165,14 @@ else:
             "FIXTURE_INSTALL_DIR": str(self.install_dir),
             "FIXTURE_PROFILE_DIR": str(self.profile_dir),
             "FIXTURE_CLI_LOG": str(self.cli_log),
+            "FIXTURE_UPDATER_LOG": str(self.updater_log),
             "SERVICE_INSTALL_EXIT": str(service_install_exit),
             "SERVICE_START_EXIT": str(service_start_exit),
+            "SERVICE_ACTIVE": "active" if service_active else "inactive",
         })
+        environment.pop("ADMIN_STATUS_EXIT", None)
+        if admin_status_exit:
+            environment["ADMIN_STATUS_EXIT"] = str(admin_status_exit)
         environment.pop("NO_COLOR", None)
         if no_color:
             environment["NO_COLOR"] = "1"
@@ -241,6 +272,53 @@ else:
         self.assertNotIn(b"Installed Lomi Remote", stderr)
         self.assertNotIn(b"Host is running (boot mode)", stderr)
         self.assertNotIn(b"\x1b", stderr)
+
+
+    def prepare_old_service_install(self) -> None:
+        self.install_dir.mkdir(parents=True)
+        # The signed old CLI may have a broken observer. It must not control
+        # the verified installer's service inspection before activation.
+        self._write_executable(
+            self.cli_path,
+            self.cli_source + '\nprint("SERVICE_OWNERSHIP_CONFLICT", file=sys.stderr)\nraise SystemExit(3)\n',
+        )
+        (self.profile_dir / "service-registration-macos.json").write_text("{}")
+
+    def test_retry_observes_old_service_with_bundled_updater(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer()
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(b"Installed Lomi Remote v1.2.3", stderr)
+        commands = self.updater_log.read_text().splitlines()
+        status = next(i for i, command in enumerate(commands) if command.startswith("admin-host-status "))
+        install = next(i for i, command in enumerate(commands) if command.startswith("install-release-admin-boot "))
+        self.assertLess(status, install)
+        self.assertIn(str(self.actual_cli_path.parent), commands[status])
+        self.assertIn("macos-aarch64 fixture-account boot", commands[status])
+        self.assertFalse(self.cli_log.exists(), "old CLI service status must not run")
+
+    def test_retry_rejects_unverifiable_service_before_activation(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer(admin_status_exit=3)
+
+        self.assertNotEqual(returncode, 0)
+        self.assertIn(b"native service inspection failure", stderr)
+        self.assertNotIn("install-release-admin-boot ", self.updater_log.read_text())
+        self.assertNotIn(b"Installed Lomi Remote", stderr)
+        self.assertIn("SERVICE_OWNERSHIP_CONFLICT", self.cli_path.read_text())
+
+    def test_retry_of_active_service_retains_authenticated_maintenance(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer(service_active=True)
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(b"Active terminals: 0", stderr + _stdout)
+        self.assertIn("maintenance prepare --json", self.cli_log.read_text())
+        self.assertNotIn("service status", self.cli_log.read_text())
+        install = next(command for command in self.updater_log.read_text().splitlines()
+                       if command.startswith("install-release-admin-boot "))
+        self.assertIn("macos-aarch64 14 fixture-account boot 1.2.3", install)
 
 
 if __name__ == "__main__":
