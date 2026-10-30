@@ -10,6 +10,7 @@ publish = false
 experimental-macos-coalition-cleanup = ["lomi-terminal/experimental-macos-coalition-cleanup"]
 default = []
 release-maintenance = ["lomi-update-trust/release-root"]
+local-release-test = ["release-maintenance", "lomi-update-trust/local-release-test"]
 linux-setup-handoff = ["release-maintenance"]
 
 [dependencies]

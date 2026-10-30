@@ -90,7 +90,13 @@ def read_linux_bootstrap_public_key(path: Path, expected_digest: str) -> bytes:
     return public_key
 
 
-def run_openssl_bounded(command: list[str], *, extra_env: dict[str, str] | None = None) -> bytes:
+def run_openssl_bounded(
+    command: list[str],
+    *,
+    extra_env: dict[str, str] | None = None,
+    purpose: str = "Linux bootstrap signing",
+    max_output: int = LINUX_BOOTSTRAP_MAX_OPENSSL_OUTPUT,
+) -> bytes:
     """Run one OpenSSL command with closed stdin, bounded output, and a deadline."""
     env = {
         key: value
@@ -109,7 +115,7 @@ def run_openssl_bounded(command: list[str], *, extra_env: dict[str, str] | None 
             close_fds=True,
         )
     except OSError:
-        fail("OpenSSL 3 could not be started for Linux bootstrap signing")
+        fail(f"OpenSSL 3 could not be started for {purpose}")
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -124,31 +130,31 @@ def run_openssl_bounded(command: list[str], *, extra_env: dict[str, str] | None 
             if remaining <= 0:
                 process.kill()
                 process.wait()
-                fail("OpenSSL Linux bootstrap signing exceeded its time limit")
+                fail(f"OpenSSL {purpose} exceeded its time limit")
             for key, _ in selector.select(min(remaining, 0.25)):
                 chunk = os.read(key.fileobj.fileno(), 1024)
                 if not chunk:
                     selector.unregister(key.fileobj)
                     key.fileobj.close()
                     continue
-                if len(captured) + len(chunk) > LINUX_BOOTSTRAP_MAX_OPENSSL_OUTPUT:
+                if len(captured) + len(chunk) > max_output:
                     process.kill()
                     process.wait()
-                    fail("OpenSSL Linux bootstrap signing produced excessive output")
+                    fail(f"OpenSSL {purpose} produced excessive output")
                 captured.extend(chunk)
         remaining = max(0.01, deadline - time.monotonic())
         return_code = process.wait(timeout=remaining)
     except (OSError, subprocess.TimeoutExpired):
         process.kill()
         process.wait()
-        fail("OpenSSL Linux bootstrap signing failed or timed out")
+        fail(f"OpenSSL {purpose} failed or timed out")
     finally:
         selector.close()
         for stream in (process.stdout, process.stderr):
             if not stream.closed:
                 stream.close()
     if return_code != 0:
-        fail("OpenSSL Linux bootstrap signing or verification failed")
+        fail(f"OpenSSL {purpose} failed")
     return bytes(captured)
 
 
@@ -640,6 +646,11 @@ def main() -> None:
     parser.add_argument("--linux-bootstrap-public-key", type=Path)
     parser.add_argument("--linux-bootstrap-key-sha256")
     parser.add_argument("--linux-bootstrap-signing-key", type=Path)
+    parser.add_argument(
+        "--local-test-ca",
+        type=Path,
+        help="opt in to local HTTPS testing with a private DER CA certificate",
+    )
     args = parser.parse_args()
 
     platform = args.platform
@@ -696,6 +707,34 @@ def main() -> None:
         require_openssl3()
     elif any(value is not None for value in linux_bootstrap_options):
         fail("Linux bootstrap signing options are supported only for Linux releases")
+
+    local_test_ca_path = None
+    local_test_ca_sha256 = None
+    if args.local_test_ca is not None:
+        try:
+            ca_info = args.local_test_ca.lstat()
+            if (
+                not stat.S_ISREG(ca_info.st_mode)
+                or not 128 <= ca_info.st_size <= 1024 * 1024
+            ):
+                fail("local HTTPS test CA must be a regular DER file between 128 bytes and 1 MiB")
+            local_test_ca_path = args.local_test_ca.resolve(strict=True)
+        except OSError:
+            fail("local HTTPS test CA is unavailable")
+        ca_constraints = run_openssl_bounded(
+            [
+                "openssl", "x509", "-inform", "DER", "-in",
+                str(local_test_ca_path), "-noout", "-text",
+            ],
+            purpose="local HTTPS test CA validation",
+            max_output=64 * 1024,
+        )
+        if not any(
+            re.match(rb"^CA:TRUE(?:,|\s|$)", line.strip())
+            for line in ca_constraints.splitlines()
+        ):
+            fail("local HTTPS test certificate must have BasicConstraints CA:TRUE")
+        local_test_ca_sha256 = sha256(local_test_ca_path)
 
     macos_config = None
     if platform.startswith("macos-"):
@@ -761,8 +800,14 @@ def main() -> None:
     else:
         native_signer_pin = ""
     env = os.environ.copy()
+    # An inherited variable must not activate or alter the local test build.
+    env.pop("LOMI_LOCAL_TEST_CA_FILE", None)
+    env.pop("LOMI_LOCAL_TEST_CA_SHA256", None)
     env["LOMI_UPDATE_ROOT_FILE"] = str(root_path)
     env["LOMI_UPDATE_ROOT_SHA256"] = root_pin
+    if local_test_ca_path is not None:
+        env["LOMI_LOCAL_TEST_CA_FILE"] = str(local_test_ca_path)
+        env["LOMI_LOCAL_TEST_CA_SHA256"] = local_test_ca_sha256
     env.update(bootstrap_pins)
     env.update({
         "LOMI_RELEASE_ORIGIN": origin,
@@ -792,6 +837,8 @@ def main() -> None:
     ]
     if platform.startswith("linux-"):
         app_build[-1] = "release-maintenance,linux-setup-handoff"
+    if local_test_ca_path is not None:
+        app_build[-1] += ",local-release-test"
     if platform.startswith("windows-"):
         app_build.extend(["--bin", "lomiremote-host"])
     run(app_build, env=env)
@@ -804,9 +851,12 @@ def main() -> None:
     release_version, maximum_profile_schema = product_metadata(product_binary, target)
     if args.minimum_profile_schema > maximum_profile_schema:
         fail("minimum existing-profile schema exceeds the built product schema")
+    updater_features = "release-root"
+    if local_test_ca_path is not None:
+        updater_features += ",local-release-test"
     run([
         "cargo", "build", "--locked", "--release", "--target", target,
-        "-p", "lomi-update-trust", "--features", "release-root",
+        "-p", "lomi-update-trust", "--features", updater_features,
         "--bin", "lomi-update-trust",
     ], env=env)
 
@@ -815,9 +865,15 @@ def main() -> None:
     # before signing or publishing any bundle.
     run([
         "cargo", "test", "--locked", "--release", "--target", target,
-        "-p", "lomi-update-trust", "--features", "release-root",
+        "-p", "lomi-update-trust", "--features", updater_features,
         "--bin", "lomi-update-trust",
     ], env=env)
+    if local_test_ca_path is not None:
+        run([
+            "cargo", "test", "--locked", "--release", "--target", target,
+            "-p", "lomi-update-trust", "--features", updater_features,
+            "--lib", "local_release_test_tls_tests",
+        ], env=env)
     if not platform.startswith("windows-"):
         test_env = env.copy()
         test_env["LOMI_TEST_MAINTENANCE_UPDATER"] = str(built / "lomi-update-trust")
@@ -911,6 +967,8 @@ def main() -> None:
             "maximum": maximum_profile_schema,
         },
         "publicTufRootSha256": root_pin,
+        **({"localTestCaSha256": local_test_ca_sha256}
+           if local_test_ca_sha256 is not None else {}),
         "hostBootstrapPins": bootstrap_pins,
         "tufTargetCustom": {
             "lomiRelease": {

@@ -108,8 +108,10 @@ fn fetch(url: &str) -> Result<Vec<u8>, CheckError> {
         .http_status_as_error(false)
         .max_response_header_size(16 * 1024)
         .timeout_global(Some(REQUEST_TIMEOUT))
-        .timeout_per_call(Some(REQUEST_TIMEOUT))
-        .build();
+        .timeout_per_call(Some(REQUEST_TIMEOUT));
+    #[cfg(feature = "local-release-test")]
+    let config = config.tls_config(lomi_update_trust::local_release_test_tls_config());
+    let config = config.build();
     let agent = ureq::Agent::new_with_config(config);
     let mut response = agent.get(url).call().map_err(|_| CheckError::Unavailable)?;
     let status = response.status().as_u16();

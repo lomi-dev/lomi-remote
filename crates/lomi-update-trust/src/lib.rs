@@ -42,6 +42,10 @@ mod windows_storage;
 mod embedded_root {
     include!(concat!(env!("OUT_DIR"), "/embedded_root.rs"));
 }
+#[cfg(feature = "local-release-test")]
+mod embedded_local_test_ca {
+    pub const DER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/local-test-ca.der"));
+}
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const MAX_METADATA: usize = 1024 * 1024;
@@ -4497,15 +4501,16 @@ impl BoundedHttps {
         }
         let metadata = origin.join("metadata/")?;
         let targets = origin.join("targets/")?;
-        let agent = ureq::Agent::config_builder()
+        let config = ureq::Agent::config_builder()
             .https_only(true)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .http_status_as_error(false)
             .timeout_global(Some(std::time::Duration::from_secs(120)))
-            .proxy(None)
-            .build()
-            .new_agent();
+            .proxy(None);
+        #[cfg(feature = "local-release-test")]
+        let config = config.tls_config(local_release_test_tls_config());
+        let agent = config.build().new_agent();
         Ok(Self {
             origin,
             metadata,
@@ -4599,6 +4604,34 @@ impl BoundedHttps {
         Ok(Box::pin(stream::once(
             async move { Ok(Bytes::from(bytes)) },
         )))
+    }
+}
+
+#[cfg(feature = "local-release-test")]
+pub fn local_release_test_tls_config() -> ureq::tls::TlsConfig {
+    use ureq::tls::{Certificate, RootCerts, TlsConfig};
+
+    let ca = Certificate::from_der(embedded_local_test_ca::DER).to_owned();
+    TlsConfig::builder()
+        .root_certs(RootCerts::new_with_certs(&[ca]))
+        .build()
+}
+
+#[cfg(all(test, feature = "local-release-test"))]
+mod local_release_test_tls_tests {
+    use super::{embedded_local_test_ca, local_release_test_tls_config};
+    use ureq::tls::RootCerts;
+
+    #[test]
+    fn local_test_https_uses_only_the_embedded_ca() {
+        let config = local_release_test_tls_config();
+        match config.root_certs() {
+            RootCerts::Specific(certificates) => {
+                assert_eq!(certificates.len(), 1);
+                assert_eq!(certificates[0].der(), embedded_local_test_ca::DER);
+            }
+            _ => panic!("local test HTTPS must use the private CA only"),
+        }
     }
 }
 #[async_trait]

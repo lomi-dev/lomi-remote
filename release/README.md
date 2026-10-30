@@ -6,6 +6,11 @@ the latest release through the Cloudflare gateway. Start with the
 [tag release runbook](tag-releases.md) for installation, publication, runner
 setup, trust keys and the remaining Windows signing step.
 
+For local builds and full installer tests on macOS and a Linux SSH host,
+use the [local testing runbook](local-testing.md). It runs the generated
+installer through private loopback HTTPS with separate test trust, without
+creating tags, running GitHub Actions or publishing artifacts.
+
 The sections below describe the underlying bundle lifecycle and the separate
 manual coordinated release process. The whole-product release manifest is
 used by `manual-release.yml`; it is not an input to the Host tag workflow.

@@ -47,9 +47,10 @@ def date_after(days: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def coordinates(public_dir: Path) -> tuple[dict, dict]:
+def coordinates(public_dir: Path, *, expected_origin: str = trust.ORIGIN) -> tuple[dict, dict]:
+    build_release.require_origin(expected_origin)
     config = read_json(public_dir / "release-public.json", 16 * 1024)
-    require(config.get("format") == 1 and config.get("repo") == trust.REPO and config.get("origin") == trust.ORIGIN, "release public configuration is inconsistent")
+    require(config.get("format") == 1 and config.get("repo") == trust.REPO and config.get("origin") == expected_origin, "release public configuration is inconsistent")
     root = read_json(public_dir / config["root_file"])
     require(trust.sha256(trust.canonical(root)) == config["root_sha256"], "public root digest differs from its pin")
     trust.verify_metadata(root, root["signed"], "root")
@@ -162,13 +163,20 @@ def check_linux_bootstrap(entry: dict, directory: Path, config: dict, primary_na
 
 
 def assemble(bundles: Path, output: Path, tag: str, revision: str, key_dir: Path, public_dir: Path,
-             expected_platforms: set[str] | None = None) -> dict:
+             expected_platforms: set[str] | None = None, *,
+             expected_origin: str = trust.ORIGIN, artifact_origin: str | None = None) -> dict:
     require(re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag) is not None, "release tag must be stable vX.Y.Z")
     require(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "release must identify its immutable source commit")
     require(not output.exists() or (output.is_dir() and not any(output.iterdir())), "release output must be absent or empty")
     output.mkdir(parents=True, exist_ok=True)
-    config, root = coordinates(public_dir)
-    artifact_origin = config["origin"] + tag + "/"
+    config, root = coordinates(public_dir, expected_origin=expected_origin)
+    default_artifact_origin = config["origin"] + tag + "/"
+    if artifact_origin is None:
+        artifact_origin = default_artifact_origin
+    else:
+        require(expected_origin != trust.ORIGIN, "production releases require the standard immutable tag origin")
+        build_release.require_origin(artifact_origin)
+        require(artifact_origin.startswith(default_artifact_origin), "local artifacts must stay under their versioned release origin")
     files, targets, entries, seen = {}, {}, [], set()
 
     def copy(source: Path, logical: str, asset: str | None = None) -> dict:
@@ -198,6 +206,8 @@ def assemble(bundles: Path, output: Path, tag: str, revision: str, key_dir: Path
         seen.add(platform_name)
         require(entry.get("format") == 1 and entry.get("version") == tag[1:] and entry.get("releaseOrigin") == artifact_origin, "bundle version or origin differs from the tag release")
         manifest = read_json(directory / "bundle" / "build-manifest.json")
+        if expected_origin == trust.ORIGIN:
+            require("localTestCaSha256" not in manifest, "local test TLS builds cannot be published as production releases")
         require(manifest.get("sourceRevision") == revision and manifest.get("version") == tag[1:] and manifest.get("platform") == platform_name and manifest.get("releaseOrigin") == config["origin"], "bundle provenance differs from the tag source")
         require(manifest.get("artifactOrigin") == artifact_origin, "bundle initial-install origin is not version-pinned")
         require(manifest.get("publicTufRootSha256") == config["root_sha256"] and entry["publicRoot"]["sha256"] == config["root_sha256"], "bundle uses another update trust root")

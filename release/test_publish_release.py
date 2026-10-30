@@ -230,6 +230,27 @@ class AssembleTests(PublisherFixture):
         write_json(config_path, config)
         self.assert_rejected()
 
+    def test_local_coordinates_require_an_explicit_matching_origin(self):
+        origin = "https://127.0.0.1:18443/remote/releases/"
+        config = {**self.config, "origin": origin}
+        write_json(self.public / "release-public.json", config)
+        with self.assertRaises(trust.TrustError):
+            publish_release.coordinates(self.public)
+        actual, root = publish_release.coordinates(self.public, expected_origin=origin)
+        self.assertEqual(actual, config)
+        self.assertEqual(trust.sha256(trust.canonical(root)), config["root_sha256"])
+
+    def test_production_rejects_a_local_test_tls_build(self):
+        manifest = trust.loads(self.manifest_path.read_bytes())
+        manifest["localTestCaSha256"] = "a" * 64
+        write_json(self.manifest_path, manifest)
+        with self.assertRaisesRegex(trust.TrustError, "local test TLS builds"):
+            self.assemble()
+
+    def test_production_rejects_a_nonstandard_artifact_origin(self):
+        with self.assertRaisesRegex(trust.TrustError, "standard immutable tag origin"):
+            self.assemble(artifact_origin=ARTIFACT_ORIGIN + "local-snapshot/")
+
     def test_rejects_archive_and_target_mutations(self):
         original_archive = self.archive.read_bytes()
         self.archive.write_bytes(original_archive + b"mutated")
