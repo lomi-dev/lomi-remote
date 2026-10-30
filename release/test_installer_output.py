@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import pty
 import select
@@ -15,6 +16,17 @@ TEMPLATE = ROOT / "release" / "install.sh.in"
 VERSION = "1.2.3"
 TEAM_ID = "TESTTEAM"
 ROOT_PIN = "a" * 64
+REAL_UPDATER = os.environ.get("LOMI_TEST_MAINTENANCE_UPDATER")
+MAINTENANCE_RESPONSE = {
+    "version": {"major": 1, "minor": 0},
+    "requestId": "33333333333333333333333333333333",
+    "result": {"Ok": {"type": "maintenanceStatus", "value": {
+        "hostId": "11111111-1111-4111-8111-111111111111",
+        "runtimeId": "22222222-2222-4222-8222-222222222222",
+        "profileSchema": "14",
+        "activeTerminals": "0",
+    }}},
+}
 
 
 @unittest.skipUnless(os.name == "posix", "the inner installer test requires POSIX")
@@ -71,7 +83,7 @@ if "service" in args:
         print("native service " + operation + " failure", file=sys.stderr)
         raise SystemExit(exit_code)
 if "maintenance" in args:
-    print('{"authenticatedMaintenance":true}')
+    print(os.environ["FIXTURE_MAINTENANCE_RESPONSE"])
     raise SystemExit(0)
 """
         self.cli_source = cli_source
@@ -100,9 +112,8 @@ elif command == "admin-host-status":
         raise SystemExit(int(os.environ["ADMIN_STATUS_EXIT"]))
     print("Account: fixture-account\\nMode: boot\\nRegistration: registered\\nActive: " + os.environ.get("SERVICE_ACTIVE", "inactive") + "\\nAutostart: enabled\\nCustodian ready: yes")
 elif command == "maintenance-schema":
-    if sys.stdin.read().strip() != '{"authenticatedMaintenance":true}':
-        raise SystemExit(2)
-    print("14\\n0")
+    real_updater = os.environ["LOMI_TEST_MAINTENANCE_UPDATER"]
+    os.execv(real_updater, [real_updater, "maintenance-schema"])
 elif command == "initialize-release":
     pathlib.Path(args[1]).mkdir(parents=True, exist_ok=True)
 elif command == "install-release-admin-boot":
@@ -156,6 +167,7 @@ else:
         service_start_exit: int = 0,
         admin_status_exit: int = 0,
         service_active: bool = False,
+        maintenance_response: dict | None = None,
     ) -> tuple[int, bytes, bytes]:
         environment = os.environ.copy()
         environment.update({
@@ -169,6 +181,9 @@ else:
             "SERVICE_INSTALL_EXIT": str(service_install_exit),
             "SERVICE_START_EXIT": str(service_start_exit),
             "SERVICE_ACTIVE": "active" if service_active else "inactive",
+            "FIXTURE_MAINTENANCE_RESPONSE": json.dumps(
+                MAINTENANCE_RESPONSE if maintenance_response is None else maintenance_response
+            ),
         })
         environment.pop("ADMIN_STATUS_EXIT", None)
         if admin_status_exit:
@@ -308,6 +323,7 @@ else:
         self.assertNotIn(b"Installed Lomi Remote", stderr)
         self.assertIn("SERVICE_OWNERSHIP_CONFLICT", self.cli_path.read_text())
 
+    @unittest.skipUnless(REAL_UPDATER, "requires the compiled release-root updater")
     def test_retry_of_active_service_retains_authenticated_maintenance(self) -> None:
         self.prepare_old_service_install()
         returncode, _stdout, stderr = self.run_installer(service_active=True)
@@ -319,6 +335,19 @@ else:
         install = next(command for command in self.updater_log.read_text().splitlines()
                        if command.startswith("install-release-admin-boot "))
         self.assertIn("macos-aarch64 14 fixture-account boot 1.2.3", install)
+
+    @unittest.skipUnless(REAL_UPDATER, "requires the compiled release-root updater")
+    def test_invalid_active_maintenance_response_aborts_before_activation(self) -> None:
+        self.prepare_old_service_install()
+        response = {**MAINTENANCE_RESPONSE, "requestId": "invalid request id"}
+        returncode, _stdout, stderr = self.run_installer(
+            service_active=True, maintenance_response=response,
+        )
+
+        self.assertNotEqual(returncode, 0)
+        self.assertIn(b"selected account host returned malformed maintenance status", stderr)
+        self.assertNotIn("install-release-admin-boot ", self.updater_log.read_text())
+        self.assertNotIn(b"Installed Lomi Remote", stderr)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import shutil
 import selectors
 import stat
 import subprocess
+import sys
 import time
 import urllib.parse
 import zipfile
@@ -808,6 +809,21 @@ def main() -> None:
         "-p", "lomi-update-trust", "--features", "release-root",
         "--bin", "lomi-update-trust",
     ], env=env)
+
+    # Exercise the feature-gated parser that is actually shipped, including
+    # responses serialized by the Host protocol. Reject a broken updater
+    # before signing or publishing any bundle.
+    run([
+        "cargo", "test", "--locked", "--release", "--target", target,
+        "-p", "lomi-update-trust", "--features", "release-root",
+        "--bin", "lomi-update-trust",
+    ], env=env)
+    if not platform.startswith("windows-"):
+        test_env = env.copy()
+        test_env["LOMI_TEST_MAINTENANCE_UPDATER"] = str(built / "lomi-update-trust")
+        run([
+            sys.executable, "-m", "unittest", "release.test_installer_output", "-v",
+        ], env=test_env)
 
     binaries = {
         "lomiremote": product_binary,

@@ -498,6 +498,13 @@ fn parse_maintenance_response(input: &[u8]) -> Result<(String, String), &'static
                 _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
             })
     }
+    fn request_id(value: &Value) -> bool {
+        // RequestId is a bounded correlation token in Local IPC, whereas
+        // HostId and RuntimeId are UUIDs. Use the protocol's own validator.
+        value.as_str().is_some_and(|value| {
+            lomi_remote_protocol::RequestId::try_from(value.to_owned()).is_ok()
+        })
+    }
     fn decimal(value: &Value) -> Option<String> {
         let value = value.as_str()?;
         if value.is_empty()
@@ -516,7 +523,7 @@ fn parse_maintenance_response(input: &[u8]) -> Result<(String, String), &'static
     let response: Value =
         serde_json::from_slice(input).map_err(|_| "maintenance response is not valid JSON")?;
     if !exact_keys(&response, &["requestId", "result", "version"])
-        || !response.get("requestId").is_some_and(uuid)
+        || !response.get("requestId").is_some_and(request_id)
     {
         return Err("maintenance response envelope is unsupported");
     }
@@ -567,6 +574,165 @@ fn parse_maintenance_response(input: &[u8]) -> Result<(String, String), &'static
     )
     .ok_or("maintenance status terminal count is invalid")?;
     Ok((schema, terminals))
+}
+
+#[cfg(all(test, feature = "release-root"))]
+mod maintenance_response_tests {
+    use super::parse_maintenance_response;
+    use lomi_remote_protocol::ipc::{LocalMaintenanceStatus, LocalResponse, LocalResult};
+    use lomi_remote_protocol::{DecimalU64, HostId, LocalIpcVersion, RequestId, RuntimeId};
+    use serde_json::{Value, json};
+
+    const REQUEST_ID: &str = "33333333333343338333333333333333";
+    const HOST_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const RUNTIME_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn response() -> LocalResponse {
+        LocalResponse {
+            version: LocalIpcVersion::CURRENT,
+            request_id: RequestId::try_from(REQUEST_ID.to_owned()).unwrap(),
+            result: Ok(LocalResult::MaintenanceStatus(LocalMaintenanceStatus {
+                host_id: HostId::try_from(HOST_ID.to_owned()).unwrap(),
+                runtime_id: RuntimeId::try_from(RUNTIME_ID.to_owned()).unwrap(),
+                profile_schema: DecimalU64(14),
+                active_terminals: DecimalU64(0),
+            })),
+        }
+    }
+
+    fn serialized(response: &LocalResponse) -> Value {
+        serde_json::to_value(response).unwrap()
+    }
+
+    #[test]
+    fn parses_protocol_maintenance_status_response() {
+        for id in [REQUEST_ID, "maintenance_probe-1", HOST_ID] {
+            let mut response = response();
+            response.request_id = RequestId::try_from(id.to_owned()).unwrap();
+            let encoded = serde_json::to_vec(&response).unwrap();
+            assert_eq!(
+                parse_maintenance_response(&encoded),
+                Ok(("14".into(), "0".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_request_ids_outside_the_protocol_contract() {
+        let mut value = serialized(&response());
+        for invalid in [
+            "",
+            "request id",
+            "request.id",
+            "request\nid",
+            "żądanie",
+            &"a".repeat(129),
+        ] {
+            value["requestId"] = json!(invalid);
+            assert_eq!(
+                parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+                Err("maintenance response envelope is unsupported"),
+                "accepted malformed requestId {invalid:?}"
+            );
+        }
+        value["requestId"] = json!(9);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance response envelope is unsupported")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_version_result_type_and_error_result() {
+        let mut value = serialized(&response());
+        value["version"]["major"] = json!(2);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance response IPC version is unsupported")
+        );
+
+        let mut value = serialized(&response());
+        value["version"]["minor"] = json!(1);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance response IPC version is unsupported")
+        );
+
+        let mut value = serialized(&response());
+        value["result"]["Ok"]["type"] = json!("status");
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance response is not an authenticated status result")
+        );
+
+        let mut error = response();
+        error.result = Err(lomi_remote_protocol::ipc::LocalError::Unavailable);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&error).unwrap()),
+            Err("maintenance response does not contain a successful status result")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_invalid_or_overflowing_counts() {
+        let mut value = serialized(&response());
+        value["extra"] = json!(true);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance response envelope is unsupported")
+        );
+
+        let mut value = serialized(&response());
+        value["result"]["Ok"]["value"]["extra"] = json!(true);
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance status has an unsupported shape")
+        );
+
+        for invalid in ["", "00", "01", "-1", "+1", "1.0", "18446744073709551616"] {
+            let mut value = serialized(&response());
+            value["result"]["Ok"]["value"]["profileSchema"] = json!(invalid);
+            assert_eq!(
+                parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+                Err("maintenance status profile schema is invalid"),
+                "accepted invalid profileSchema {invalid:?}"
+            );
+        }
+
+        let mut value = serialized(&response());
+        value["result"]["Ok"]["value"]["activeTerminals"] = json!("18446744073709551615");
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Ok(("14".into(), "18446744073709551615".into()))
+        );
+        value["result"]["Ok"]["value"]["activeTerminals"] = json!("18446744073709551616");
+        assert_eq!(
+            parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+            Err("maintenance status terminal count is invalid")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_uuid_fields_and_oversized_or_malformed_json() {
+        for field in ["hostId", "runtimeId"] {
+            let mut value = serialized(&response());
+            value["result"]["Ok"]["value"][field] = json!(REQUEST_ID);
+            assert_eq!(
+                parse_maintenance_response(&serde_json::to_vec(&value).unwrap()),
+                Err("maintenance status has an unsupported shape"),
+                "accepted requestId-shaped {field}"
+            );
+        }
+
+        assert_eq!(
+            parse_maintenance_response(&vec![b' '; 64 * 1024 + 1]),
+            Err("maintenance response exceeds its input limit")
+        );
+        assert_eq!(
+            parse_maintenance_response(b"not-json"),
+            Err("maintenance response is not valid JSON")
+        );
+    }
 }
 #[cfg(not(any(unix, windows)))]
 fn main() {

@@ -65,6 +65,13 @@ version and actual executable path. `NO_COLOR` disables completion colors.
 
 ### macOS service ownership recovery
 
+Version 0.1.4 also fixes maintenance response validation during an active
+upgrade. Request IDs use the Local IPC bounded correlation-token contract;
+they are distinct from the UUIDs used by Host and runtime identities. This
+prevents a valid running Host from being rejected as malformed before the
+update. Bundle builds now run parser tests and the active-upgrade installer
+test with the actual compiled updater before signing or publication.
+
 Version 0.1.3 fixes observation of the exact `--existing-profile` argument
 used by both Boot and Login services. Earlier versions could start the Host
 successfully, then report `SERVICE_OWNERSHIP_CONFLICT` while checking its job.
