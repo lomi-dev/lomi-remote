@@ -3,12 +3,18 @@
 //! The setup driver owns ordering and persistence. This module only gathers
 //! explicit operator choices and always restores the caller's terminal on exit.
 
+use crate::ui::{
+    interaction::{Action, Controls},
+    pointer::PointerTracker,
+    theme,
+};
 use crate::{bootstrap, setup};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -25,8 +31,8 @@ use lomi_remote_protocol::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
-    widgets::{Block, Paragraph, Wrap},
+    layout::{Constraint, Layout, Rect},
+    widgets::{Paragraph, Wrap},
 };
 use std::{
     io::{self, Stdout},
@@ -42,6 +48,7 @@ const ARGUMENT_LIMIT: usize = 4096;
 const ARGUMENTS_TOTAL_LIMIT: usize = 8192;
 const ENVIRONMENT_VALUE_LIMIT: usize = 256;
 const SHELL_CANDIDATE_LIMIT: usize = 64;
+const INPUT_FIELD_ACTION: usize = usize::MAX;
 
 /// A small, synchronous UI adapter for the resumable setup driver.
 ///
@@ -634,40 +641,67 @@ impl setup::SetupInteraction for SetupView {
     fn wait_for_login_update(&mut self) -> Result<bool, setup::SetupError> {
         let mut terminal =
             TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
+        let controls = Controls::default();
         let body = "The Host is waiting for approval in the device login flow. Complete verification in your browser or on a phone. Press v to request a one-time display of the verification URL and code, r or Enter to check status now, or Esc to stop waiting.";
+        let primary = [
+            ("v", "Reveal once"),
+            ("enter", "Check now"),
+            ("tab", "Next"),
+        ];
+        let trailing = [("esc", "Stop waiting")];
         let deadline = Instant::now() + Duration::from_millis(750);
         loop {
-            terminal
-                .draw(
+            let ready = terminal
+                .draw_interactive(
                     "Waiting for device login",
                     body,
-                    "Auto-check in 750 ms  [v] reveal once  [r/Enter] check now  [Esc] stop waiting",
+                    0,
+                    &controls,
+                    &primary,
+                    &trailing,
+                    None,
                 )
                 .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let Some(event) = terminal
+                .read_event_until(&controls, deadline)
+                .map_err(|_| setup::SetupError::InteractionUnavailable)?
+            else {
                 return Ok(true);
-            }
-            if !event::poll(remaining).map_err(|_| setup::SetupError::InteractionUnavailable)? {
-                return Ok(true);
-            }
-            match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+            };
+            let key = match event {
                 Event::Resize(_, _) => continue,
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if is_cancel_key(key.code, key.modifiers) || key.code == KeyCode::Char('q') {
-                        return Ok(false);
-                    }
-                    match key.code {
-                        KeyCode::Char('v') | KeyCode::Char('V') => {
-                            self.login_reveal_authorized = true;
-                            return Ok(true);
-                        }
-                        KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => {
-                            return Ok(true);
-                        }
-                        _ => {}
-                    }
+                Event::Mouse(mouse) => match controls.click(mouse) {
+                    Some(Action::Key(key)) => key,
+                    _ => continue,
+                },
+                Event::Key(key) if key.kind != KeyEventKind::Release => key,
+                _ => continue,
+            };
+            if is_cancel_key(key.code, key.modifiers) || key.code == KeyCode::Char('q') {
+                return Ok(false);
+            }
+            if !ready {
+                continue;
+            }
+            let Some(key) = focused_key(&controls, key) else {
+                continue;
+            };
+            if is_cancel_key(key.code, key.modifiers) {
+                return Ok(false);
+            }
+            if let Some(backwards) = tab_direction(key) {
+                controls.cycle(backwards);
+                continue;
+            }
+            if horizontal_navigation_key(&controls, key) {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('v') | KeyCode::Char('V') => {
+                    self.login_reveal_authorized = true;
+                    return Ok(true);
                 }
+                KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => return Ok(true),
                 _ => {}
             }
         }
@@ -676,36 +710,59 @@ impl setup::SetupInteraction for SetupView {
     fn wait_for_publication_update(&mut self) -> Result<bool, setup::SetupError> {
         let mut terminal =
             TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
+        let controls = Controls::default();
         let body = "The Host has not yet confirmed the current workspace publication. Wait for the Remote service to finish, then check the Host's durable publication status again. Waiting does not resend a share or unshare request. Press r or Enter to check now, or Esc to leave setup pending.";
+        let primary = [("enter", "Check now"), ("r", "Retry"), ("tab", "Next")];
+        let trailing = [("esc", "Leave pending")];
         let deadline = Instant::now() + Duration::from_millis(750);
         loop {
-            terminal
-                .draw(
+            let ready = terminal
+                .draw_interactive(
                     "Waiting for Cloud publication",
                     body,
-                    "Auto-check in 750 ms  [r/Enter] check now  [Esc] stop waiting",
+                    0,
+                    &controls,
+                    &primary,
+                    &trailing,
+                    None,
                 )
                 .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let Some(event) = terminal
+                .read_event_until(&controls, deadline)
+                .map_err(|_| setup::SetupError::InteractionUnavailable)?
+            else {
                 return Ok(true);
-            }
-            if !event::poll(remaining).map_err(|_| setup::SetupError::InteractionUnavailable)? {
-                return Ok(true);
-            }
-            match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+            };
+            let key = match event {
                 Event::Resize(_, _) => continue,
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if is_cancel_key(key.code, key.modifiers) || key.code == KeyCode::Char('q') {
-                        return Ok(false);
-                    }
-                    if key.code == KeyCode::Enter
-                        || matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
-                    {
-                        return Ok(true);
-                    }
-                }
-                _ => {}
+                Event::Mouse(mouse) => match controls.click(mouse) {
+                    Some(Action::Key(key)) => key,
+                    _ => continue,
+                },
+                Event::Key(key) if key.kind != KeyEventKind::Release => key,
+                _ => continue,
+            };
+            if is_cancel_key(key.code, key.modifiers) || key.code == KeyCode::Char('q') {
+                return Ok(false);
+            }
+            if !ready {
+                continue;
+            }
+            let Some(key) = focused_key(&controls, key) else {
+                continue;
+            };
+            if is_cancel_key(key.code, key.modifiers) {
+                return Ok(false);
+            }
+            if let Some(backwards) = tab_direction(key) {
+                controls.cycle(backwards);
+                continue;
+            }
+            if horizontal_navigation_key(&controls, key) {
+                continue;
+            }
+            if key.code == KeyCode::Enter || matches!(key.code, KeyCode::Char('r' | 'R')) {
+                return Ok(true);
             }
         }
     }
@@ -886,6 +943,9 @@ impl setup::SetupInteraction for SetupView {
 }
 
 struct TerminalSession {
+    // Field drop order matters: restore the pointer before terminal modes and
+    // mouse capture are restored by `_restore`.
+    pointer: PointerTracker,
     terminal: Terminal<CrosstermBackend<Stdout>>,
     _restore: TerminalRestoreGuard,
 }
@@ -897,38 +957,50 @@ impl TerminalSession {
         enable_raw_mode()?;
         let restore = TerminalRestoreGuard;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            EnableFocusChange,
+            Hide
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
+        let mut pointer = PointerTracker::new();
+        pointer.reset();
         Ok(Self {
+            pointer,
             terminal,
             _restore: restore,
         })
     }
 
-    fn draw(&mut self, title: &str, body: &str, footer: &str) -> io::Result<bool> {
-        self.draw_scrolled(title, body, footer, 0)
-    }
-
-    fn draw_scrolled(
+    fn draw_interactive(
         &mut self,
         title: &str,
         body: &str,
-        footer: &str,
         scroll: u16,
+        controls: &Controls,
+        primary: &[(&str, &str)],
+        trailing: &[(&str, &str)],
+        input_hit: Option<(&str, &str)>,
     ) -> io::Result<bool> {
         let mut enough_room = false;
         self.terminal.draw(|frame| {
+            controls.begin();
+            theme::canvas(frame);
             enough_room = frame.area().width >= MIN_COLUMNS && frame.area().height >= MIN_ROWS;
             if !enough_room {
                 frame.render_widget(
-                    Paragraph::new(format!(
-                        "Resize this terminal to at least 80 columns by 24 rows.\n\nPress Esc to cancel."
+                    Paragraph::new(theme::content(
+                        "Resize this terminal to at least 80 columns by 24 rows.\n\nPress Esc to cancel.",
                     ))
-                    .block(Block::bordered().title("Lomi Remote setup"))
+                    .block(theme::panel("Lomi Remote setup", theme::SURFACE))
                     .wrap(Wrap { trim: false }),
                     frame.area(),
                 );
+                theme::finish(frame);
                 return;
             }
             let [header, content, footer_area] = Layout::vertical([
@@ -938,31 +1010,264 @@ impl TerminalSession {
             ])
             .areas(frame.area());
             frame.render_widget(
-                Paragraph::new(display(title, 160)).block(Block::bordered()),
+                Paragraph::new(theme::header(&display(title, 160)))
+                    .block(theme::panel("", theme::SURFACE)),
                 header,
             );
+            let content_block = theme::panel("", theme::SURFACE);
+            let content_inner = content_block.inner(content);
+            let displayed_body = display_block(body, 32_768);
             frame.render_widget(
-                Paragraph::new(display_block(body, 32_768))
-                    .block(Block::bordered())
+                Paragraph::new(theme::content(&displayed_body))
+                    .block(content_block)
                     .wrap(Wrap { trim: false })
                     .scroll((scroll, 0)),
                 content,
             );
-            frame.render_widget(
-                Paragraph::new(display_block(footer, 1024))
-                    .block(Block::bordered())
-                    .wrap(Wrap { trim: false }),
+            if let Some((description, field)) = input_hit {
+                let description = display_block(description, 8192);
+                let description_lines = Paragraph::new(theme::content(&description))
+                    .wrap(Wrap { trim: false })
+                    .line_count(content_inner.width);
+                let field = display(field, 8192);
+                let field_lines = Paragraph::new(theme::content(&field))
+                    .wrap(Wrap { trim: false })
+                    .line_count(content_inner.width)
+                    .max(1);
+                let field_top = content_inner
+                    .y
+                    .saturating_add(u16::try_from(description_lines).unwrap_or(u16::MAX))
+                    .saturating_add(1);
+                let field_bottom = field_top
+                    .saturating_add(u16::try_from(field_lines).unwrap_or(u16::MAX));
+                let field_top = field_top.saturating_sub(scroll);
+                let field_bottom = field_bottom.saturating_sub(scroll);
+                let target_top = field_top.max(content_inner.y);
+                let target_bottom = field_bottom.min(content_inner.bottom());
+                if target_bottom > target_top {
+                    controls.row(
+                        Rect::new(
+                            content_inner.x,
+                            target_top,
+                            content_inner.width,
+                            target_bottom - target_top,
+                        ),
+                        INPUT_FIELD_ACTION,
+                    );
+                }
+            }
+            controls.extend(theme::render_footer(
+                frame,
                 footer_area,
-            );
+                primary,
+                trailing,
+            ));
+            if input_hit.is_some() && controls.focused().is_none() {
+                controls.focus_action(Action::Row(INPUT_FIELD_ACTION));
+            }
+            controls.highlight(frame);
+            theme::finish(frame);
         })?;
+        self.pointer
+            .refresh(|column, row| controls.hoverable(column, row));
         Ok(enough_room)
+    }
+
+    fn draw_choices(
+        &mut self,
+        title: &str,
+        description: &str,
+        choices: &[&str],
+        selected: usize,
+        controls: &Controls,
+        primary: &[(&str, &str)],
+        trailing: &[(&str, &str)],
+    ) -> io::Result<bool> {
+        let mut enough_room = false;
+        self.terminal.draw(|frame| {
+            controls.begin();
+            theme::canvas(frame);
+            enough_room = frame.area().width >= MIN_COLUMNS && frame.area().height >= MIN_ROWS;
+            if !enough_room {
+                frame.render_widget(
+                    Paragraph::new(theme::content(
+                        "Resize this terminal to at least 80 columns by 24 rows.\n\nPress Esc to cancel.",
+                    ))
+                    .block(theme::panel("Lomi Remote setup", theme::SURFACE))
+                    .wrap(Wrap { trim: false }),
+                    frame.area(),
+                );
+                theme::finish(frame);
+                return;
+            }
+            let [header, content, footer_area] = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ])
+            .areas(frame.area());
+            frame.render_widget(
+                Paragraph::new(theme::header(&display(title, 160)))
+                    .block(theme::panel("", theme::SURFACE)),
+                header,
+            );
+
+            let first = selected.saturating_sub(4);
+            let last = (first + 10).min(choices.len());
+            let mut visible = Vec::new();
+            if first > 0 {
+                visible.push((format!("… {} earlier choices", first), None));
+            }
+            visible.extend((first..last).map(|index| {
+                (
+                    format!(
+                        "{} {}",
+                        if index == selected { ">" } else { " " },
+                        display(choices[index], 1024)
+                    ),
+                    Some(index),
+                )
+            }));
+            if last < choices.len() {
+                visible.push((format!("… {} later choices", choices.len() - last), None));
+            }
+            let description = display_block(description, 8192);
+            let options = visible
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let body = format!("{description}\n\n{options}");
+            let content_block = theme::panel("", theme::SURFACE);
+            let content_inner = content_block.inner(content);
+            let rendered_body = display_block(&body, 32_768);
+            frame.render_widget(
+                Paragraph::new(theme::content(&rendered_body))
+                    .block(content_block)
+                    .wrap(Wrap { trim: false }),
+                content,
+            );
+
+            let description_lines = Paragraph::new(theme::content(&description))
+                .wrap(Wrap { trim: false })
+                .line_count(content_inner.width);
+            let mut row_y = content_inner
+                .y
+                .saturating_add(u16::try_from(description_lines).unwrap_or(u16::MAX))
+                .saturating_add(1);
+            for (text, index) in visible {
+                let lines = Paragraph::new(theme::content(&text))
+                    .wrap(Wrap { trim: false })
+                    .line_count(content_inner.width)
+                    .max(1);
+                let row_bottom = row_y.saturating_add(u16::try_from(lines).unwrap_or(u16::MAX));
+                if let Some(index) = index {
+                    let target_top = row_y.max(content_inner.y);
+                    let target_bottom = row_bottom.min(content_inner.bottom());
+                    if target_bottom > target_top {
+                        controls.row(
+                            Rect::new(
+                                content_inner.x,
+                                target_top,
+                                content_inner.width,
+                                target_bottom - target_top,
+                            ),
+                            index,
+                        );
+                    }
+                }
+                row_y = row_bottom;
+            }
+
+            controls.extend(theme::render_footer(
+                frame,
+                footer_area,
+                primary,
+                trailing,
+            ));
+            controls.highlight(frame);
+            theme::finish(frame);
+        })?;
+        self.pointer
+            .refresh(|column, row| controls.hoverable(column, row));
+        Ok(enough_room)
+    }
+
+    /// Read setup input while updating the terminal pointer from hover events.
+    /// Mouse movement never dispatches a click or causes a screen redraw.
+    fn read_event(&mut self, controls: &Controls) -> io::Result<Event> {
+        loop {
+            if let Some(event) = self.observe_event(controls, event::read()?) {
+                return Ok(event);
+            }
+        }
+    }
+
+    /// A polling variant keeps timed setup waits responsive while consuming
+    /// hover events between polls.
+    fn read_event_until(
+        &mut self,
+        controls: &Controls,
+        deadline: Instant,
+    ) -> io::Result<Option<Event>> {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !event::poll(remaining)? {
+                return Ok(None);
+            }
+            if let Some(event) = self.observe_event(controls, event::read()?) {
+                return Ok(Some(event));
+            }
+        }
+    }
+
+    fn observe_event(&mut self, controls: &Controls, event: Event) -> Option<Event> {
+        match event {
+            Event::Mouse(mouse) => {
+                self.pointer.observe(mouse);
+                self.pointer
+                    .refresh(|column, row| controls.hoverable(column, row));
+                (!matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)))
+                    .then_some(Event::Mouse(mouse))
+            }
+            Event::FocusLost => {
+                self.pointer.reset();
+                None
+            }
+            Event::FocusGained => {
+                self.pointer
+                    .refresh(|column, row| controls.hoverable(column, row));
+                None
+            }
+            event => Some(event),
+        }
+    }
+
+    fn mouse_in_content(&self, mouse: MouseEvent) -> bool {
+        let Ok(size) = self.terminal.size() else {
+            return false;
+        };
+        let area = Rect::new(
+            1,
+            4,
+            size.width.saturating_sub(2),
+            size.height.saturating_sub(8),
+        );
+        area.contains((mouse.column, mouse.row).into())
     }
 }
 
 impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, DisableBracketedPaste, LeaveAlternateScreen);
+        // Try each restoration independently. A failure writing one escape
+        // sequence must not prevent the remaining terminal modes from being
+        // restored.
+        let _ = execute!(stdout, Show);
+        let _ = execute!(stdout, DisableBracketedPaste);
+        let _ = execute!(stdout, DisableFocusChange);
+        let _ = execute!(stdout, DisableMouseCapture);
+        let _ = execute!(stdout, LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
 }
@@ -973,58 +1278,188 @@ fn choose_index(
     choices: &[&str],
     initial: usize,
 ) -> Result<Option<usize>, setup::SetupError> {
+    choose_index_with_footer(
+        title,
+        description,
+        choices,
+        initial,
+        &[
+            ("j", "Move down"),
+            ("k", "Move up"),
+            ("enter", "Continue"),
+            ("tab", "Next control"),
+        ],
+        &[("esc", "Cancel")],
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChoicePointerAction {
+    Selected(usize),
+    Continue(usize),
+    Cancel,
+    Key(KeyEvent),
+    Ignore,
+}
+
+fn step_choice_selection(selected: usize, choices_len: usize, down: bool) -> usize {
+    if down {
+        selected
+            .saturating_add(1)
+            .min(choices_len.saturating_sub(1))
+    } else {
+        selected.saturating_sub(1)
+    }
+}
+
+fn choice_pointer_action(
+    action: Action,
+    selected: usize,
+    choices_len: usize,
+) -> ChoicePointerAction {
+    match action {
+        Action::Row(index) if index < choices_len => ChoicePointerAction::Selected(index),
+        Action::Row(_) => ChoicePointerAction::Ignore,
+        Action::Key(key) if key.code == KeyCode::Enter => ChoicePointerAction::Continue(selected),
+        Action::Key(key) if is_cancel_key(key.code, key.modifiers) => ChoicePointerAction::Cancel,
+        Action::Key(key) => ChoicePointerAction::Key(key),
+    }
+}
+
+fn choose_index_with_footer(
+    title: &str,
+    description: &str,
+    choices: &[&str],
+    initial: usize,
+    primary: &[(&str, &str)],
+    trailing: &[(&str, &str)],
+) -> Result<Option<usize>, setup::SetupError> {
     if choices.is_empty() {
         return Err(setup::SetupError::InteractionUnavailable);
     }
     let mut selected = initial.min(choices.len() - 1);
+    let controls = Controls::default();
     let mut terminal =
         TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
     loop {
-        let first = selected.saturating_sub(4);
-        let last = (first + 10).min(choices.len());
-        let mut visible = Vec::new();
-        if first > 0 {
-            visible.push(format!("… {} earlier choices", first));
-        }
-        visible.extend((first..last).map(|index| {
-            format!(
-                "{} {}",
-                if index == selected { ">" } else { " " },
-                display(choices[index], 1024)
-            )
-        }));
-        if last < choices.len() {
-            visible.push(format!("… {} later choices", choices.len() - last));
-        }
-        let options = visible.join("\n");
-        let body = format!("{}\n\n{}", display_block(description, 8192), options);
         let ready = terminal
-            .draw(
+            .draw_choices(
                 title,
-                &body,
-                "Up/Down or j/k move  Enter select  Esc cancel",
+                description,
+                choices,
+                selected,
+                &controls,
+                primary,
+                trailing,
             )
             .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-        match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+        let key = match terminal
+            .read_event(&controls)
+            .map_err(|_| setup::SetupError::InteractionUnavailable)?
+        {
             Event::Resize(_, _) => continue,
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if is_cancel_key(key.code, key.modifiers) {
-                    return Ok(None);
-                }
-                if !ready {
+            Event::Mouse(mouse) if ready => match mouse.kind {
+                MouseEventKind::ScrollUp if terminal.mouse_in_content(mouse) => {
+                    controls.blur();
+                    selected = step_choice_selection(selected, choices.len(), false);
                     continue;
                 }
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        selected = (selected + 1).min(choices.len() - 1)
+                MouseEventKind::ScrollDown if terminal.mouse_in_content(mouse) => {
+                    controls.blur();
+                    selected = step_choice_selection(selected, choices.len(), true);
+                    continue;
+                }
+                _ => match controls
+                    .click(mouse)
+                    .map(|action| choice_pointer_action(action, selected, choices.len()))
+                    .unwrap_or(ChoicePointerAction::Ignore)
+                {
+                    ChoicePointerAction::Selected(index) => {
+                        selected = index;
+                        continue;
                     }
-                    KeyCode::Enter => return Ok(Some(selected)),
-                    KeyCode::Home => selected = 0,
-                    KeyCode::End => selected = choices.len() - 1,
-                    _ => {}
+                    ChoicePointerAction::Continue(index) => return Ok(Some(index)),
+                    ChoicePointerAction::Cancel => return Ok(None),
+                    ChoicePointerAction::Key(key) => key,
+                    ChoicePointerAction::Ignore => continue,
+                },
+            },
+            Event::Key(key) if key.kind != KeyEventKind::Release => key,
+            _ => continue,
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if !ready {
+            continue;
+        }
+        let Some(key) = focused_key(&controls, key) else {
+            continue;
+        };
+        if key.code == KeyCode::Enter {
+            if let Some(Action::Row(index)) = controls.focused() {
+                if index < choices.len() {
+                    return Ok(Some(index));
                 }
             }
+        }
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if let Some(backwards) = tab_direction(key) {
+            controls.cycle(backwards);
+            continue;
+        }
+        if horizontal_navigation_key(&controls, key) {
+            continue;
+        }
+        let code = key.code;
+        if matches!(code, KeyCode::Up | KeyCode::Down) {
+            if matches!(controls.focused(), Some(Action::Key(_))) {
+                controls.move_focus(code);
+                if let Some(Action::Row(index)) = controls.focused() {
+                    if index < choices.len() {
+                        selected = index;
+                    }
+                }
+                continue;
+            }
+            if code == KeyCode::Down && selected.saturating_add(1) >= choices.len() {
+                controls.focus_action(Action::Row(selected));
+                if controls.move_focus(KeyCode::Down) {
+                    continue;
+                }
+            }
+            controls.blur();
+        } else if matches!(
+            code,
+            KeyCode::Char('j' | 'k') | KeyCode::Home | KeyCode::End
+        ) {
+            controls.blur();
+        }
+        match code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Char('y' | 'Y')
+                if plain_activation_char(key, 'y')
+                    && primary.iter().any(|(key, _)| *key == "y") =>
+            {
+                return Ok(Some(0));
+            }
+            KeyCode::Char('n' | 'N')
+                if plain_activation_char(key, 'n')
+                    && primary.iter().any(|(key, _)| *key == "n") =>
+            {
+                return Ok(Some(1.min(choices.len() - 1)));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                selected = step_choice_selection(selected, choices.len(), false)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                selected = step_choice_selection(selected, choices.len(), true)
+            }
+            KeyCode::Enter => return Ok(Some(selected)),
+            KeyCode::Home => selected = 0,
+            KeyCode::End => selected = choices.len() - 1,
             _ => {}
         }
     }
@@ -1036,8 +1471,20 @@ fn confirm(
     default: bool,
 ) -> Result<Option<bool>, setup::SetupError> {
     let choices = ["Yes", "No"];
-    choose_index(title, description, &choices, if default { 0 } else { 1 })
-        .map(|selection| selection.map(|selection| selection == 0))
+    choose_index_with_footer(
+        title,
+        description,
+        &choices,
+        if default { 0 } else { 1 },
+        &[
+            ("y", "Yes"),
+            ("n", "No"),
+            ("enter", "Confirm"),
+            ("tab", "Next control"),
+        ],
+        &[("esc", "Cancel")],
+    )
+    .map(|selection| selection.map(|selection| selection == 0))
 }
 
 fn confirm_scrolled(
@@ -1046,38 +1493,83 @@ fn confirm_scrolled(
     default: bool,
 ) -> Result<Option<bool>, setup::SetupError> {
     let mut scroll = 0u16;
+    let controls = Controls::default();
     let mut terminal =
         TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
-    let footer = if default {
-        "Up/Down or PageUp/PageDown scroll  Enter or y confirms  n/Esc cancels"
-    } else {
-        "Up/Down or PageUp/PageDown scroll  y confirms  Enter or n/Esc cancels"
-    };
+    let primary = [
+        ("enter", if default { "Yes" } else { "No" }),
+        ("y", "Yes"),
+        ("n", "No"),
+        ("tab", "Next control"),
+    ];
+    let trailing = [("esc", "Cancel")];
     loop {
         let ready = terminal
-            .draw_scrolled(title, description, footer, scroll)
+            .draw_interactive(
+                title,
+                description,
+                scroll,
+                &controls,
+                &primary,
+                &trailing,
+                None,
+            )
             .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-        match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+        let key = match terminal
+            .read_event(&controls)
+            .map_err(|_| setup::SetupError::InteractionUnavailable)?
+        {
             Event::Resize(_, _) => continue,
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if is_cancel_key(key.code, key.modifiers) {
-                    return Ok(None);
-                }
-                if !ready {
+            Event::Mouse(mouse) if ready => match mouse.kind {
+                MouseEventKind::ScrollUp if terminal.mouse_in_content(mouse) => {
+                    scroll = scroll.saturating_sub(1);
                     continue;
                 }
-                match key.code {
-                    KeyCode::Enter => return Ok(Some(default)),
-                    KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(Some(true)),
-                    KeyCode::Char('n') | KeyCode::Char('N') => return Ok(Some(false)),
-                    KeyCode::Up => scroll = scroll.saturating_sub(1),
-                    KeyCode::Down => scroll = scroll.saturating_add(1),
-                    KeyCode::PageUp => scroll = scroll.saturating_sub(8),
-                    KeyCode::PageDown => scroll = scroll.saturating_add(8),
-                    KeyCode::Home => scroll = 0,
-                    _ => {}
+                MouseEventKind::ScrollDown if terminal.mouse_in_content(mouse) => {
+                    scroll = scroll.saturating_add(1);
+                    continue;
                 }
+                _ => match controls.click(mouse) {
+                    Some(Action::Key(key)) => key,
+                    _ => continue,
+                },
+            },
+            Event::Key(key) if key.kind != KeyEventKind::Release => key,
+            _ => continue,
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if !ready {
+            continue;
+        }
+        let Some(key) = focused_key(&controls, key) else {
+            continue;
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if let Some(backwards) = tab_direction(key) {
+            controls.cycle(backwards);
+            continue;
+        }
+        if horizontal_navigation_key(&controls, key) {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Enter => return Ok(Some(default)),
+            KeyCode::Char('y' | 'Y') if plain_activation_char(key, 'y') => {
+                return Ok(Some(true));
             }
+            KeyCode::Char('n' | 'N') if plain_activation_char(key, 'n') => {
+                return Ok(Some(false));
+            }
+            KeyCode::Up => scroll = scroll.saturating_sub(1),
+            KeyCode::Down => scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => scroll = scroll.saturating_sub(8),
+            KeyCode::PageDown => scroll = scroll.saturating_add(8),
+            KeyCode::Home => scroll = 0,
             _ => {}
         }
     }
@@ -1097,8 +1589,16 @@ fn input_line(
         }
     }
     let mut status = String::new();
+    let mut scroll = 0u16;
+    let controls = Controls::default();
     let mut terminal =
         TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
+    let primary = [
+        ("backspace", "Delete"),
+        ("enter", "Continue"),
+        ("tab", "Next control"),
+    ];
+    let trailing = [("esc", "Cancel")];
     loop {
         let visible = if masked {
             "•".repeat(value.chars().count().min(512))
@@ -1106,19 +1606,27 @@ fn input_line(
             display_tail(&value, 120)
         };
         let body = format!(
-            "{}\n\n{}▏\n\n{}",
+            "{}\n\n{}▏\n\n{}\n\nType or paste one control-free line. Backspace edits; Ctrl-U clears.",
             display_block(description, 8192),
             visible,
             status
         );
+        let input_line = format!("{visible}▏");
         let ready = terminal
-            .draw(
+            .draw_interactive(
                 title,
                 &body,
-                "Type or paste one line  Backspace edit  Ctrl-U clear  Enter continue  Esc cancel",
+                scroll,
+                &controls,
+                &primary,
+                &trailing,
+                Some((description, &input_line)),
             )
             .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-        match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+        let key = match terminal
+            .read_event(&controls)
+            .map_err(|_| setup::SetupError::InteractionUnavailable)?
+        {
             Event::Resize(_, _) => continue,
             Event::Paste(pasted) => {
                 if !ready {
@@ -1136,39 +1644,88 @@ fn input_line(
                 } else {
                     value.push_str(pasted);
                     status.clear();
+                    input_edit_committed(&controls);
                 }
+                continue;
             }
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if is_cancel_key(key.code, key.modifiers) {
-                    return Ok(None);
-                }
-                if !ready {
+            Event::Mouse(mouse) if ready => match mouse.kind {
+                MouseEventKind::ScrollUp if terminal.mouse_in_content(mouse) => {
+                    scroll = scroll.saturating_sub(1);
                     continue;
                 }
-                match key.code {
-                    KeyCode::Enter => return Ok(Some(value)),
-                    KeyCode::Backspace => {
-                        value.pop();
-                        status.clear();
+                MouseEventKind::ScrollDown if terminal.mouse_in_content(mouse) => {
+                    scroll = scroll.saturating_add(1);
+                    continue;
+                }
+                _ => match controls.click(mouse) {
+                    Some(Action::Key(key)) => key,
+                    Some(Action::Row(INPUT_FIELD_ACTION)) | None => continue,
+                    Some(Action::Row(_)) => continue,
+                },
+            },
+            Event::Key(key) if key.kind != KeyEventKind::Release => key,
+            _ => continue,
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if !ready {
+            continue;
+        }
+        let Some(key) = focused_key(&controls, key) else {
+            continue;
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(None);
+        }
+        if let Some(backwards) = tab_direction(key) {
+            controls.cycle(backwards);
+            continue;
+        }
+        if input_horizontal_navigation_key(&controls, key) {
+            continue;
+        }
+        if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            match controls.focused() {
+                Some(Action::Key(_)) => {
+                    controls.move_focus(key.code);
+                    continue;
+                }
+                Some(Action::Row(INPUT_FIELD_ACTION)) | None => {
+                    if controls.focused().is_none() {
+                        controls.focus_action(Action::Row(INPUT_FIELD_ACTION));
                     }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        value.clear();
-                        status.clear();
-                    }
-                    KeyCode::Char(character)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT) =>
-                    {
-                        if character.is_control() {
-                            status = "Control characters are not accepted.".to_owned();
-                        } else if value.len().saturating_add(character.len_utf8()) > limit {
-                            status = format!("Input is limited to {limit} UTF-8 bytes.");
-                        } else {
-                            value.push(character);
-                            status.clear();
-                        }
-                    }
-                    _ => {}
+                    controls.move_focus(key.code);
+                    continue;
+                }
+                Some(Action::Row(_)) => continue,
+            }
+        }
+        match key.code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Enter => return Ok(Some(value)),
+            KeyCode::Backspace => {
+                value.pop();
+                input_edit_committed(&controls);
+                status.clear();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                value.clear();
+                status.clear();
+                input_edit_committed(&controls);
+            }
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if character.is_control() {
+                    status = "Control characters are not accepted.".to_owned();
+                } else if value.len().saturating_add(character.len_utf8()) > limit {
+                    status = format!("Input is limited to {limit} UTF-8 bytes.");
+                } else {
+                    value.push(character);
+                    status.clear();
+                    input_edit_committed(&controls);
                 }
             }
             _ => {}
@@ -1188,20 +1745,51 @@ fn wait_for_dismiss(
     title: &str,
     body: &str,
 ) -> Result<(), setup::SetupError> {
+    let controls = Controls::default();
+    let primary = [("enter", "Dismiss")];
+    let trailing = [("esc", "Dismiss")];
     loop {
         let ready = terminal
-            .draw(title, body, "Press any key to dismiss  Esc cancels")
+            .draw_interactive(title, body, 0, &controls, &primary, &trailing, None)
             .map_err(|_| setup::SetupError::InteractionUnavailable)?;
-        match event::read().map_err(|_| setup::SetupError::InteractionUnavailable)? {
+        let key = match terminal
+            .read_event(&controls)
+            .map_err(|_| setup::SetupError::InteractionUnavailable)?
+        {
             Event::Resize(_, _) => continue,
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if is_cancel_key(key.code, key.modifiers) || ready {
-                    return Ok(());
-                }
-            }
             Event::Paste(_) if ready => return Ok(()),
-            _ => {}
+            Event::Paste(_) => continue,
+            Event::Mouse(mouse) => match controls.click(mouse) {
+                Some(Action::Key(key)) => key,
+                _ => continue,
+            },
+            Event::Key(key) if key.kind != KeyEventKind::Release => key,
+            _ => continue,
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(());
         }
+        if !ready {
+            continue;
+        }
+        let Some(key) = focused_key(&controls, key) else {
+            continue;
+        };
+        if is_cancel_key(key.code, key.modifiers) {
+            return Ok(());
+        }
+        if let Some(backwards) = tab_direction(key) {
+            controls.cycle(backwards);
+            continue;
+        }
+        if horizontal_navigation_key(&controls, key) {
+            continue;
+        }
+        if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            controls.move_focus(key.code);
+            continue;
+        }
+        return Ok(());
     }
 }
 
@@ -1269,6 +1857,57 @@ fn is_cancel_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
         || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
 }
 
+fn tab_direction(key: KeyEvent) -> Option<bool> {
+    match key.code {
+        KeyCode::BackTab => Some(true),
+        KeyCode::Tab => Some(key.modifiers.contains(KeyModifiers::SHIFT)),
+        _ => None,
+    }
+}
+
+fn focused_key(controls: &Controls, key: KeyEvent) -> Option<KeyEvent> {
+    if key.code == KeyCode::Enter && !key.modifiers.is_empty() {
+        return None;
+    }
+    if key.code != KeyCode::Enter {
+        return Some(key);
+    }
+    Some(match controls.focused() {
+        Some(Action::Key(focused)) => focused,
+        Some(Action::Row(_)) | None => key,
+    })
+}
+
+fn input_edit_committed(controls: &Controls) {
+    controls.focus_action(Action::Row(INPUT_FIELD_ACTION));
+}
+
+fn horizontal_navigation_key(controls: &Controls, key: KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        controls.move_focus(key.code);
+        true
+    } else {
+        false
+    }
+}
+
+fn input_horizontal_navigation_key(controls: &Controls, key: KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        if matches!(controls.focused(), Some(Action::Key(_))) {
+            controls.move_focus(key.code);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn plain_activation_char(key: KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&expected))
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
 fn is_filesystem_root(path: &Path) -> bool {
     path.components()
         .all(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
@@ -1279,5 +1918,139 @@ fn start_mode_label(mode: LocalStartMode) -> &'static str {
         LocalStartMode::Manual => "Manual",
         LocalStartMode::Login => "After login",
         LocalStartMode::Boot => "At boot",
+    }
+}
+
+#[cfg(test)]
+mod focused_interaction_tests {
+    use super::*;
+
+    #[test]
+    fn clicking_a_choice_selects_it_without_accepting_it() {
+        assert_eq!(
+            choice_pointer_action(Action::Row(3), 1, 4),
+            ChoicePointerAction::Selected(3)
+        );
+        assert_eq!(
+            choice_pointer_action(
+                Action::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                3,
+                4,
+            ),
+            ChoicePointerAction::Continue(3)
+        );
+    }
+
+    #[test]
+    fn choice_pointer_ignores_invisible_rows_and_cancel_is_explicit() {
+        assert_eq!(
+            choice_pointer_action(Action::Row(4), 1, 4),
+            ChoicePointerAction::Ignore
+        );
+        assert_eq!(
+            choice_pointer_action(
+                Action::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                1,
+                4,
+            ),
+            ChoicePointerAction::Cancel
+        );
+    }
+
+    #[test]
+    fn wheel_and_keyboard_selection_stay_within_available_choices() {
+        assert_eq!(step_choice_selection(0, 4, false), 0);
+        assert_eq!(step_choice_selection(3, 4, true), 3);
+        assert_eq!(step_choice_selection(1, 4, true), 2);
+    }
+
+    #[test]
+    fn focused_footer_actions_activate_with_enter_and_backtab_cycles_backwards() {
+        let controls = Controls::default();
+        controls.key(Rect::new(0, 0, 8, 1), KeyCode::Tab);
+        controls.cycle(false);
+        assert_eq!(
+            focused_key(&controls, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap()
+                .code,
+            KeyCode::Tab
+        );
+        assert_eq!(
+            tab_direction(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn input_edits_clear_a_focused_cancel_button_before_enter() {
+        let controls = Controls::default();
+        controls.row(Rect::new(0, 0, 8, 1), INPUT_FIELD_ACTION);
+        controls.key(Rect::new(0, 0, 8, 1), KeyCode::Esc);
+        controls.focus_action(Action::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(
+            controls.focused(),
+            Some(Action::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+        );
+
+        input_edit_committed(&controls);
+
+        assert_eq!(controls.focused(), Some(Action::Row(INPUT_FIELD_ACTION)));
+
+        assert_eq!(
+            focused_key(&controls, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap()
+                .code,
+            KeyCode::Enter
+        );
+    }
+
+    #[test]
+    fn input_arrows_focus_footer_without_editing_or_activating() {
+        let controls = Controls::default();
+        controls.row(Rect::new(2, 2, 20, 1), INPUT_FIELD_ACTION);
+        controls.key(Rect::new(2, 8, 8, 1), KeyCode::Esc);
+        controls.focus_action(Action::Row(INPUT_FIELD_ACTION));
+
+        assert!(input_horizontal_navigation_key(
+            &controls,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)
+        ));
+        assert_eq!(controls.focused(), Some(Action::Row(INPUT_FIELD_ACTION)));
+        assert!(controls.move_focus(KeyCode::Down));
+        assert_eq!(
+            controls.focused(),
+            Some(Action::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+        );
+        assert!(controls.move_focus(KeyCode::Up));
+        assert_eq!(controls.focused(), Some(Action::Row(INPUT_FIELD_ACTION)));
+    }
+
+    #[test]
+    fn modified_enter_and_yes_no_do_not_activate_focused_controls() {
+        let controls = Controls::default();
+        controls.key(Rect::new(0, 0, 8, 1), KeyCode::Char('y'));
+        controls.cycle(false);
+
+        assert!(
+            focused_key(
+                &controls,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+            )
+            .is_none()
+        );
+        assert!(!plain_activation_char(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            'y'
+        ));
+        assert!(is_cancel_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(
+            focused_key(
+                &controls,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)
+            )
+            .unwrap()
+            .code,
+            KeyCode::Char('u')
+        );
     }
 }

@@ -1,11 +1,15 @@
 //! Dashboard operation pages. Every mutation is issued only after an explicit
 //! key action; opening a page performs bounded reads only.
 
-use super::{Backend, Dashboard, safe_label, sharing};
+use super::{
+    Backend, Dashboard,
+    interaction::{Action, Controls},
+    safe_label, sharing, theme,
+};
 use crate::diagnostics::{
     DiagnosticReport, DiagnosticReportBuilder, DiagnosticRunMode, HostAvailability,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use lomi_remote_protocol::{
     DecimalU64, MutationContext, OperationId, TerminalContext, WorkspaceId,
     ipc::{
@@ -21,17 +25,17 @@ use lomi_remote_protocol::{
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
-    text::Line,
-    widgets::{Block, Paragraph, Wrap},
+    layout::{Constraint, Layout, Rect},
+    widgets::{Paragraph, Wrap},
 };
-use std::path::Path;
+use std::{cell::Cell, path::Path};
 use uuid::Uuid;
 
 const DISPLAY_NAME_MAX: usize = 255;
 const LOCAL_PATH_MAX: usize = 4096;
 const DETAIL_ROWS: usize = 12;
 const LOG_PAGE_SIZE: usize = 64;
+const DRAFT_INPUT_ACTION: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceMode {
@@ -189,11 +193,19 @@ pub(super) struct Operations {
     log_cursor: Option<u64>,
     login_status: Option<LocalLoginStatus>,
     start_mode: Option<lomi_remote_protocol::ipc::LocalStartModePreference>,
+    controls: Controls,
+    body_area: Cell<Rect>,
+    body_scroll: Cell<usize>,
+    body_scroll_max: Cell<usize>,
 }
 
 impl Operations {
     pub(super) fn active(&self) -> bool {
         self.page.is_some()
+    }
+
+    pub(super) fn hoverable(&self, column: u16, row: u16) -> bool {
+        self.controls.hoverable(column, row)
     }
 
     pub(super) fn open(
@@ -202,6 +214,9 @@ impl Operations {
         workspace_id: Option<WorkspaceId>,
         backend: &mut impl Backend,
     ) {
+        self.controls.reset();
+        self.body_scroll.set(0);
+        self.body_scroll_max.set(0);
         self.page = Some(page);
         self.workspace_id = workspace_id;
         self.workspace_state = None;
@@ -236,22 +251,65 @@ impl Operations {
         }
     }
 
-    pub(super) fn draw(&self, frame: &mut Frame, dashboard: &Dashboard) {
-        let [header, body, footer_area] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(3),
-        ])
-        .areas(frame.area());
+    /// Open the pinned workspace details page and begin the guarded rename
+    /// flow from the name returned by the Host.
+    pub(super) fn begin_workspace_rename(
+        &mut self,
+        workspace_id: WorkspaceId,
+        backend: &mut impl Backend,
+    ) {
+        self.open(Page::WorkspaceDetails, Some(workspace_id), backend);
+        self.start_workspace_rename();
+    }
+
+    /// Open the pinned workspace details page and show the existing removal
+    /// confirmation. Opening the confirmation performs reads only.
+    pub(super) fn begin_workspace_remove(
+        &mut self,
+        workspace_id: WorkspaceId,
+        backend: &mut impl Backend,
+    ) {
+        self.open(Page::WorkspaceDetails, Some(workspace_id), backend);
+        self.start_workspace_remove();
+    }
+
+    pub(super) fn draw(
+        &self,
+        frame: &mut Frame,
+        dashboard: &Dashboard,
+        area: Rect,
+        footer_area: Rect,
+    ) {
+        self.controls.begin();
+        let [header, body] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).areas(area);
         let title = self.page.map_or("Dashboard", page_title);
-        let workspace = dashboard.selected_workspace();
+        let workspace = match self.workspace_id {
+            Some(workspace_id) => self
+                .workspace_state
+                .as_ref()
+                .filter(|state| state.context.workspace_id == workspace_id)
+                .map(|state| safe_label(state.name.as_str()))
+                .or_else(|| {
+                    dashboard
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == workspace_id)
+                        .map(|workspace| safe_label(workspace.name.as_str()))
+                })
+                .unwrap_or_else(|| "Unavailable".to_owned()),
+            None => dashboard.selected_workspace().map_or_else(
+                || "None".to_owned(),
+                |workspace| safe_label(workspace.name.as_str()),
+            ),
+        };
         let header_text = format!(
             "Lomi Remote  v{}  |  {}\nWorkspace: {}",
             env!("CARGO_PKG_VERSION"),
             title,
-            workspace.map_or_else(|| "None".to_owned(), |w| safe_label(w.name.as_str()))
+            workspace
         );
-        frame.render_widget(Paragraph::new(header_text), header);
+        frame.render_widget(Paragraph::new(theme::header(&header_text)), header);
 
         let content = if let Some(draft) = &self.rename_draft {
             format!(
@@ -275,43 +333,152 @@ impl Operations {
                 None => String::new(),
             }
         };
+        let panel = theme::panel(title, theme::SURFACE);
+        let body_inner = panel.inner(body);
+        self.body_area.set(body_inner);
+        let total_lines = wrapped_line_count(&content, body_inner.width);
+        let max_scroll = total_lines.saturating_sub(usize::from(body_inner.height));
+        let scroll = self
+            .scroll_for_selected_row(&content, body_inner)
+            .min(max_scroll);
+        self.body_scroll.set(scroll);
+        self.body_scroll_max.set(max_scroll);
         frame.render_widget(
-            Paragraph::new(content)
-                .block(Block::bordered().title(title))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(theme::content(&content))
+                .block(panel)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll.min(usize::from(u16::MAX)) as u16, 0)),
             body,
         );
 
-        let footer_text = if self.shell_draft.is_some() || self.rename_draft.is_some() {
-            "Type the requested value  [Enter] next  [Esc] cancel"
+        if let Some(label) = self.draft_input_label() {
+            let lines = content.lines().collect::<Vec<_>>();
+            if let Some(label_index) = lines.iter().position(|line| *line == label) {
+                let input_index = label_index.saturating_add(1);
+                if let Some(input_line) = lines.get(input_index) {
+                    let rows_before = lines
+                        .iter()
+                        .take(input_index)
+                        .map(|line| wrapped_line_count(line, body_inner.width))
+                        .sum::<usize>();
+                    let input_height = wrapped_line_count(input_line, body_inner.width);
+                    let input_top = body_inner
+                        .y
+                        .saturating_add(u16::try_from(rows_before).unwrap_or(u16::MAX))
+                        .saturating_sub(u16::try_from(scroll).unwrap_or(u16::MAX));
+                    let input_bottom =
+                        input_top.saturating_add(u16::try_from(input_height).unwrap_or(u16::MAX));
+                    let target_top = input_top.max(body_inner.y);
+                    let target_bottom = input_bottom.min(body_inner.bottom());
+                    if target_bottom > target_top {
+                        self.controls.row(
+                            Rect::new(
+                                body_inner.x,
+                                target_top,
+                                body_inner.width,
+                                target_bottom - target_top,
+                            ),
+                            DRAFT_INPUT_ACTION,
+                        );
+                    }
+                }
+            }
+        } else if self.body_actions_enabled() {
+            self.register_row_targets(&content, body_inner);
+        }
+
+        let (primary, trailing): (&[(&str, &str)], &[(&str, &str)]) = if self
+            .shell_draft
+            .as_ref()
+            .is_some_and(|draft| draft.field == ProfileDraftField::Confirm)
+        {
+            (&[("y", "Save profile")], &[("n", "Cancel")])
+        } else if self.shell_draft.is_some() || self.rename_draft.is_some() {
+            (&[("Enter", "Next")], &[("Esc", "Cancel")])
         } else if self.confirmation.is_some() {
-            "[y] confirm  [n/Esc] cancel"
+            (&[("y", "Confirm"), ("↑/↓", "Scroll")], &[("n", "Cancel")])
         } else if self.page == Some(Page::WorkspaceDetails) && self.removal_status.is_some() {
-            "[r] check removal status without repeating cleanup  [Esc] back"
+            (
+                &[("r", "Check status"), ("↑/↓", "Scroll")],
+                &[("Esc", "Back")],
+            )
         } else {
             match self.page {
-                Some(Page::WorkspaceDetails) => {
-                    "[c/p] choose profile and create terminal  [x] stop selected  [v] access  [n] rename  [d] remove  [r] refresh  [Esc] back"
-                }
-                Some(Page::ShellProfiles) => {
-                    "[Up/Down] select  [Enter] create terminal with selected profile  [a] add  [r] refresh  [Esc] back"
-                }
-                Some(Page::Access) => "[s/u] share/unshare  [x] logout  [r] refresh  [Esc] back",
-                Some(Page::Service) => {
-                    "[i/b] install login/boot  [s/t/R/u] start/stop/restart/uninstall  [r] refresh  [Esc] back"
-                }
-                Some(Page::Doctor) => "[r] refresh  [Esc] back",
-                Some(Page::Logs) => "[n] next  [r] latest  [Esc] back",
-                Some(Page::Settings) => {
-                    "[m] start preference  [l] login/auth  [x] logout  [Esc] back"
-                }
-                None => "[Esc] back",
+                Some(Page::WorkspaceDetails) => (
+                    &[
+                        ("p", "Profiles"),
+                        ("x", "Stop"),
+                        ("v", "Access"),
+                        ("n", "Rename"),
+                        ("d", "Remove"),
+                        ("↑/↓", "Select"),
+                    ],
+                    &[("r", "Refresh"), ("Esc", "Back")],
+                ),
+                Some(Page::ShellProfiles) => (
+                    &[
+                        ("↑/↓", "Select"),
+                        ("Enter", "Create terminal"),
+                        ("a", "Add profile"),
+                    ],
+                    &[("r", "Refresh"), ("Esc", "Back")],
+                ),
+                Some(Page::Access) => (
+                    &[
+                        ("↑/↓", "Scroll"),
+                        ("s", "Share"),
+                        ("u", "Unshare"),
+                        ("x", "Log out"),
+                    ],
+                    &[("r", "Refresh"), ("Esc", "Back")],
+                ),
+                Some(Page::Service) => (
+                    &[
+                        ("i", "Install at login"),
+                        ("b", "Install at boot"),
+                        ("s", "Start"),
+                        ("t", "Stop"),
+                        ("R", "Restart"),
+                        ("u", "Uninstall"),
+                        ("↑/↓", "Scroll"),
+                    ],
+                    &[("r", "Refresh"), ("Esc", "Back")],
+                ),
+                Some(Page::Doctor) => (&[("↑/↓", "Select")], &[("r", "Refresh"), ("Esc", "Back")]),
+                Some(Page::Logs) => (
+                    &[("↑/↓", "Select"), ("n", "Next page")],
+                    &[("r", "Latest"), ("Esc", "Back")],
+                ),
+                Some(Page::Settings) => (
+                    &[
+                        ("↑/↓", "Scroll"),
+                        ("m", "Start preference"),
+                        ("l", "Login/auth"),
+                        ("x", "Log out"),
+                    ],
+                    &[("Esc", "Back")],
+                ),
+                None => (&[], &[("Esc", "Back")]),
             }
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(footer_text)).block(Block::bordered()),
-            footer_area,
-        );
+        self.controls
+            .extend(theme::render_footer(frame, footer_area, primary, trailing));
+        if self.controls.focused().is_none() {
+            if self.draft_input_label().is_some() {
+                self.controls.focus_action(Action::Row(DRAFT_INPUT_ACTION));
+            } else if self.confirmation.is_some()
+                || self
+                    .shell_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.field == ProfileDraftField::Confirm)
+            {
+                self.controls.focus_action(Action::Key(KeyEvent::new(
+                    KeyCode::Char('n'),
+                    KeyModifiers::NONE,
+                )));
+            }
+        }
+        self.controls.highlight(frame);
     }
 
     pub(super) fn handle_key(
@@ -320,10 +487,69 @@ impl Operations {
         backend: &mut impl Backend,
         dashboard: &mut Dashboard,
     ) -> bool {
+        let editing = self.rename_draft.is_some() || self.shell_draft.is_some();
+
+        // Keep the global exit gesture ahead of focused-action dispatch.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
+        if key.code == KeyCode::Enter && !key.modifiers.is_empty() {
+            return true;
+        }
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return true;
+        }
+
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.controls.cycle(key.code == KeyCode::BackTab);
+            return true;
+        }
+        if key.code == KeyCode::Enter {
+            match self.controls.focused() {
+                Some(Action::Key(activation)) => {
+                    self.controls.blur();
+                    return self.handle_key(activation, backend, dashboard);
+                }
+                Some(Action::Row(index)) if !editing => {
+                    self.selected = index;
+                    self.body_scroll.set(0);
+                    self.controls.blur();
+                }
+                None => {}
+                Some(Action::Row(_)) => {}
+            }
+        }
+        if editing
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+            )
+        {
+            if !matches!(key.code, KeyCode::Left | KeyCode::Right)
+                || matches!(self.controls.focused(), Some(Action::Key(_)))
+            {
+                self.controls.move_focus(key.code);
+            }
+            return true;
+        }
+        if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            self.controls.move_focus(key.code);
+            return true;
+        }
+        if !editing
+            && self.confirmation.is_none()
+            && !matches!(key.code, KeyCode::Up | KeyCode::Down)
+        {
+            self.controls.blur();
+            if matches!(key.code, KeyCode::Char(_)) {
+                self.body_scroll.set(0);
+            }
+        }
         if let Some(mut draft) = self.rename_draft.take() {
+            self.controls.blur();
             match key.code {
                 KeyCode::Esc => {
                     self.message = Some("No change was made.");
@@ -364,6 +590,7 @@ impl Operations {
             return true;
         }
         if let Some(mut draft) = self.shell_draft.take() {
+            self.controls.blur();
             self.handle_shell_draft_key(key, &mut draft, backend);
             if self.shell_draft.is_none() && draft.field != ProfileDraftField::Confirm {
                 // Saving/canceling owns the draft; intermediate edit branches put
@@ -378,6 +605,16 @@ impl Operations {
                     self.confirmation = None;
                     self.message = Some("No change was made.");
                 }
+                KeyCode::Up => {
+                    if !self.controls.move_focus(KeyCode::Up) {
+                        self.move_selection_or_scroll(false);
+                    }
+                }
+                KeyCode::Down => {
+                    if !self.controls.move_focus(KeyCode::Down) {
+                        self.move_selection_or_scroll(true);
+                    }
+                }
                 _ => {}
             }
             return true;
@@ -391,19 +628,28 @@ impl Operations {
                 self.leave_page();
                 true
             }
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                true
-            }
-            KeyCode::Down => {
-                let count = match self.page {
-                    Some(Page::ShellProfiles) => self.profiles.len(),
-                    Some(Page::WorkspaceDetails) => self.pane_rows().len(),
-                    Some(Page::Doctor) => self.doctor.as_ref().map_or(0, |r| r.findings.len()),
-                    Some(Page::Logs) => self.logs.as_ref().map_or(0, |r| r.entries.len()),
-                    _ => 0,
-                };
-                self.selected = (self.selected + 1).min(count.saturating_sub(1));
+            KeyCode::Up | KeyCode::Down => {
+                let down = key.code == KeyCode::Down;
+                if matches!(self.controls.focused(), Some(Action::Key(_))) {
+                    self.controls.move_focus(key.code);
+                    if let Some(Action::Row(index)) = self.controls.focused() {
+                        if self.selection_count().is_some_and(|count| index < count) {
+                            self.selected = index;
+                            self.body_scroll.set(0);
+                        }
+                    }
+                } else if down
+                    && self
+                        .selection_count()
+                        .is_some_and(|count| count > 0 && self.selected.saturating_add(1) >= count)
+                {
+                    self.controls.focus_action(Action::Row(self.selected));
+                    if !self.controls.move_focus(KeyCode::Down) {
+                        self.move_selection_or_scroll(true);
+                    }
+                } else {
+                    self.move_selection_or_scroll(down);
+                }
                 true
             }
             KeyCode::Char('R') if self.page == Some(Page::Service) => {
@@ -442,18 +688,12 @@ impl Operations {
             }
             KeyCode::Char('n') if self.page == Some(Page::WorkspaceDetails) => {
                 self.refresh_workspace(backend);
-                if let Some(state) = &self.workspace_state {
-                    if let Ok(name) = LocalProjectName::try_from(state.name.as_str().to_owned()) {
-                        self.rename_draft = Some(RenameDraft {
-                            expected_name: name,
-                            name: state.name.as_str().to_owned(),
-                        });
-                    }
-                }
+                self.start_workspace_rename();
                 true
             }
             KeyCode::Char('d') if self.page == Some(Page::WorkspaceDetails) => {
-                self.confirmation = self.workspace_id.map(Confirmation::RemoveWorkspace);
+                self.refresh_workspace(backend);
+                self.start_workspace_remove();
                 true
             }
             KeyCode::Char('x') if self.page == Some(Page::Access) => {
@@ -538,8 +778,371 @@ impl Operations {
         }
     }
 
+    pub(super) fn handle_mouse(
+        &mut self,
+        event: MouseEvent,
+        backend: &mut impl Backend,
+        dashboard: &mut Dashboard,
+    ) -> bool {
+        if !self.active() {
+            return false;
+        }
+
+        match event.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if !rect_contains(self.body_area.get(), event.column, event.row) {
+                    return false;
+                }
+                if self.rename_draft.is_some() || self.shell_draft.is_some() {
+                    return true;
+                }
+                let down = event.kind == MouseEventKind::ScrollDown;
+                self.move_selection_or_scroll_by(down, 3);
+                true
+            }
+            _ => match self.controls.click(event) {
+                Some(Action::Key(key)) => {
+                    self.controls.blur();
+                    self.handle_key(key, backend, dashboard)
+                }
+                Some(Action::Row(index)) if self.body_actions_enabled() => {
+                    self.selected = index;
+                    self.body_scroll.set(0);
+                    self.controls.blur();
+                    true
+                }
+                Some(Action::Row(_)) => true,
+                None => false,
+            },
+        }
+    }
+
+    pub(super) fn can_switch_workspace(&self) -> bool {
+        self.confirmation.is_none()
+            && self.shell_draft.is_none()
+            && self.rename_draft.is_none()
+            && self.removal_status.is_none()
+    }
+
+    pub(super) fn retarget_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        backend: &mut impl Backend,
+    ) {
+        if !self.can_switch_workspace() {
+            return;
+        }
+        if self.workspace_id == Some(workspace_id) {
+            return;
+        }
+        match self.page {
+            Some(page @ (Page::WorkspaceDetails | Page::ShellProfiles | Page::Access)) => {
+                self.open(page, Some(workspace_id), backend);
+            }
+            _ => {
+                self.workspace_id = Some(workspace_id);
+            }
+        }
+    }
+
+    fn body_actions_enabled(&self) -> bool {
+        self.active()
+            && self.confirmation.is_none()
+            && self.shell_draft.is_none()
+            && self.rename_draft.is_none()
+            && self.removal_status.is_none()
+            && matches!(
+                self.page,
+                Some(Page::WorkspaceDetails | Page::ShellProfiles | Page::Doctor | Page::Logs)
+            )
+    }
+
+    fn draft_input_label(&self) -> Option<&'static str> {
+        if self.rename_draft.is_some() {
+            Some("New workspace name:")
+        } else {
+            match self.shell_draft.as_ref()?.field {
+                ProfileDraftField::Name => Some("Profile display name:"),
+                ProfileDraftField::Executable => Some("Absolute executable path:"),
+                ProfileDraftField::WorkingDirectory => Some("Absolute working directory:"),
+                ProfileDraftField::Confirm => None,
+            }
+        }
+    }
+
+    fn start_workspace_rename(&mut self) {
+        let Some(workspace_id) = self.workspace_id else {
+            return;
+        };
+        let Some(state) = self
+            .workspace_state
+            .as_ref()
+            .filter(|state| state.context.workspace_id == workspace_id)
+        else {
+            self.message = Some("Workspace details are unavailable. Press r to retry.");
+            return;
+        };
+        match LocalProjectName::try_from(state.name.as_str().to_owned()) {
+            Ok(name) => {
+                self.rename_draft = Some(RenameDraft {
+                    expected_name: name,
+                    name: state.name.as_str().to_owned(),
+                });
+                self.message = None;
+            }
+            Err(_) => self.message = Some("Workspace name cannot be renamed safely."),
+        }
+    }
+
+    fn start_workspace_remove(&mut self) {
+        if self.workspace_id.is_some_and(|workspace_id| {
+            self.workspace_state
+                .as_ref()
+                .is_some_and(|state| state.context.workspace_id == workspace_id)
+        }) {
+            self.confirmation = self.workspace_id.map(Confirmation::RemoveWorkspace);
+            self.message = None;
+        } else {
+            self.message = Some("Workspace details are unavailable. Press r to retry.");
+        }
+    }
+
+    fn row_action_lines(&self) -> Vec<(usize, String)> {
+        match self.page {
+            Some(Page::WorkspaceDetails) => {
+                let rows = self.pane_rows();
+                let range = visible_range(rows.len(), self.selected, DETAIL_ROWS);
+                rows.iter()
+                    .enumerate()
+                    .take(range.end)
+                    .skip(range.start)
+                    .map(|(index, row)| {
+                        let session = row
+                            .session
+                            .as_ref()
+                            .map(|session| {
+                                format!(
+                                    " session {}",
+                                    safe_label(&String::from(session.session_id))
+                                )
+                            })
+                            .unwrap_or_default();
+                        (
+                            index,
+                            format!(
+                                "{} {} / pane {} — {:?}{}",
+                                if index == self.selected { ">" } else { " " },
+                                safe_label(&row.tab_name),
+                                safe_label(&String::from(row.pane_id)),
+                                row.state,
+                                session,
+                            ),
+                        )
+                    })
+                    .collect()
+            }
+            Some(Page::ShellProfiles) => {
+                let range = visible_range(self.profiles.len(), self.selected, DETAIL_ROWS);
+                self.profiles
+                    .iter()
+                    .enumerate()
+                    .take(range.end)
+                    .skip(range.start)
+                    .map(|(index, profile)| {
+                        (
+                            index,
+                            format!(
+                                "{} {} [{}]",
+                                if index == self.selected { ">" } else { " " },
+                                safe_label(profile.name.as_str()),
+                                safe_label(profile.profile_id.as_str())
+                            ),
+                        )
+                    })
+                    .collect()
+            }
+            Some(Page::Doctor) => {
+                let Some(report) = &self.doctor else {
+                    return Vec::new();
+                };
+                let range = visible_range(report.findings.len(), self.selected, DETAIL_ROWS);
+                report
+                    .findings
+                    .iter()
+                    .enumerate()
+                    .take(range.end)
+                    .skip(range.start)
+                    .map(|(index, finding)| {
+                        (
+                            index,
+                            format!(
+                                "{:?}: {:?} — {:?}",
+                                finding.check, finding.state, finding.guidance
+                            ),
+                        )
+                    })
+                    .collect()
+            }
+            Some(Page::Logs) => {
+                let Some(page) = &self.logs else {
+                    return Vec::new();
+                };
+                if !page.available {
+                    return Vec::new();
+                }
+                let range = visible_range(page.entries.len(), self.selected, DETAIL_ROWS);
+                page.entries
+                    .iter()
+                    .enumerate()
+                    .take(range.end)
+                    .skip(range.start)
+                    .map(|(index, entry)| {
+                        (
+                            index,
+                            format!(
+                                "{} {:?} {:?} {:?}",
+                                entry.unix_time_ms.map_or_else(
+                                    || "time unknown".to_owned(),
+                                    |time| time.to_string()
+                                ),
+                                entry.severity,
+                                entry.component,
+                                entry.code,
+                            ),
+                        )
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn register_row_targets(&self, content: &str, body: Rect) {
+        if body.is_empty() {
+            return;
+        }
+        let lines = content.split('\n').collect::<Vec<_>>();
+        let scroll = self.body_scroll.get();
+        let visible_end = scroll.saturating_add(usize::from(body.height));
+        let mut search_from = 0usize;
+        for (row_index, row_text) in self.row_action_lines() {
+            let Some(line_index) = lines
+                .iter()
+                .enumerate()
+                .skip(search_from)
+                .find_map(|(index, line)| (*line == row_text).then_some(index))
+            else {
+                continue;
+            };
+            search_from = line_index.saturating_add(1);
+            let line_start = lines[..line_index]
+                .iter()
+                .map(|line| wrapped_line_count(line, body.width))
+                .sum::<usize>();
+            let row_height = wrapped_line_count(&row_text, body.width);
+            let row_end = line_start.saturating_add(row_height);
+            let visible_start = line_start.max(scroll);
+            let visible_row_end = row_end.min(visible_end);
+            if visible_start >= visible_row_end {
+                continue;
+            }
+            let y = body
+                .y
+                .saturating_add((visible_start.saturating_sub(scroll)) as u16);
+            let height = (visible_row_end.saturating_sub(visible_start)) as u16;
+            self.controls.row(
+                Rect::new(
+                    body.x,
+                    y,
+                    body.width,
+                    height.min(body.bottom().saturating_sub(y)),
+                ),
+                row_index,
+            );
+        }
+    }
+
+    fn scroll_for_selected_row(&self, content: &str, body: Rect) -> usize {
+        let current = self.body_scroll.get();
+        if !self.body_actions_enabled() || body.is_empty() {
+            return current;
+        }
+        let Some((_, row_text)) = self
+            .row_action_lines()
+            .into_iter()
+            .find(|(index, _)| *index == self.selected)
+        else {
+            return current;
+        };
+        let lines = content.split('\n').collect::<Vec<_>>();
+        let Some(line_index) = lines.iter().position(|line| *line == row_text) else {
+            return current;
+        };
+        let line_start = lines[..line_index]
+            .iter()
+            .map(|line| wrapped_line_count(line, body.width))
+            .sum::<usize>();
+        let row_end = line_start.saturating_add(wrapped_line_count(&row_text, body.width));
+        let viewport_height = usize::from(body.height);
+        if line_start < current {
+            line_start
+        } else if row_end > current.saturating_add(viewport_height) {
+            row_end.saturating_sub(viewport_height)
+        } else {
+            current
+        }
+    }
+
+    fn selection_count(&self) -> Option<usize> {
+        if self.confirmation.is_some()
+            || self.shell_draft.is_some()
+            || self.rename_draft.is_some()
+            || self.removal_status.is_some()
+        {
+            return None;
+        }
+        match self.page {
+            Some(Page::WorkspaceDetails) => Some(self.pane_rows().len()),
+            Some(Page::ShellProfiles) => Some(self.profiles.len()),
+            Some(Page::Doctor) => Some(
+                self.doctor
+                    .as_ref()
+                    .map_or(0, |report| report.findings.len()),
+            ),
+            Some(Page::Logs) => Some(self.logs.as_ref().map_or(0, |page| page.entries.len())),
+            _ => None,
+        }
+    }
+
+    fn move_selection_or_scroll(&mut self, down: bool) {
+        self.move_selection_or_scroll_by(down, 1);
+    }
+
+    fn move_selection_or_scroll_by(&mut self, down: bool, scroll_amount: usize) {
+        if let Some(count) = self.selection_count().filter(|count| *count > 0) {
+            self.selected = if down {
+                self.selected.saturating_add(1).min(count.saturating_sub(1))
+            } else {
+                self.selected.saturating_sub(1)
+            };
+            self.body_scroll.set(0);
+            self.controls.blur();
+        } else {
+            let current = self.body_scroll.get();
+            let next = if down {
+                current
+                    .saturating_add(scroll_amount)
+                    .min(self.body_scroll_max.get())
+            } else {
+                current.saturating_sub(scroll_amount)
+            };
+            self.body_scroll.set(next);
+        }
+    }
+
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
         if let Some(draft) = self.rename_draft.as_mut() {
+            self.controls.blur();
             if super::input_contains_terminal_control(text) {
                 self.message = Some("Paste one workspace name line without control characters.");
             } else if draft.name.len().saturating_add(text.len()) > DISPLAY_NAME_MAX {
@@ -551,6 +1154,7 @@ impl Operations {
             return true;
         }
         if let Some(draft) = self.shell_draft.as_mut() {
+            self.controls.blur();
             let (value, limit, limit_message) = match draft.field {
                 ProfileDraftField::Name => (
                     &mut draft.name,
@@ -584,6 +1188,10 @@ impl Operations {
 
     fn leave_page(&mut self) {
         self.page = None;
+        self.controls.reset();
+        self.body_area.set(Rect::default());
+        self.body_scroll.set(0);
+        self.body_scroll_max.set(0);
         self.confirmation = None;
         self.shell_draft = None;
         self.rename_draft = None;
@@ -592,6 +1200,7 @@ impl Operations {
     }
 
     fn refresh(&mut self, backend: &mut impl Backend) {
+        self.body_scroll.set(0);
         match self.page {
             Some(Page::WorkspaceDetails) => self.refresh_workspace(backend),
             Some(Page::Access) => {
@@ -628,7 +1237,12 @@ impl Operations {
         )) {
             Ok(LocalResult::WorkspaceState(state)) => {
                 self.workspace_state = Some(*state);
-                self.selected = self.selected.min(self.pane_rows().len().saturating_sub(1));
+                let selection_len = if self.page == Some(Page::ShellProfiles) {
+                    self.profiles.len()
+                } else {
+                    self.pane_rows().len()
+                };
+                self.selected = self.selected.min(selection_len.saturating_sub(1));
                 self.message = None;
             }
             _ => {
@@ -741,6 +1355,7 @@ impl Operations {
     }
 
     fn refresh_logs(&mut self, backend: &mut impl Backend, cursor: Option<u64>) {
+        self.body_scroll.set(0);
         match backend.read_diagnostic_logs(cursor, LOG_PAGE_SIZE) {
             Ok(mut page) => {
                 if page.entries.len() > LOG_PAGE_SIZE {
@@ -995,19 +1610,16 @@ impl Operations {
             Ok(RpcResult::TerminalCreate(_)) => {
                 self.refresh_workspace(backend);
                 self.message = Some("Terminal creation was accepted; state refreshed.");
-                self.page = Some(Page::WorkspaceDetails);
             }
             Err("OUTCOME_UNKNOWN") => {
                 self.refresh_workspace(backend);
                 self.message = Some(
                     "Terminal creation outcome is unknown. State refreshed; do not repeat until verified.",
                 );
-                self.page = Some(Page::WorkspaceDetails);
             }
             _ => {
                 self.refresh_workspace(backend);
                 self.message = Some("Terminal creation was not confirmed. State refreshed.");
-                self.page = Some(Page::WorkspaceDetails);
             }
         }
     }
@@ -1160,19 +1772,19 @@ impl Operations {
         let Some(workspace_id) = self.workspace_id else {
             return "Select a workspace first.".to_owned();
         };
-        let workspace = dashboard
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.workspace_id == workspace_id);
-        let name = workspace.map_or_else(
-            || {
-                self.workspace_state
-                    .as_ref()
-                    .map(|state| safe_label(state.name.as_str()))
-                    .unwrap_or_else(|| "Unavailable".to_owned())
-            },
-            |workspace| safe_label(workspace.name.as_str()),
-        );
+        let name = self
+            .workspace_state
+            .as_ref()
+            .filter(|state| state.context.workspace_id == workspace_id)
+            .map(|state| safe_label(state.name.as_str()))
+            .or_else(|| {
+                dashboard
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)
+                    .map(|workspace| safe_label(workspace.name.as_str()))
+            })
+            .unwrap_or_else(|| "Unavailable".to_owned());
         let path = self
             .workspace_details
             .as_ref()
@@ -1185,12 +1797,8 @@ impl Operations {
             .map(|url| super::safe_configuration_value(url.as_str()))
             .unwrap_or_else(|| "Unavailable in this installation".to_owned());
         let mut output = format!(
-            "Name: {}\nID: {}\nSharing: {}\nLocal path: {}\nRemote Web: {}\n\nTerminals\n",
-            name,
-            safe_label(&String::from(workspace_id)),
-            workspace.map_or("Unknown", |w| sharing(w.sharing)),
-            path,
-            link,
+            "Name: {}\nLocal path: {}\nRemote Web: {}\n\nTerminals\n",
+            name, path, link,
         );
         let rows = self.pane_rows();
         if rows.is_empty() {
@@ -1438,11 +2046,20 @@ impl Operations {
                 }
             ),
             Some(Confirmation::RemoveWorkspace(id)) => {
-                let name = dashboard
+                let loaded_name = self
+                    .workspace_state
+                    .as_ref()
+                    .filter(|state| {
+                        self.workspace_id == Some(*id) && state.context.workspace_id == *id
+                    })
+                    .map(|state| state.name.as_str())
+                    ;
+                let dashboard_name = dashboard
                     .workspaces
                     .iter()
                     .find(|workspace| workspace.workspace_id == *id)
-                    .map_or("workspace", |workspace| workspace.name.as_str());
+                    .map(|workspace| workspace.name.as_str());
+                let name = loaded_name.or(dashboard_name).unwrap_or("workspace");
                 format!(
                     "Remove workspace registration for {}?\n\nIts terminal sessions end; project files on disk remain untouched.\n[y] Remove registration  [n/Esc] Cancel.",
                     safe_label(name)
@@ -1646,4 +2263,753 @@ fn visible_range(length: usize, selected: usize, visible: usize) -> std::ops::Ra
         .min(length.saturating_sub(visible));
     let end = start.saturating_add(visible).min(length);
     start..end
+}
+
+fn wrapped_line_count(text: &str, width: u16) -> usize {
+    if width == 0 {
+        return text.split('\n').count().max(1);
+    }
+    Paragraph::new(theme::content(text))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    !rect.is_empty() && x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::{
+        Backend, Dashboard, HostProfile, LocalCall, LocalProjectName, LocalResult, Operations,
+        Page, ProfileDraftField, RenameDraft, ShellProfileDraft,
+    };
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use lomi_remote_protocol::ipc::LocalWorkspaceRead;
+    use lomi_remote_protocol::rpc::{
+        BoundedList, DisplayText, HostProfileId, PaneState, RpcCall, RpcResponse, RpcResult,
+        TerminalLayout, TerminalPane, TerminalTab, WorkspaceState,
+    };
+    use lomi_remote_protocol::{
+        CapabilitySet, ConsumerAuthorizationId, DecimalU64, Effect, ErrorCode, ErrorDetails,
+        Method, OperationId, OperationLookup, OperationParameterHash, OperationReceipt,
+        OperationResult, OperationState, RemoteError, RuntimeId, SessionEpoch, TerminalSessionId,
+        WorkspaceContext, WorkspaceEpoch, WorkspaceId,
+    };
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::Rect,
+        widgets::{Paragraph, Wrap},
+    };
+
+    struct NoBackend;
+
+    impl Backend for NoBackend {
+        fn request(&mut self, _call: LocalCall) -> Result<LocalResult, &'static str> {
+            panic!("this interaction must not issue a backend request")
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum TerminalCreateOutcome {
+        Succeeded,
+        Failed,
+        Unknown,
+    }
+
+    struct TerminalCreateBackend {
+        workspace_id: WorkspaceId,
+        outcome: TerminalCreateOutcome,
+        refreshed_tabs: Vec<TerminalTab>,
+        created_profiles: Vec<HostProfileId>,
+    }
+
+    impl Backend for TerminalCreateBackend {
+        fn request(&mut self, call: LocalCall) -> Result<LocalResult, &'static str> {
+            match call {
+                LocalCall::Rpc(request) => {
+                    let RpcCall::TerminalCreate(params) = request.call else {
+                        return Err("unexpected RPC request in terminal creation fixture");
+                    };
+                    self.created_profiles.push(params.profile_id);
+                    let operation_id = OperationId::from_bytes([6; 16]).unwrap();
+                    let response = match self.outcome {
+                        TerminalCreateOutcome::Succeeded => RpcResponse::Result {
+                            v: request.v,
+                            request_id: request.request_id,
+                            result: RpcResult::TerminalCreate(terminal_create_receipt(
+                                self.workspace_id,
+                            )),
+                        },
+                        TerminalCreateOutcome::Failed => RpcResponse::Error {
+                            v: request.v,
+                            request_id: request.request_id,
+                            operation_id: None,
+                            error: RemoteError::new(
+                                ErrorCode::InvalidArgument,
+                                false,
+                                Effect::None,
+                                ErrorDetails::empty(),
+                                None,
+                            )
+                            .unwrap(),
+                        },
+                        TerminalCreateOutcome::Unknown => RpcResponse::Error {
+                            v: request.v,
+                            request_id: request.request_id,
+                            operation_id: Some(operation_id),
+                            error: RemoteError::new(
+                                ErrorCode::OutcomeUnknown,
+                                false,
+                                Effect::Unknown,
+                                ErrorDetails::empty(),
+                                Some(OperationLookup {
+                                    workspace_id: self.workspace_id,
+                                    operation_id,
+                                }),
+                            )
+                            .unwrap(),
+                        },
+                    };
+                    Ok(LocalResult::Rpc(Box::new(response)))
+                }
+                LocalCall::WorkspaceInspect(LocalWorkspaceRead { workspace_id }) => {
+                    assert_eq!(workspace_id, self.workspace_id);
+                    Ok(LocalResult::WorkspaceState(Box::new(workspace_state(
+                        self.workspace_id,
+                        self.refreshed_tabs.clone(),
+                    ))))
+                }
+                LocalCall::WorkspaceDetails(_) => Err("details are not needed by this fixture"),
+                _ => Err("unexpected local request in terminal creation fixture"),
+            }
+        }
+    }
+
+    fn workspace_state(workspace_id: WorkspaceId, tabs: Vec<TerminalTab>) -> WorkspaceState {
+        WorkspaceState {
+            context: WorkspaceContext {
+                workspace_id,
+                workspace_epoch: WorkspaceEpoch::from_bytes([2; 16]).unwrap(),
+                runtime_id: RuntimeId::from_bytes([3; 16]).unwrap(),
+                runtime_generation: DecimalU64(1),
+                host_access_epoch: DecimalU64(1),
+                grant_revision: DecimalU64(1),
+            },
+            domain_revision: DecimalU64(1),
+            name: DisplayText::try_from("fixture".to_owned()).unwrap(),
+            tabs: BoundedList(tabs),
+        }
+    }
+
+    fn terminal_tab() -> TerminalTab {
+        TerminalTab {
+            tab_id: lomi_remote_protocol::TabId::from_bytes([7; 16]).unwrap(),
+            name: DisplayText::try_from("Terminal 1".to_owned()).unwrap(),
+            layout: TerminalLayout::Pane {
+                pane: TerminalPane {
+                    pane_id: lomi_remote_protocol::PaneId::from_bytes([8; 16]).unwrap(),
+                    session: None,
+                    state: PaneState::Running,
+                },
+            },
+        }
+    }
+
+    fn terminal_create_receipt(workspace_id: WorkspaceId) -> OperationReceipt {
+        let operation_id = OperationId::from_bytes([6; 16]).unwrap();
+        let stored_rights = lomi_remote_protocol::StoredOperationRights::new(
+            operation_id,
+            ConsumerAuthorizationId::from_bytes([5; 16]).unwrap(),
+            workspace_id,
+            Method::TerminalCreate,
+            CapabilitySet::control_with_workspace_tools(),
+            false,
+        )
+        .unwrap();
+        OperationReceipt::new(
+            &stored_rights,
+            OperationParameterHash::try_from("0".repeat(64)).unwrap(),
+            OperationState::Succeeded,
+            false,
+            Effect::Committed,
+            Some(OperationResult::Terminal {
+                domain_revision: DecimalU64(2),
+                pane_id: lomi_remote_protocol::PaneId::from_bytes([8; 16]).unwrap(),
+                session_id: TerminalSessionId::from_bytes([9; 16]).unwrap(),
+                session_epoch: SessionEpoch::from_bytes([10; 16]).unwrap(),
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn hover_query_uses_controls_without_changing_focus() {
+        let mut operations = Operations::default();
+        operations
+            .controls
+            .key(Rect::new(2, 3, 12, 1), KeyCode::Char('r'));
+        operations.controls.cycle(false);
+        let focused = operations.controls.focused();
+
+        assert!(operations.hoverable(4, 3));
+        assert!(!operations.hoverable(20, 3));
+        assert_eq!(operations.controls.focused(), focused);
+    }
+
+    #[test]
+    fn clicking_a_profile_row_only_selects_it() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::ShellProfiles);
+        operations.profiles = ["first", "second"]
+            .into_iter()
+            .map(|name| HostProfile {
+                profile_id: HostProfileId::try_from(name.to_owned()).unwrap(),
+                name: DisplayText::try_from(name.to_owned()).unwrap(),
+            })
+            .collect();
+        operations.controls.row(Rect::new(2, 2, 32, 1), 1);
+        let mut backend = NoBackend;
+
+        assert!(operations.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut backend,
+            &mut Dashboard::default(),
+        ));
+        assert_eq!(operations.selected, 1);
+    }
+
+    #[test]
+    fn terminal_creation_refresh_preserves_profile_selection_for_every_outcome() {
+        let workspace_id = WorkspaceId::from_bytes([1; 16]).unwrap();
+        let selected_profile = HostProfileId::try_from("second".to_owned()).unwrap();
+        for (outcome, refreshed_tabs, expected_tabs, expected_message) in [
+            (
+                TerminalCreateOutcome::Succeeded,
+                vec![terminal_tab()],
+                1,
+                "Terminal creation was accepted; state refreshed.",
+            ),
+            (
+                TerminalCreateOutcome::Failed,
+                Vec::new(),
+                0,
+                "Terminal creation was not confirmed. State refreshed.",
+            ),
+            (
+                TerminalCreateOutcome::Unknown,
+                vec![terminal_tab()],
+                1,
+                "Terminal creation outcome is unknown. State refreshed; do not repeat until verified.",
+            ),
+        ] {
+            let mut operations = Operations::default();
+            operations.page = Some(Page::ShellProfiles);
+            operations.workspace_id = Some(workspace_id);
+            operations.workspace_state = Some(workspace_state(workspace_id, Vec::new()));
+            operations.profiles = ["first", "second"]
+                .into_iter()
+                .map(|name| HostProfile {
+                    profile_id: HostProfileId::try_from(name.to_owned()).unwrap(),
+                    name: DisplayText::try_from(name.to_owned()).unwrap(),
+                })
+                .collect();
+            operations.selected = 1;
+            let mut backend = TerminalCreateBackend {
+                workspace_id,
+                outcome,
+                refreshed_tabs,
+                created_profiles: Vec::new(),
+            };
+
+            assert!(
+                operations
+                    .workspace_state
+                    .as_ref()
+                    .unwrap()
+                    .tabs
+                    .0
+                    .is_empty()
+            );
+            operations.create_terminal(&mut backend);
+
+            assert_eq!(operations.selected, 1, "outcome: {outcome:?}");
+            assert_eq!(operations.message, Some(expected_message));
+            assert_eq!(
+                operations.workspace_state.as_ref().unwrap().tabs.0.len(),
+                expected_tabs,
+                "outcome: {outcome:?}"
+            );
+            assert_eq!(backend.created_profiles, vec![selected_profile.clone()]);
+
+            // A second create stands in for pressing Enter after the refresh.
+            operations.create_terminal(&mut backend);
+            assert_eq!(operations.selected, 1, "outcome: {outcome:?}");
+            assert_eq!(
+                backend.created_profiles,
+                vec![selected_profile.clone(), selected_profile.clone()],
+                "outcome: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_line_count_accounts_for_word_wrapping() {
+        assert_eq!(super::wrapped_line_count("1234 1234 1234", 8), 3);
+    }
+
+    #[test]
+    fn spaced_long_profile_rows_register_at_paragraph_wrapped_lines() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::ShellProfiles);
+        operations.profiles = [("first", "1234 1234 1234"), ("second", "5678 5678 5678")]
+            .into_iter()
+            .map(|(profile_id, name)| HostProfile {
+                profile_id: HostProfileId::try_from(profile_id.to_owned()).unwrap(),
+                name: DisplayText::try_from(name.to_owned()).unwrap(),
+            })
+            .collect();
+        let content = operations.draw_shell_profiles();
+        let second_row = operations.row_action_lines()[1].1.clone();
+        let lines = content.split('\n').collect::<Vec<_>>();
+        let row_line = lines
+            .iter()
+            .position(|line| *line == second_row)
+            .expect("second profile row is present in content");
+        let body_width = 8;
+        let row_y = lines[..row_line]
+            .iter()
+            .map(|line| {
+                Paragraph::new(super::theme::content(line))
+                    .wrap(Wrap { trim: false })
+                    .line_count(body_width)
+            })
+            .sum::<usize>() as u16;
+        let body = Rect::new(0, 0, body_width, 80);
+        operations.register_row_targets(&content, body);
+        let mut backend = NoBackend;
+
+        assert!(operations.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: row_y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut backend,
+            &mut Dashboard::default(),
+        ));
+        assert_eq!(operations.selected, 1);
+    }
+
+    #[test]
+    fn non_list_pages_scroll_the_body_instead_of_moving_hidden_selection() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::Service);
+        operations.selected = 7;
+        operations.body_scroll_max.set(4);
+
+        operations.move_selection_or_scroll(true);
+        assert_eq!(operations.body_scroll.get(), 1);
+        operations.move_selection_or_scroll_by(true, 3);
+        assert_eq!(operations.body_scroll.get(), 4);
+        operations.move_selection_or_scroll(false);
+        assert_eq!(operations.body_scroll.get(), 3);
+        assert_eq!(operations.selected, 7);
+    }
+
+    #[test]
+    fn empty_selectable_pages_fall_back_to_body_scroll() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::ShellProfiles);
+        operations.body_scroll_max.set(2);
+
+        operations.move_selection_or_scroll(true);
+
+        assert_eq!(operations.body_scroll.get(), 1);
+        assert_eq!(operations.selected, 0);
+    }
+
+    #[test]
+    fn workspace_switch_guard_blocks_confirmation_and_edit_drafts() {
+        let mut operations = Operations::default();
+        assert!(operations.can_switch_workspace());
+
+        operations.confirmation = Some(super::Confirmation::Logout);
+        assert!(!operations.can_switch_workspace());
+        operations.confirmation = None;
+
+        operations.shell_draft = Some(ShellProfileDraft {
+            field: ProfileDraftField::Name,
+            name: String::new(),
+            executable: String::new(),
+            working_directory: String::new(),
+            error: None,
+        });
+        assert!(!operations.can_switch_workspace());
+        operations.shell_draft = None;
+        operations.removal_status = Some(lomi_remote_protocol::ipc::LocalWorkspaceRemovalStatus {
+            workspace_id: WorkspaceId::from_bytes([7; 16]).unwrap(),
+            attempt_id: None,
+            phase: lomi_remote_protocol::ipc::LocalWorkspaceRemovalPhase::Uncertain,
+            total_sessions: super::DecimalU64(0),
+            confirmed_sessions: super::DecimalU64(0),
+        });
+        assert!(!operations.can_switch_workspace());
+    }
+
+    #[test]
+    fn modified_enter_cannot_activate_a_focused_confirmation() {
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL),
+            (KeyCode::Char('y'), KeyModifiers::ALT),
+        ] {
+            let mut operations = Operations::default();
+            operations.confirmation = Some(super::Confirmation::Logout);
+            operations
+                .controls
+                .key(Rect::new(1, 1, 8, 1), KeyCode::Char('y'));
+            operations.controls.cycle(false);
+            let mut backend = NoBackend;
+
+            assert!(operations.handle_key(
+                KeyEvent::new(code, modifiers),
+                &mut backend,
+                &mut Dashboard::default(),
+            ));
+            assert!(operations.confirmation.is_some());
+        }
+    }
+
+    #[test]
+    fn arrows_navigate_from_the_last_list_row_to_footer_and_back_without_activation() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::ShellProfiles);
+        operations.profiles = ["first", "second"]
+            .into_iter()
+            .map(|name| HostProfile {
+                profile_id: HostProfileId::try_from(name.to_owned()).unwrap(),
+                name: DisplayText::try_from(name.to_owned()).unwrap(),
+            })
+            .collect();
+        operations.selected = 1;
+        operations.controls.row(Rect::new(1, 1, 20, 1), 0);
+        operations.controls.row(Rect::new(1, 2, 20, 1), 1);
+        operations
+            .controls
+            .key(Rect::new(1, 10, 8, 1), KeyCode::Char('r'));
+        operations
+            .controls
+            .key(Rect::new(20, 10, 8, 1), KeyCode::Esc);
+        operations.controls.focus_action(super::Action::Row(1));
+        let mut backend = NoBackend;
+        let mut dashboard = Dashboard::default();
+
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert_eq!(
+            operations.controls.focused(),
+            Some(super::Action::Key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+            )))
+        );
+        assert_eq!(operations.selected, 1);
+
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert_eq!(operations.controls.focused(), Some(super::Action::Row(1)));
+        assert_eq!(operations.selected, 1);
+    }
+
+    #[test]
+    fn confirmation_arrows_change_focus_without_confirming() {
+        let mut operations = Operations::default();
+        operations.confirmation = Some(super::Confirmation::Logout);
+        operations
+            .controls
+            .key(Rect::new(1, 10, 8, 1), KeyCode::Char('y'));
+        operations
+            .controls
+            .key(Rect::new(20, 10, 8, 1), KeyCode::Char('n'));
+        operations
+            .controls
+            .focus_action(super::Action::Key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+            )));
+        let mut backend = NoBackend;
+        let mut dashboard = Dashboard::default();
+
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert_eq!(
+            operations.controls.focused(),
+            Some(super::Action::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+            )))
+        );
+        assert!(matches!(
+            operations.confirmation,
+            Some(super::Confirmation::Logout)
+        ));
+    }
+
+    #[test]
+    fn confirmation_draw_starts_on_the_safe_cancel_action() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::Settings);
+        operations.confirmation = Some(super::Confirmation::Logout);
+        let dashboard = Dashboard::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                operations.draw(
+                    frame,
+                    &dashboard,
+                    Rect::new(0, 0, 70, 18),
+                    Rect::new(0, 19, 70, 3),
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            operations.controls.focused(),
+            Some(super::Action::Key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+            )))
+        );
+    }
+
+    #[test]
+    fn draft_arrows_do_not_edit_or_dismiss_text() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::WorkspaceDetails);
+        operations.rename_draft = Some(RenameDraft {
+            expected_name: LocalProjectName::try_from("Original".to_owned()).unwrap(),
+            name: "Updated".to_owned(),
+        });
+        operations
+            .controls
+            .row(Rect::new(1, 1, 20, 2), super::DRAFT_INPUT_ACTION);
+        operations
+            .controls
+            .key(Rect::new(1, 5, 8, 1), KeyCode::Enter);
+        operations
+            .controls
+            .key(Rect::new(20, 5, 8, 1), KeyCode::Esc);
+        operations
+            .controls
+            .focus_action(super::Action::Row(super::DRAFT_INPUT_ACTION));
+        let mut backend = NoBackend;
+        let mut dashboard = Dashboard::default();
+
+        for code in [KeyCode::Left, KeyCode::Right] {
+            assert!(operations.handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &mut backend,
+                &mut dashboard,
+            ));
+            assert_eq!(
+                operations
+                    .rename_draft
+                    .as_ref()
+                    .map(|draft| draft.name.as_str()),
+                Some("Updated")
+            );
+            assert!(operations.confirmation.is_none());
+        }
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert!(operations.rename_draft.is_some());
+        assert!(operations.confirmation.is_none());
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert_eq!(
+            operations.controls.focused(),
+            Some(super::Action::Row(super::DRAFT_INPUT_ACTION))
+        );
+    }
+
+    #[test]
+    fn pinned_workspace_actions_require_loaded_state() {
+        let mut operations = Operations::default();
+        operations.workspace_id = Some(WorkspaceId::from_bytes([5; 16]).unwrap());
+
+        operations.start_workspace_rename();
+        operations.start_workspace_remove();
+
+        assert!(operations.rename_draft.is_none());
+        assert!(operations.confirmation.is_none());
+    }
+
+    #[test]
+    fn normal_workspace_details_hide_internal_id_and_sharing_fields() {
+        let mut operations = Operations::default();
+        operations.workspace_id = Some(WorkspaceId::from_bytes([6; 16]).unwrap());
+
+        let content = operations.draw_workspace_details(&Dashboard::default());
+
+        assert!(!content.contains("ID:"));
+        assert!(!content.contains("Sharing:"));
+    }
+
+    #[test]
+    fn editing_footers_tab_and_text_input_cannot_cancel_the_draft() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::WorkspaceDetails);
+        operations.workspace_id = Some(WorkspaceId::from_bytes([3; 16]).unwrap());
+        operations.rename_draft = Some(RenameDraft {
+            expected_name: LocalProjectName::try_from("Original".to_owned()).unwrap(),
+            name: "Updated".to_owned(),
+        });
+        operations.controls.event(
+            Rect::new(0, 0, 10, 1),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        operations.controls.event(
+            Rect::new(12, 0, 10, 1),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        operations.controls.cycle(false);
+        let mut backend = NoBackend;
+        let mut dashboard = Dashboard::default();
+
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert_eq!(
+            operations.controls.focused(),
+            Some(super::Action::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE
+            )))
+        );
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert!(operations.controls.focused().is_none());
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert!(operations.controls.focused().is_none());
+        assert!(operations.handle_paste(" project"));
+        assert!(operations.controls.focused().is_none());
+        assert!(operations.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+
+        assert!(operations.rename_draft.is_none());
+        assert!(matches!(
+            operations.confirmation,
+            Some(super::Confirmation::RenameWorkspace(_))
+        ));
+    }
+
+    #[test]
+    fn enter_activates_focused_next_and_cancel_edit_actions() {
+        let mut next = Operations::default();
+        next.page = Some(Page::WorkspaceDetails);
+        next.workspace_id = Some(WorkspaceId::from_bytes([4; 16]).unwrap());
+        next.rename_draft = Some(RenameDraft {
+            expected_name: LocalProjectName::try_from("Original".to_owned()).unwrap(),
+            name: "Updated".to_owned(),
+        });
+        next.controls.event(
+            Rect::new(0, 0, 10, 1),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        next.controls.event(
+            Rect::new(12, 0, 10, 1),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        next.controls.cycle(false);
+        let mut backend = NoBackend;
+        let mut dashboard = Dashboard::default();
+
+        assert!(next.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert!(next.rename_draft.is_none());
+        assert!(matches!(
+            next.confirmation,
+            Some(super::Confirmation::RenameWorkspace(_))
+        ));
+
+        let mut cancel = Operations::default();
+        cancel.page = Some(Page::WorkspaceDetails);
+        cancel.rename_draft = Some(RenameDraft {
+            expected_name: LocalProjectName::try_from("Original".to_owned()).unwrap(),
+            name: "Updated".to_owned(),
+        });
+        cancel.controls.event(
+            Rect::new(0, 0, 10, 1),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        cancel.controls.event(
+            Rect::new(12, 0, 10, 1),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        cancel.controls.cycle(false);
+        cancel.controls.cycle(false);
+
+        assert!(cancel.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut backend,
+            &mut dashboard,
+        ));
+        assert!(cancel.rename_draft.is_none());
+        assert!(cancel.confirmation.is_none());
+    }
+
+    #[test]
+    fn retargeting_global_pages_preserves_the_page_without_backend_calls() {
+        let mut operations = Operations::default();
+        operations.page = Some(Page::Service);
+        let workspace_id = WorkspaceId::from_bytes([9; 16]).unwrap();
+        let mut backend = NoBackend;
+
+        operations.retarget_workspace(workspace_id, &mut backend);
+
+        assert_eq!(operations.page, Some(Page::Service));
+        assert_eq!(operations.workspace_id, Some(workspace_id));
+    }
 }

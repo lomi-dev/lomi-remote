@@ -20,11 +20,75 @@ Otherwise it writes plain help to stderr and exits with code 2. `--help`,
 An absent host produces a versioned JSON error and exit code 4; diagnostics do
 not create a profile or start a daemon implicitly.
 
-The dashboard supports selection, details, refresh, keyboard help and q/Ctrl-C.
-Closing it restores raw mode, alternate screen and cursor state independently;
-it never sends a host stop command. Untrusted labels have control characters
+The dashboard keeps a workspace list in the left 25% and the current view in
+the right 75%, including forms and operation pages. Selecting a workspace
+loads a workspace-bound view immediately; Enter does not open a separate
+workspace view. The right panel has Open tabs, Logs and Settings sections.
+Open tabs describes the shared terminal projection and its pane states; private
+desktop editor, browser and chat panels are not part of that projection.
+Diagnostic logs are explicitly labeled Host-wide. Workspace settings reuse the
+existing rename, sharing and removal confirmation flows.
+The dashboard supports selection, refresh, keyboard help and q/Ctrl-C.
+`?` opens a modal shortcut reference over the current view. Close it with
+`Esc` or `?`; scrolling and resize stay inside the dialog without changing
+the selected workspace or executing the displayed actions.
+Click workspace rows and footer actions, or use Tab/Shift+Tab to focus a
+control and Enter to activate it. The mouse wheel scrolls the list or panel
+under the pointer. Dialogs capture both input methods until closed. Service,
+access, profiles, diagnostics, settings and interactive setup use the same
+keyboard and pointer actions; selecting a row never starts a terminal.
+Arrow keys also move between panes, tabs, lists and actions. From the workspace
+sidebar, Right focuses the tab strip; Left returns to the sidebar. Down moves
+into tab content, Up returns to the strip, and reaching the content's bottom
+can move focus to footer actions. Text fields retain their cursor controls;
+arrows move focus without confirming changes.
+Supported terminal emulators show an arrow over the canvas and a hand over
+visible, enabled controls. Hover never activates a control. OSC 22 output is
+deduplicated, updates after redraws, and restores the terminal's default mouse
+pointer on exit. Input carets are independent of the mouse pointer.
+
+Automatic pointer-shape support recognizes Kitty, Ghostty, foot, iTerm2 3.5+
+and xterm 367+. Unknown emulators retain their native pointer; there is no
+portable way for a TUI to force this feature. See the
+[OSC 22 compatibility table](https://ghostty.org/docs/vt/osc/22).
+`LOMI_REMOTE_POINTER=off` disables shape changes; `css` or `x11` can explicitly
+select a dialect when an SSH session does not advertise the emulator. Automatic
+shape changes are disabled under tmux and Screen. An explicit dialect under
+tmux uses passthrough and requires the owner's `allow-passthrough` setting;
+Lomi does not change terminal or multiplexer configuration. Non-terminal
+output and Screen never receive pointer sequences. No terminal
+queries or input probes are sent.
+
+The footer shows `a Add workspace`, `s Share` for an Offline workspace and
+`s Unshare` for a shared workspace. The other workspace actions are listed
+in `? Shortcuts`. Adding opens a centered name field and a Select directory
+button. The directory picker supports mouse and keyboard navigation, reads
+directory entries only, and preserves the form when cancelled. Creating a
+workspace registers the existing directory without creating or moving files;
+sharing still requires separate confirmation.
+Changing sharing opens a confirmation dialog with Cancel selected. Use Tab
+or Left/Right to choose, Enter to accept the selection, or Esc to cancel.
+Closing the dashboard restores mouse capture, raw mode, alternate screen and
+cursor state independently; it never sends a host stop command.
+Untrusted labels have control characters
 replaced and their displayed length bounded. No shell output is interpreted by
 Ratatui. The dashboard uses Ratatui and does not interpret shell output as UI content.
+
+The dashboard and setup screens use a fixed dark palette from the built-in
+Lomi desktop theme. Shared colors and text treatments live in `src/ui/theme.rs`.
+RGB terminals use the original values; Apple's Terminal uses the nearest stable
+256-color equivalents. The theme does not follow the OS light/dark preference.
+
+For appearance-only work, run the existing dashboard with in-memory sample data:
+
+```sh
+cargo run --locked -p lomiremote --example ui_preview
+```
+
+This debug example uses the real renderer and keyboard navigation. It never
+connects to a Host, starts services, reads credentials or changes configuration;
+all backend actions are disabled. Build without `LOMI_HOST_*` release pins.
+Use the normal page shortcuts and press `q` or `Ctrl-C` to close the preview.
 
 `setup` loads and can save a local manual/login/boot start preference. Saving it
 does not install or start an OS service, enroll an account, or share a workspace;
