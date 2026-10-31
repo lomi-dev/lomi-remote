@@ -2055,13 +2055,35 @@ mod tests {
 
     #[test]
     fn dynamic_code_validation_uses_dynamic_api_flags() {
-        let code = SecCode::for_self(Flags::NONE).expect("current process should have SecCode");
-        let requirement: SecRequirement = "true".parse().expect("true is a valid requirement");
-
-        assert!(
-            code.check_validity(DYNAMIC_VALIDATION_FLAGS, &requirement)
-                .is_ok()
+        // Intel test executables can be unsigned, unlike linker-signed ARM64
+        // executables. Validate a signed process without relying on how the
+        // current test harness was linked.
+        struct SignedProcess(std::process::Child);
+        impl Drop for SignedProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let process = SignedProcess(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start Apple-signed process fixture"),
         );
+        let mut attributes = GuestAttributes::new();
+        attributes.set_pid(process.0.id().try_into().expect("fixture PID fits pid_t"));
+        let code = SecCode::copy_guest_with_attribues(None, &attributes, Flags::NONE)
+            .expect("signed process fixture should have dynamic SecCode");
+        let requirement: SecRequirement = "anchor apple"
+            .parse()
+            .expect("Apple anchor is a valid requirement");
+
+        let validity = code.check_validity(DYNAMIC_VALIDATION_FLAGS, &requirement);
+        assert!(validity.is_ok(), "signed fixture validation: {validity:?}");
         assert!(
             code.check_validity(Flags::CHECK_ALL_ARCHITECTURES, &requirement)
                 .is_err()
