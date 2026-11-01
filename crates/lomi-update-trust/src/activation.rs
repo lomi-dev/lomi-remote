@@ -1075,6 +1075,35 @@ pub(crate) fn check_release_compatibility(
     crate::validate_release_custom(&custom, platform, profile_schema)
 }
 
+#[cfg(target_os = "macos")]
+fn supports_volume_identity(custom: &serde_json::Value) -> bool {
+    custom
+        .get("lomiMacosVolumeIdentity")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|policy| {
+            policy.len() == 1 && policy.get("format").and_then(serde_json::Value::as_u64) == Some(2)
+        })
+}
+
+/// Format upgrades may run only after a capable signed image is active.
+#[cfg(target_os = "macos")]
+pub(crate) fn active_supports_volume_identity(root: &Path) -> Result<bool> {
+    validate_admin_boot_directory(root)?;
+    let _lock = lock(root)?;
+    active_supports_volume_identity_locked(root)
+}
+
+#[cfg(target_os = "macos")]
+fn active_supports_volume_identity_locked(root: &Path) -> Result<bool> {
+    if read_journal(root)?.is_some() {
+        return Ok(false);
+    }
+    let active = read_pointer(root, ACTIVE)?.ok_or_else(|| invalid("no active admin release"))?;
+    verify_object(root, &active)?;
+    stable_matches(root, STABLE_EXECUTABLE, Some(&active))?;
+    Ok(supports_volume_identity(&release_custom(root, &active)?))
+}
+
 fn read_pointer(root: &Path, name: &str) -> Result<Option<String>> {
     let path = root.join(name);
     let metadata = match fs::symlink_metadata(&path) {
@@ -1603,6 +1632,12 @@ pub(crate) fn activate_verified_target_admin_boot(
     profile_schema: u64,
 ) -> Result<PathBuf> {
     crate::validate_release_custom(custom, platform, profile_schema)?;
+    #[cfg(target_os = "macos")]
+    if !supports_volume_identity(custom) {
+        return Err(invalid(
+            "admin activation requires persistent macOS volume identity support",
+        ));
+    }
     activate(root, bytes, Some(custom), true)
 }
 
@@ -1730,6 +1765,16 @@ fn rollback_inner(root: &Path, platform: &str, profile_schema: u64) -> Result<Pa
     let current_companion = read_pointer(root, ACTIVE_COMPANION)?;
     let previous_companion = read_pointer(root, PREVIOUS_COMPANION)?;
     check_release_compatibility(root, &previous, platform, profile_schema)?;
+    #[cfg(target_os = "macos")]
+    if platform.starts_with("macos-")
+        && (fs::symlink_metadata(root.join(ADMIN_OWNER_BINDING)).is_ok()
+            || supports_volume_identity(&release_custom(root, &current)?))
+        && !supports_volume_identity(&release_custom(root, &previous)?)
+    {
+        return Err(invalid(
+            "previous release cannot read the persistent macOS volume identity format",
+        ));
+    }
     let destination = verify_object(root, &previous)?;
     commit_pointers(
         root,
@@ -1830,4 +1875,176 @@ fn create_or_check_private_dir(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos", not(feature = "release-root")))]
+mod volume_format_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn policy(version: &str, stable_volume: bool) -> serde_json::Value {
+        let mut custom = serde_json::json!({"lomiRelease": {
+            "format": 1, "platform": "macos-aarch64", "version": version,
+            "minProfileSchema": 14, "maxProfileSchema": 14,
+        }});
+        if stable_volume {
+            custom["lomiMacosVolumeIdentity"] = serde_json::json!({"format": 2});
+        }
+        custom
+    }
+
+    #[test]
+    fn incapable_previous_image_is_rejected_without_changing_activation() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        let root = canonical.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        let old = activate_verified_target(
+            root,
+            b"legacy image",
+            &policy("0.1.7", false),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        let new = activate_verified_target(
+            root,
+            b"volume UUID image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        assert_ne!(old, new);
+        assert!(
+            rollback(root, "macos-aarch64", 14)
+                .unwrap_err()
+                .to_string()
+                .contains("persistent macOS volume identity")
+        );
+        assert_eq!(
+            fs::read(root.join(STABLE_EXECUTABLE)).unwrap(),
+            b"volume UUID image"
+        );
+        assert!(active_supports_volume_identity_locked(root).unwrap());
+    }
+
+    #[test]
+    fn pending_activation_cannot_upgrade_receipts_and_remains_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        let root = canonical.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        activate_verified_target(
+            root,
+            b"legacy image",
+            &policy("0.1.7", false),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        let old = read_pointer(root, ACTIVE).unwrap().unwrap();
+        activate_verified_target(
+            root,
+            b"volume UUID image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        let new = read_pointer(root, ACTIVE).unwrap().unwrap();
+        replace_stable_executable(
+            root,
+            STABLE_EXECUTABLE,
+            Some(&old),
+            &[Some(new), Some(old.clone())],
+        )
+        .unwrap();
+        write_journal(
+            root,
+            &PointerState {
+                active: Some(old.clone()),
+                previous: None,
+                companion: None,
+                previous_companion: None,
+            },
+        )
+        .unwrap();
+        assert!(!active_supports_volume_identity_locked(root).unwrap());
+        recover_verified(root, "macos-aarch64", 14).unwrap();
+        assert_eq!(read_pointer(root, ACTIVE).unwrap(), Some(old));
+        assert!(!active_supports_volume_identity_locked(root).unwrap());
+        activate_verified_target(
+            root,
+            b"volume UUID image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        assert!(active_supports_volume_identity_locked(root).unwrap());
+    }
+
+    #[test]
+    fn compatible_previous_image_can_roll_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        let root = canonical.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        activate_verified_target(
+            root,
+            b"first UUID image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        activate_verified_target(
+            root,
+            b"second UUID image",
+            &policy("0.1.9", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        rollback(root, "macos-aarch64", 14).unwrap();
+        assert_eq!(
+            fs::read(root.join(STABLE_EXECUTABLE)).unwrap(),
+            b"first UUID image"
+        );
+    }
+
+    #[test]
+    fn legacy_admin_destination_is_rejected_before_any_pointer_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        let root = canonical.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        activate_verified_target(
+            root,
+            b"capable image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        let active = read_pointer(root, ACTIVE).unwrap();
+        assert!(
+            activate_verified_target_admin_boot(
+                root,
+                b"legacy image",
+                &policy("0.1.7", false),
+                "macos-aarch64",
+                14
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("persistent macOS volume identity support")
+        );
+        assert_eq!(read_pointer(root, ACTIVE).unwrap(), active);
+        assert_eq!(
+            fs::read(root.join(STABLE_EXECUTABLE)).unwrap(),
+            b"capable image"
+        );
+    }
 }

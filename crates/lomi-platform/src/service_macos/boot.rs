@@ -31,6 +31,8 @@ const ADMIN_HOST_IDENTITY_BINDING: &str = "host-identity.json";
 pub(super) const LAUNCH_DAEMONS: &str = "/Library/LaunchDaemons";
 const PROFILE_OWNER_LOCK: &str = "owner.lock";
 const ADMIN_LOCK: &str = ".lomi-remote-service.lock";
+const HOST_INITIALIZATION_RECEIPT: &str = "host-init.json";
+const HOST_INITIALIZATION_RECEIPT_LIMIT: usize = 16 * 1024;
 const DISCOVERY: &str = "discovery.json";
 const LIMIT: usize = 32 * 1024;
 
@@ -575,6 +577,11 @@ impl Directory {
         }
         self.0.sync_all().map_err(|_| Error::Invalid)
     }
+}
+
+fn directory_identity(directory: &Directory) -> Result<(u64, u64)> {
+    let metadata = directory.0.metadata().map_err(|_| Error::Conflict)?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 fn access_bits(metadata: &std::fs::Metadata, uid: u32, gid: u32) -> u32 {
@@ -1638,6 +1645,7 @@ fn stop_with_owner_lock(
 /// profile owner lock stay held until this value is dropped.
 pub struct BootMaintenanceGuard {
     profile: Directory,
+    profile_identity: (u64, u64),
     _owner_lock: Option<File>,
     _admin_lock: File,
     _login_adapter_lock: File,
@@ -1670,6 +1678,195 @@ impl BootMaintenanceGuard {
 
     pub fn host_mode(&self) -> super::AdminHostMode {
         self.host_mode
+    }
+
+    /// Stable volume identity read from the exact profile directory descriptor
+    /// retained by this maintenance guard.
+    pub fn profile_volume_uuid(&self) -> Result<String> {
+        self.check_profile_current()?;
+        crate::volume_identity::volume_uuid(&self.profile.0).map_err(|_| Error::Conflict)
+    }
+
+    /// Current device and inode numbers for the retained profile directory.
+    pub fn profile_identity(&self) -> (u64, u64) {
+        self.profile_identity
+    }
+
+    /// Read the bounded, account-owned Host initialization receipt while this
+    /// guard retains the profile owner lock.
+    pub fn read_host_initialization_receipt(&self) -> Result<Option<Vec<u8>>> {
+        if !root() || self._owner_lock.is_none() {
+            return Err(Error::Conflict);
+        }
+        let Some((bytes, _, _)) = self.read_host_initialization_receipt_with_identity()? else {
+            return Ok(None);
+        };
+        Ok(Some(bytes))
+    }
+
+    /// Atomically replace one exact account-owned initialization receipt.
+    /// The pinned profile directory and owner lock stay held throughout.
+    pub fn replace_host_initialization_receipt(&self, expected: &[u8], next: &[u8]) -> Result<()> {
+        if !root()
+            || self._owner_lock.is_none()
+            || expected.is_empty()
+            || next.is_empty()
+            || next.len() > HOST_INITIALIZATION_RECEIPT_LIMIT
+        {
+            return Err(Error::Conflict);
+        }
+        let (current, device, inode) = self
+            .read_host_initialization_receipt_with_identity()?
+            .ok_or(Error::Conflict)?;
+        if current != expected {
+            return Err(Error::Conflict);
+        }
+
+        let temporary_name = format!(".lomi-host-init-{}", uuid::Uuid::new_v4());
+        let temporary = c(OsStr::new(&temporary_name))?;
+        let destination = c(OsStr::new(HOST_INITIALIZATION_RECEIPT))?;
+        let fd = unsafe {
+            libc::openat(
+                self.profile.0.as_raw_fd(),
+                temporary.as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(Error::Invalid);
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let result = (|| {
+            file.write_all(next).map_err(|_| Error::Invalid)?;
+            if unsafe { libc::fchown(file.as_raw_fd(), self.uid, self.account.gid) } != 0
+                || unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0
+            {
+                return Err(Error::Invalid);
+            }
+            let metadata = file.metadata().map_err(|_| Error::Conflict)?;
+            if !metadata.is_file()
+                || metadata.uid() != self.uid
+                || metadata.gid() != self.account.gid
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o777 != 0o600
+                || metadata.len() != next.len() as u64
+            {
+                return Err(Error::Conflict);
+            }
+            crate::unix::reject_acl_grants(&file).map_err(|_| Error::Conflict)?;
+            file.sync_all().map_err(|_| Error::Invalid)?;
+
+            let Some((latest, latest_device, latest_inode)) =
+                self.read_host_initialization_receipt_with_identity()?
+            else {
+                return Err(Error::Conflict);
+            };
+            if latest != expected || latest_device != device || latest_inode != inode {
+                return Err(Error::Conflict);
+            }
+            if unsafe {
+                libc::renameat(
+                    self.profile.0.as_raw_fd(),
+                    temporary.as_ptr(),
+                    self.profile.0.as_raw_fd(),
+                    destination.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(Error::Conflict);
+            }
+            self.profile.0.sync_all().map_err(|_| Error::Invalid)?;
+            let Some((written, _, _)) = self.read_host_initialization_receipt_with_identity()?
+            else {
+                return Err(Error::Conflict);
+            };
+            if written != next {
+                return Err(Error::Conflict);
+            }
+            Ok(())
+        })();
+        unsafe {
+            libc::unlinkat(self.profile.0.as_raw_fd(), temporary.as_ptr(), 0);
+        }
+        self.profile.0.sync_all().map_err(|_| Error::Invalid)?;
+        result
+    }
+
+    fn read_host_initialization_receipt_with_identity(
+        &self,
+    ) -> Result<Option<(Vec<u8>, u64, u64)>> {
+        self.check_profile_current()?;
+        let Some(mut file) =
+            self.profile
+                .regular(HOST_INITIALIZATION_RECEIPT, self.uid, 0o600, false)?
+        else {
+            return Ok(None);
+        };
+        let before = file.metadata().map_err(|_| Error::Conflict)?;
+        if before.gid() != self.account.gid
+            || before.len() == 0
+            || before.len() > HOST_INITIALIZATION_RECEIPT_LIMIT as u64
+        {
+            return Err(Error::Conflict);
+        }
+        let mut bytes = Vec::with_capacity(before.len() as usize);
+        (&mut file)
+            .take((HOST_INITIALIZATION_RECEIPT_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Conflict)?;
+        let after = file.metadata().map_err(|_| Error::Conflict)?;
+        if bytes.is_empty()
+            || bytes.len() > HOST_INITIALIZATION_RECEIPT_LIMIT
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.len() != bytes.len() as u64
+            || before.gid() != after.gid()
+        {
+            return Err(Error::Conflict);
+        }
+        self.check_profile_current()?;
+        Ok(Some((bytes, before.dev(), before.ino())))
+    }
+
+    fn check_profile_current(&self) -> Result<()> {
+        if !root() {
+            return Err(Error::Conflict);
+        }
+        let account = account(&self.account.name)?;
+        if account.uid != self.uid
+            || account.gid != self.account.gid
+            || account.home != self.account.home
+        {
+            return Err(Error::Conflict);
+        }
+        let path = validate_profile(self.profile_path(), &account)?;
+        if path != self.profile.1 {
+            return Err(Error::Conflict);
+        }
+        let current = Directory::open(
+            &path,
+            account.uid,
+            false,
+            Some(0o700),
+            Some((account.uid, account.gid)),
+        )?;
+        let pinned = self.profile.0.metadata().map_err(|_| Error::Conflict)?;
+        let current = current.0.metadata().map_err(|_| Error::Conflict)?;
+        if pinned.dev() != current.dev()
+            || pinned.ino() != current.ino()
+            || pinned.uid() != current.uid()
+            || pinned.gid() != current.gid()
+            || pinned.mode() & 0o777 != current.mode() & 0o777
+        {
+            return Err(Error::Conflict);
+        }
+        Ok(())
     }
 
     pub(super) fn service_was_running(&self) -> bool {
@@ -2068,6 +2265,8 @@ impl BootMaintenanceGuard {
             profile_uid: metadata.uid(),
             profile_gid: metadata.gid(),
             profile_mode: metadata.mode() & 0o777,
+            profile_volume_uuid: crate::volume_identity::volume_uuid(&self.profile.0)
+                .map_err(|_| Error::Conflict)?,
             executable_path,
         })
     }
@@ -2355,6 +2554,7 @@ pub(super) struct CustodyBinding {
     pub(super) profile_uid: u32,
     pub(super) profile_gid: u32,
     pub(super) profile_mode: u32,
+    pub(super) profile_volume_uuid: String,
     pub(super) executable_path: PathBuf,
 }
 
@@ -2392,8 +2592,32 @@ pub(super) fn custody_binding_for_identity(
         profile_uid: metadata.uid(),
         profile_gid: metadata.gid(),
         profile_mode: metadata.mode() & 0o777,
+        profile_volume_uuid: crate::volume_identity::volume_uuid(&profile.0)
+            .map_err(|_| Error::Conflict)?,
         executable_path: executable.to_path_buf(),
     })
+}
+
+pub(super) fn custody_binding_for_admin_identity(
+    profile_path: &Path,
+    executable: &Path,
+    selected_name: &str,
+    mode: super::AdminHostMode,
+) -> Result<CustodyBinding> {
+    if !root() {
+        return Err(Error::Conflict);
+    }
+    let account = account(selected_name)?;
+    let profile_path = validate_profile(profile_path, &account)?;
+    let install_dir = install_path_for_account(&account.name)?;
+    if executable != install_dir.join("lomiremote") {
+        return Err(Error::Conflict);
+    }
+    validate_admin_owner_binding(&install_dir, &profile_path, &account, mode)?;
+    if read_admin_host_identity_binding_for(&profile_path, &account, Some(mode))?.is_none() {
+        return Err(Error::Conflict);
+    }
+    custody_binding_for_identity(&profile_path, executable, selected_name)
 }
 
 /// Re-resolve a persisted account identity before a root custody service uses
@@ -2619,8 +2843,10 @@ pub(super) fn acquire_maintenance_guard(
         };
         (false, Some(owner))
     };
+    let profile_identity = directory_identity(&profile)?;
     Ok(BootMaintenanceGuard {
         profile,
+        profile_identity,
         _owner_lock: owner_lock,
         _admin_lock: admin_lock,
         _login_adapter_lock: login_adapter_lock,
@@ -2766,8 +2992,10 @@ pub(super) fn acquire_admin_initial_install_guard(
         return Err(Error::Conflict);
     }
 
+    let profile_identity = directory_identity(&profile)?;
     let guard = BootMaintenanceGuard {
         profile,
+        profile_identity,
         _owner_lock: Some(owner_lock),
         _admin_lock: admin_lock,
         _login_adapter_lock: login_adapter_lock,
@@ -3147,8 +3375,10 @@ fn acquire_login_or_manual_maintenance_guard(
         }
     }
 
+    let profile_identity = directory_identity(&profile)?;
     Ok(BootMaintenanceGuard {
         profile,
+        profile_identity,
         _owner_lock: owner_lock,
         _admin_lock: admin_lock,
         _login_adapter_lock: login_adapter_lock,
@@ -4065,8 +4295,10 @@ pub(super) fn run(
         }
         _ => return Err(Error::Invalid),
     };
+    let profile_identity = directory_identity(&profile)?;
     let mut guard = BootMaintenanceGuard {
         profile,
+        profile_identity,
         _owner_lock: owner_lock,
         _admin_lock: admin_lock,
         _login_adapter_lock: login_adapter_lock,

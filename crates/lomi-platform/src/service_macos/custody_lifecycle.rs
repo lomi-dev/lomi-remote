@@ -94,6 +94,41 @@ pub(super) fn finish_maintenance(
     guard: &BootMaintenanceGuard,
     state: MaintenanceState,
 ) -> Result<()> {
+    finish_maintenance_with_legacy_format(guard, state, false)
+}
+
+/// Restore the same verified v1 custody format for a rollback to a protected
+/// CLI that predates durable volume UUID pins. A v2 registration cannot be
+/// downgraded through this path.
+pub(super) fn finish_maintenance_for_legacy_release(
+    guard: &BootMaintenanceGuard,
+    state: MaintenanceState,
+) -> Result<()> {
+    finish_maintenance_with_legacy_format(guard, state, true)
+}
+
+/// Preserve v2 metadata around a restored legacy image without launching it.
+pub(super) fn finish_maintenance_inert(
+    guard: &BootMaintenanceGuard,
+    mut state: MaintenanceState,
+) -> Result<()> {
+    state.custodian_was_running = false;
+    state.host_was_running = false;
+    finish_maintenance(guard, state)?;
+    let registration = custody::read_privileged_custodian(guard)?;
+    // Restoring a different verified image changes the executable digest.
+    // Recertify the exact all-Cleaned inventory under the broker lock, rather
+    // than leaving a stale receipt that would block the next installer retry.
+    let _offline_drain =
+        custody::certify_offline_privileged_custodian_drained(guard, &registration)?;
+    Ok(())
+}
+
+fn finish_maintenance_with_legacy_format(
+    guard: &BootMaintenanceGuard,
+    state: MaintenanceState,
+    legacy_release: bool,
+) -> Result<()> {
     if guard.owner_uid() != state.owner_uid || guard.profile_path() != state.profile_path {
         return Err(Error::Conflict);
     }
@@ -103,7 +138,11 @@ pub(super) fn finish_maintenance(
         }
         return Ok(());
     }
-    let registration = custody::install_privileged_custodian(guard)?;
+    let registration = if legacy_release {
+        custody::install_privileged_custodian_for_legacy_release(guard)?
+    } else {
+        custody::install_privileged_custodian(guard)?
+    };
     if state.custodian_was_running {
         start_registered(guard, &registration)?;
     } else if state.host_was_running {
@@ -270,6 +309,26 @@ fn drain_and_bootout(
             thread::sleep(Duration::from_millis(50));
         }
         custody::verify_privileged_custodian_drained(registration)?;
+    }
+    Ok(())
+}
+
+/// Called only by explicit volume recovery while its profile owner lock and
+/// exclusive broker lock are held and every generation has a cleanup proof.
+/// A legacy process may appear briefly in launchctl while rejecting v2, so
+/// querying its incompatible admin helper cannot establish readiness/drain.
+pub(super) fn stop_drained_legacy_job_for_volume_repair(
+    registration: &custody::PrivilegedCustodianRegistration,
+) -> Result<()> {
+    if observe_job(registration)?.is_some() {
+        super::required(&["bootout", &launch_target(registration)])?;
+    }
+    let deadline = Instant::now() + MANAGER_DEADLINE;
+    while observe_job(registration)?.is_some() {
+        if Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        thread::sleep(Duration::from_millis(50));
     }
     Ok(())
 }

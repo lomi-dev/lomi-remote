@@ -108,10 +108,27 @@ elif command == "admin-macos-profile":
 elif command == "admin-boot-recovery-needed":
     print("clear")
 elif command == "admin-host-status":
-    if os.environ.get("ADMIN_STATUS_EXIT"):
+    repaired = pathlib.Path(os.environ["FIXTURE_INSTALL_DIR"]) / 'fixture-volume-repaired'
+    if os.environ.get("ADMIN_STATUS_EXIT") and not repaired.exists():
         print("native service inspection failure", file=sys.stderr)
         raise SystemExit(int(os.environ["ADMIN_STATUS_EXIT"]))
-    print("Account: fixture-account\\nMode: boot\\nRegistration: registered\\nActive: " + os.environ.get("SERVICE_ACTIVE", "inactive") + "\\nAutostart: enabled\\nCustodian ready: yes")
+    host_mode = os.environ.get("FIXTURE_HOST_MODE", "boot")
+    registration = 'absent' if host_mode == 'manual' else 'registered'
+    autostart = 'none' if host_mode == 'manual' else 'enabled'
+    print("Account: fixture-account\\nMode: " + host_mode + "\\nRegistration: " + registration + "\\nActive: " + os.environ.get("SERVICE_ACTIVE", "inactive") + "\\nAutostart: " + autostart + "\\nCustodian ready: yes")
+elif command == "admin-volume-repair-needed":
+    repaired = pathlib.Path(os.environ["FIXTURE_INSTALL_DIR"]) / 'fixture-volume-repaired'
+    if os.environ.get("FIXTURE_RUNTIME_VOLUME_UPGRADE") == '1':
+        print('upgrade-required')
+    else:
+        print('needed' if os.environ.get("FIXTURE_REPAIR_LEGACY_VOLUME") == '1' and not repaired.exists() else 'clear')
+elif command == "repair-admin-volume-binding":
+    if os.environ.get("FIXTURE_REPAIR_LEGACY_VOLUME") != '1' and os.environ.get("FIXTURE_RUNTIME_VOLUME_UPGRADE") != '1':
+        print('status failure is not a recoverable legacy volume binding', file=sys.stderr)
+        raise SystemExit(3)
+    if os.environ.get("FIXTURE_REPAIR_LEGACY_VOLUME") == '1':
+        (pathlib.Path(os.environ["FIXTURE_INSTALL_DIR"]) / 'fixture-volume-repaired').touch()
+    print('repaired')
 elif command == "maintenance-schema":
     real_updater = os.environ["LOMI_TEST_MAINTENANCE_UPDATER"]
     os.execv(real_updater, [real_updater, "maintenance-schema"])
@@ -137,6 +154,8 @@ else:
         self._write_executable(
             self.bin_directory / "codesign",
             "#!/bin/sh\n"
+            "for file do :; done\n"
+            "[ -f \"$file\" ] || exit 1\n"
             "case $1 in\n"
             "  -dv) printf 'TeamIdentifier=TESTTEAM\\n' >&2 ;;\n"
             "  --verify) exit 0 ;;\n"
@@ -169,11 +188,15 @@ else:
         service_install_exit: int = 0,
         service_start_exit: int = 0,
         admin_status_exit: int = 0,
+        repair_legacy_volume: bool = False,
+        runtime_volume_upgrade: bool = False,
+        host_mode: str = "boot",
         service_active: bool = False,
         maintenance_response: dict | None = None,
         mode: str = "admin-install",
         purge: bool = False,
         admin_uninstall_exit: int = 0,
+        relative_script: bool = False,
     ) -> tuple[int, bytes, bytes]:
         environment = os.environ.copy()
         environment.update({
@@ -188,6 +211,9 @@ else:
             "SERVICE_START_EXIT": str(service_start_exit),
             "SERVICE_ACTIVE": "active" if service_active else "inactive",
             "ADMIN_UNINSTALL_EXIT": str(admin_uninstall_exit),
+            "FIXTURE_REPAIR_LEGACY_VOLUME": "1" if repair_legacy_volume else "0",
+            "FIXTURE_RUNTIME_VOLUME_UPGRADE": "1" if runtime_volume_upgrade else "0",
+            "FIXTURE_HOST_MODE": host_mode,
             "FIXTURE_MAINTENANCE_RESPONSE": json.dumps(
                 MAINTENANCE_RESPONSE if maintenance_response is None else maintenance_response
             ),
@@ -201,10 +227,10 @@ else:
 
         installer_args = [
             "/bin/sh",
-            str(self.installer_path),
+            "./install.sh" if relative_script else str(self.installer_path),
             mode,
             "fixture-account",
-            "boot",
+            host_mode,
         ]
         if purge:
             installer_args.append("--purge")
@@ -216,6 +242,7 @@ else:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=environment,
+                cwd=self.bundle,
                 check=False,
             )
             return result.returncode, result.stdout, result.stderr
@@ -228,6 +255,7 @@ else:
                 stdout=subprocess.PIPE,
                 stderr=slave,
                 env=environment,
+                cwd=self.bundle,
             )
         finally:
             os.close(slave)
@@ -277,6 +305,12 @@ else:
         self.assertIn(f"Installed Lomi Remote v{VERSION} to {self.actual_cli_path}.".encode(), stderr)
         self.assertIn(str(self.actual_cli_path).encode(), stdout)
         self.assertNotIn(b"\x1b", stderr)
+
+    def test_relative_script_verifies_signature_before_changing_directory(self) -> None:
+        returncode, _stdout, stderr = self.run_installer(relative_script=True)
+
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(b"Installed Lomi Remote v1.2.3", stderr)
 
     def test_no_color_tty_success_keeps_completion_message_plain(self) -> None:
         returncode, _stdout, stderr = self.run_installer(tty=True, no_color=True)
@@ -369,6 +403,67 @@ else:
         self.assertNotIn("install-release-admin-boot ", self.updater_log.read_text())
         self.assertNotIn(b"Installed Lomi Remote", stderr)
         self.assertIn("SERVICE_OWNERSHIP_CONFLICT", self.cli_path.read_text())
+
+    def test_retry_repairs_only_confirmed_legacy_volume_before_activation(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer(
+            admin_status_exit=3, repair_legacy_volume=True,
+        )
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(b"Repaired the legacy macOS volume binding", stderr)
+        self.assertIn(b"Host is running (boot mode)", stderr)
+        self.assertNotIn(b"native service inspection failure", stderr)
+        commands = self.updater_log.read_text().splitlines()
+        repair = next(i for i, command in enumerate(commands)
+                      if command.startswith('repair-admin-volume-binding '))
+        activation = next(i for i, command in enumerate(commands)
+                          if command.startswith('install-release-admin-boot '))
+        self.assertLess(repair, activation)
+        self.assertEqual(sum(command.startswith('admin-host-status ') for command in commands), 1)
+        cli_commands = self.cli_log.read_text()
+        self.assertIn('service install', cli_commands)
+        self.assertIn('service start', cli_commands)
+
+    def test_retry_finishes_host_receipt_repair_even_when_custody_status_is_valid(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer(repair_legacy_volume=True)
+        self.assertEqual(returncode, 0, stderr.decode(errors='replace'))
+        commands = self.updater_log.read_text().splitlines()
+        repair = next(i for i, command in enumerate(commands)
+                      if command.startswith('repair-admin-volume-binding '))
+        status = next(i for i, command in enumerate(commands)
+                      if command.startswith('admin-host-status '))
+        self.assertLess(repair, status)
+
+    def test_retry_starts_boot_after_completed_receipt_migration_without_reenrollment(self) -> None:
+        self.prepare_old_service_install()
+        returncode, _stdout, stderr = self.run_installer(runtime_volume_upgrade=True)
+        self.assertEqual(returncode, 0, stderr.decode(errors='replace'))
+        self.assertIn(b'Completing the interrupted macOS volume binding upgrade', stderr)
+        self.assertIn(b'Host is running (boot mode)', stderr)
+        self.assertEqual(self.updater_log.read_text().count('repair-admin-volume-binding '), 1)
+        self.assertFalse((self.install_dir / 'fixture-volume-repaired').exists())
+        self.assertIn('service install', self.cli_log.read_text())
+        self.assertIn('service start', self.cli_log.read_text())
+
+    @unittest.skipUnless(REAL_UPDATER, "requires the compiled release-root updater")
+    def test_initialized_manual_install_repairs_before_activation_without_starting_host(self) -> None:
+        self.prepare_old_service_install()
+        (self.profile_dir / 'service-registration-macos.json').unlink()
+        (self.profile_dir / 'host-init.json').write_text('{}')
+        (self.install_dir / 'host-identity.json').write_text('{}')
+        returncode, _stdout, stderr = self.run_installer(
+            repair_legacy_volume=True, host_mode='manual',
+        )
+        self.assertEqual(returncode, 0, stderr.decode(errors='replace'))
+        commands = self.updater_log.read_text().splitlines()
+        repair = next(i for i, command in enumerate(commands)
+                      if command.startswith('repair-admin-volume-binding '))
+        activation = next(i for i, command in enumerate(commands)
+                          if command.startswith('install-release-admin-boot '))
+        self.assertLess(repair, activation)
+        self.assertIn('macos-aarch64 fixture-account manual', commands[repair])
+        self.assertNotIn('service start', self.cli_log.read_text())
 
     @unittest.skipUnless(REAL_UPDATER, "requires the compiled release-root updater")
     def test_retry_of_active_service_retains_authenticated_maintenance(self) -> None:

@@ -133,6 +133,40 @@ async fn run(args: Vec<String>) -> lomi_update_trust::Result<()> {
             )?;
         }
         #[cfg(all(feature = "release-root", target_os = "macos"))]
+        Some("admin-volume-repair-needed") if args.len() == 7 => {
+            let mode = admin_host_mode(args.get(6).map(String::as_str))?;
+            let state = lomi_update_trust::admin_volume_binding_state(
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                &args[4],
+                &args[5],
+                mode,
+            )?;
+            println!(
+                "{}",
+                match state {
+                    lomi_update_trust::AdminVolumeBindingState::Clear => "clear",
+                    lomi_update_trust::AdminVolumeBindingState::RepairNeeded => "needed",
+                    lomi_update_trust::AdminVolumeBindingState::RuntimeUpgradeNeeded =>
+                        "upgrade-required",
+                }
+            );
+        }
+        #[cfg(all(feature = "release-root", target_os = "macos"))]
+        Some("repair-admin-volume-binding") if args.len() == 7 => {
+            let mode = admin_host_mode(args.get(6).map(String::as_str))?;
+            if !lomi_update_trust::repair_admin_legacy_volume_bindings(
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                &args[4],
+                &args[5],
+                mode,
+            )? {
+                return Err("no legacy volume binding was repaired".into());
+            }
+            println!("repaired");
+        }
+        #[cfg(all(feature = "release-root", target_os = "macos"))]
         Some("admin-host-status") if args.len() == 6 || args.len() == 7 => {
             let host_mode = admin_host_mode(args.get(6).map(String::as_str))?;
             let install_dir = Path::new(&args[3]);

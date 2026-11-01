@@ -999,6 +999,8 @@ def main() -> None:
                 "minProfileSchema": args.minimum_profile_schema,
                 "maxProfileSchema": maximum_profile_schema,
             },
+            **({"lomiMacosVolumeIdentity": {"format": 2}}
+               if platform.startswith("macos-") else {}),
             **({"lomiAuthenticode": {"format": 1, "thumbprint": expected_thumbprint}}
                if platform.startswith("windows-") else {}),
         },

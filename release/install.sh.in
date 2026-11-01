@@ -65,6 +65,10 @@ case "$PLATFORM" in
             || fail 'updater binary is signed by an unexpected team'
         ;;
 esac
+# An explicitly selected account may not traverse the invoking administrator's
+# current directory. Verify the potentially relative script path first, then
+# use a neutral cwd for selected-account subprocesses with absolute inputs.
+cd / || fail 'cannot enter the installer working directory'
 [ "$("$UPDATER" root-pin)" = "$PINNED_ROOT_SHA256" ] || fail 'embedded public trust root does not match the package pin'
 mode=install
 lomi_mode_seen=0
@@ -298,7 +302,32 @@ admin_boot_install() {
         profile_record_exists=1
     fi
 
+    volume_binding_repaired=0
     check_admin_service() {
+        volume_repair_needed=$("$UPDATER" admin-volume-repair-needed "$PROFILE_DIR" \
+            "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") \
+            || fail 'selected account volume bindings could not be inspected safely'
+        case "$volume_repair_needed" in
+          needed)
+            repair_result=$("$UPDATER" repair-admin-volume-binding "$PROFILE_DIR" \
+                "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") || {
+                fail 'selected account legacy volume bindings could not be repaired safely'
+            }
+            [ "$repair_result" = repaired ] || fail 'legacy volume recovery returned an invalid result'
+            volume_binding_repaired=1
+            info 'Repaired the legacy macOS volume binding for the existing Host identity.'
+            ;;
+          upgrade-required)
+            repair_result=$("$UPDATER" repair-admin-volume-binding "$PROFILE_DIR" \
+                "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") \
+                || fail 'the legacy macOS runtime could not be stopped safely for the pending upgrade'
+            [ "$repair_result" = repaired ] || fail 'legacy runtime preparation returned an invalid result'
+            volume_binding_repaired=1
+            info 'Completing the interrupted macOS volume binding upgrade.'
+            ;;
+          clear) ;;
+          *) fail 'legacy volume preflight returned an invalid result' ;;
+        esac
         admin_service_status=$("$UPDATER" admin-host-status "$PROFILE_DIR" \
             "$INSTALL_DIR" "$PLATFORM" "$ADMIN_ACCOUNT" "$ADMIN_HOST_MODE") \
             || fail 'selected account Host mode and registration could not be authenticated'
@@ -375,6 +404,14 @@ admin_boot_install() {
             sleep "$GRACE_SECONDS"
         fi
     else
+        # Manual Hosts intentionally have no autostart service record. An
+        # existing initialized protected install still needs volume recovery
+        # before its executable is activated, just like Boot and Login Hosts.
+        if [ "$ADMIN_HOST_MODE" = manual ] && verify_admin_cli \
+            && [ -f "$PROFILE_DIR/host-init.json" ] \
+            && [ -f "$INSTALL_DIR/host-identity.json" ]; then
+            check_admin_service
+        fi
         if [ "$ADMIN_HOST_MODE" != manual ]; then
             install_service=1
             if [ "$ADMIN_HOST_MODE" = boot ]; then should_start=1; fi
@@ -405,6 +442,11 @@ admin_boot_install() {
     else
         "$UPDATER" initialize-release "$TRUST_DIR" >/dev/null \
             || fail 'could not initialize private admin trust state'
+    fi
+
+    if [ "$volume_binding_repaired" -eq 1 ]; then
+        install_service=1
+        if [ "$ADMIN_HOST_MODE" = boot ]; then should_start=1; fi
     fi
 
     info "Verifying and installing Lomi Remote v$RELEASE_VERSION..."

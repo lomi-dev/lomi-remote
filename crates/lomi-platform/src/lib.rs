@@ -13,6 +13,8 @@ pub mod service_linux;
 pub mod service_macos;
 #[cfg(unix)]
 pub mod unix;
+#[cfg(target_os = "macos")]
+pub mod volume_identity;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]

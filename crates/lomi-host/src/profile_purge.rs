@@ -66,6 +66,13 @@ enum InitializationBinding {
         gid: u32,
         device: u64,
         inode: u64,
+        #[cfg(target_os = "macos")]
+        #[serde(
+            rename = "volumeUuid",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        volume_uuid: Option<String>,
     },
     #[cfg(windows)]
     Windows {
@@ -93,6 +100,78 @@ struct InitializationReceipt {
     profile_id: Option<String>,
 }
 
+#[cfg(unix)]
+fn unix_initialization_binding_matches(
+    version: u8,
+    receipt_owner: &InitializationBinding,
+    current_uid: u32,
+    current_gid: u32,
+    current_device: u64,
+    current_inode: u64,
+    current_volume_uuid: Option<&str>,
+) -> bool {
+    match version {
+        1 => {
+            #[cfg(target_os = "macos")]
+            {
+                matches!(
+                    receipt_owner,
+                    InitializationBinding::Unix {
+                        uid,
+                        gid,
+                        device,
+                        inode,
+                        volume_uuid: None,
+                    } if *uid == current_uid
+                        && *gid == current_gid
+                        && *device == current_device
+                        && *inode == current_inode
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                matches!(
+                    receipt_owner,
+                    InitializationBinding::Unix { uid, gid, device, inode }
+                        if *uid == current_uid
+                            && *gid == current_gid
+                            && *device == current_device
+                            && *inode == current_inode
+                )
+            }
+        }
+        #[cfg(target_os = "macos")]
+        2 => {
+            let InitializationBinding::Unix {
+                uid,
+                gid,
+                inode,
+                volume_uuid: Some(receipt_uuid),
+                ..
+            } = receipt_owner
+            else {
+                return false;
+            };
+            let Some(current_uuid) = current_volume_uuid else {
+                return false;
+            };
+            crate::unix::canonical_profile_volume_uuid(receipt_uuid)
+                && crate::unix::canonical_profile_volume_uuid(current_uuid)
+                && *uid == current_uid
+                && *gid == current_gid
+                && *inode == current_inode
+                && receipt_uuid == current_uuid
+        }
+        _ => false,
+    }
+}
+
+fn initialization_receipt_path_matches(receipt_path: &str, profile: &Path) -> bool {
+    profile
+        .to_str()
+        .is_some_and(|current_path| receipt_path == current_path)
+}
+
 fn receipt_identity(owner: &platform::OwnerLock) -> Result<Identity, ProfilePurgeError> {
     let bytes = owner
         .read_host_initialization_receipt()
@@ -101,15 +180,14 @@ fn receipt_identity(owner: &platform::OwnerLock) -> Result<Identity, ProfilePurg
     let receipt: InitializationReceipt =
         serde_json::from_slice(&bytes).map_err(|_| ProfilePurgeError::InvalidProfile)?;
     let encoded = serde_json::to_vec(&receipt).map_err(|_| ProfilePurgeError::InvalidProfile)?;
+    #[cfg(target_os = "macos")]
+    let supported_version = matches!(receipt.version, 1 | 2);
+    #[cfg(not(target_os = "macos"))]
+    let supported_version = receipt.version == 1;
     if encoded != bytes
-        || receipt.version != 1
+        || !supported_version
         || receipt.state != InitializationState::Complete
-        || receipt.profile_path
-            != owner
-                .profile()
-                .path()
-                .to_str()
-                .ok_or(ProfilePurgeError::InvalidProfile)?
+        || !initialization_receipt_path_matches(&receipt.profile_path, owner.profile().path())
     {
         return Err(ProfilePurgeError::InvalidProfile);
     }
@@ -120,13 +198,30 @@ fn receipt_identity(owner: &platform::OwnerLock) -> Result<Identity, ProfilePurg
     #[cfg(unix)]
     let binding_matches = {
         let account = selected.unix().ok_or(ProfilePurgeError::IdentityMismatch)?;
-        matches!(
-            receipt.owner,
-            InitializationBinding::Unix { uid, gid, device, inode }
-                if uid == account.uid()
-                    && gid == account.gid()
-                    && device == first
-                    && inode == second
+        let current_volume_uuid: Option<String> = if receipt.version == 2 {
+            #[cfg(target_os = "macos")]
+            {
+                Some(
+                    owner
+                        .profile_volume_uuid()
+                        .map_err(|_| ProfilePurgeError::InvalidProfile)?,
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        } else {
+            None
+        };
+        unix_initialization_binding_matches(
+            receipt.version,
+            &receipt.owner,
+            account.uid(),
+            account.gid(),
+            first,
+            second,
+            current_volume_uuid.as_deref(),
         )
     };
     #[cfg(windows)]
@@ -380,6 +475,126 @@ fn completed_host_auth_is_reset(
 
 fn mark_uncertain(store: &mut ProfilePurgeStore, authority: &ProfilePurgeAuthority) {
     let _ = store.mark_uncertain(authority);
+}
+
+#[cfg(test)]
+mod initialization_receipt_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn unix_owner(
+        uid: u32,
+        gid: u32,
+        device: u64,
+        inode: u64,
+        volume_uuid: Option<&str>,
+    ) -> InitializationBinding {
+        #[cfg(not(target_os = "macos"))]
+        let _ = volume_uuid;
+        InitializationBinding::Unix {
+            uid,
+            gid,
+            device,
+            inode,
+            #[cfg(target_os = "macos")]
+            volume_uuid: volume_uuid.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn version_one_still_rejects_device_drift() {
+        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, None);
+        assert!(!unix_initialization_binding_matches(
+            1,
+            &stored,
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            None,
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn version_two_matches_uuid_and_inode_and_checks_account_and_path() {
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, Some(uuid));
+        assert!(unix_initialization_binding_matches(
+            2,
+            &stored,
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            Some(uuid),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &unix_owner(501, 20, 16_777_231, 157_451_039, Some("not-a-uuid")),
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            Some("not-a-uuid"),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &unix_owner(
+                501,
+                20,
+                16_777_231,
+                157_451_039,
+                Some("00000000-0000-0000-0000-000000000000"),
+            ),
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            Some("00000000-0000-0000-0000-000000000000"),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &stored,
+            501,
+            20,
+            16_777_233,
+            157_451_040,
+            Some(uuid),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &stored,
+            502,
+            20,
+            16_777_233,
+            157_451_039,
+            Some(uuid),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &stored,
+            501,
+            21,
+            16_777_233,
+            157_451_039,
+            Some(uuid),
+        ));
+        assert!(!unix_initialization_binding_matches(
+            2,
+            &stored,
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            Some("11234567-89ab-cdef-0123-456789abcdef"),
+        ));
+        assert!(!initialization_receipt_path_matches(
+            "/other/profile",
+            Path::new("/profile"),
+        ));
+    }
 }
 
 /// Purge the selected native account's existing Host profile after logout.

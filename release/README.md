@@ -473,6 +473,20 @@ Service changes through this protected CLI require administrator credentials
 and the existing explicit account/mode. An ordinary-user service command cannot
 replace this binding with a per-user Login registration; read-only status
 remains available.
+Durable macOS profile and custodian pins use the UUID of each already-open
+volume together with the inode, ownership, permissions, and executable hash
+and signature. Mount device numbers remain live race checks and historical
+journal crosslinks; they are not persistent volume identities. The installer
+checks both legacy receipts before service inspection. An explicitly
+administrator-authorized recovery may enroll UUIDs for an unchanged legacy
+installation only after its protected activation, completed root identity,
+locked database identity, and all non-device pins agree. It retains canonical
+generation and drain evidence and refuses unresolved generations. It never
+repairs a different inode, account, executable, or existing volume UUID.
+Signed macOS targets declare `lomiMacosVolumeIdentity: {format: 2}`. A normal
+update promotes the Host receipt only after a capable image is durably active,
+with no activation journal pending. Failed updates preserve v1 custody around
+legacy images; administrator rollback refuses images that cannot read v2.
 For updates and recovery, the installer asks the selected account's live host
 for maintenance status, then the updater validates the exact mode-specific
 registration and manager job, stops the selected Host, and holds the

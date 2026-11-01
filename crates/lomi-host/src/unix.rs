@@ -1202,6 +1202,10 @@ fn require_host_account() -> Result<(), HostError> {
 }
 
 const HOST_INITIALIZATION_RECEIPT_VERSION: u8 = 1;
+#[cfg(target_os = "macos")]
+const HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT: u8 = 2;
+#[cfg(not(target_os = "macos"))]
+const HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT: u8 = HOST_INITIALIZATION_RECEIPT_VERSION;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
@@ -1212,6 +1216,13 @@ enum HostInitializationBinding {
         gid: u32,
         device: u64,
         inode: u64,
+        #[cfg(target_os = "macos")]
+        #[serde(
+            rename = "volumeUuid",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        volume_uuid: Option<String>,
     },
     #[cfg(windows)]
     Windows {
@@ -1239,7 +1250,7 @@ struct HostInitializationReceipt {
     profile_id: Option<String>,
 }
 
-fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
+fn host_initialization_owner_v1(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
     let account = lomi_platform::setup_context::current_account()
         .map_err(|_| HostError::NonRootAccountRequired)?
         .selected()
@@ -1254,6 +1265,8 @@ fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBindi
             gid: account.gid(),
             device: first,
             inode: second,
+            #[cfg(target_os = "macos")]
+            volume_uuid: None,
         })
     }
     #[cfg(windows)]
@@ -1267,6 +1280,104 @@ fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBindi
     }
 }
 
+#[cfg(target_os = "macos")]
+fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
+    let (uid, gid, device, inode) = match host_initialization_owner_v1(lock)? {
+        HostInitializationBinding::Unix {
+            uid,
+            gid,
+            device,
+            inode,
+            ..
+        } => (uid, gid, device, inode),
+    };
+    let volume_uuid = lock
+        .profile_volume_uuid()
+        .map_err(map_initialization_platform_error)?;
+    if !canonical_profile_volume_uuid(&volume_uuid) {
+        return Err(HostError::InvalidProfile);
+    }
+    Ok(HostInitializationBinding::Unix {
+        uid,
+        gid,
+        device,
+        inode,
+        volume_uuid: Some(volume_uuid),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
+    host_initialization_owner_v1(lock)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn canonical_profile_volume_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value)
+        .is_ok_and(|parsed| !parsed.is_nil() && parsed.hyphenated().to_string() == value)
+}
+
+fn initialization_bindings_match(
+    version: u8,
+    receipt_owner: &HostInitializationBinding,
+    current_owner: &HostInitializationBinding,
+) -> bool {
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION {
+        return receipt_owner == current_owner;
+    }
+    #[cfg(target_os = "macos")]
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
+        let (
+            HostInitializationBinding::Unix {
+                uid: receipt_uid,
+                gid: receipt_gid,
+                inode: receipt_inode,
+                volume_uuid: Some(receipt_uuid),
+                ..
+            },
+            HostInitializationBinding::Unix {
+                uid: current_uid,
+                gid: current_gid,
+                inode: current_inode,
+                volume_uuid: Some(current_uuid),
+                ..
+            },
+        ) = (receipt_owner, current_owner)
+        else {
+            return false;
+        };
+        return canonical_profile_volume_uuid(receipt_uuid)
+            && receipt_uid == current_uid
+            && receipt_gid == current_gid
+            && receipt_inode == current_inode
+            && receipt_uuid == current_uuid;
+    }
+    false
+}
+
+fn initialization_receipt_context_matches(
+    receipt: &HostInitializationReceipt,
+    profile_path: &str,
+    current_owner: &HostInitializationBinding,
+) -> bool {
+    receipt.profile_path == profile_path
+        && initialization_bindings_match(receipt.version, &receipt.owner, current_owner)
+}
+
+fn initialization_receipt_current_owner(
+    lock: &OwnerLock,
+    version: u8,
+) -> Result<HostInitializationBinding, HostError> {
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION {
+        return host_initialization_owner_v1(lock);
+    }
+    #[cfg(target_os = "macos")]
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
+        return host_initialization_owner(lock);
+    }
+    Err(HostError::InvalidProfile)
+}
+
 fn initialization_receipt(
     lock: &OwnerLock,
 ) -> Result<Option<HostInitializationReceipt>, HostError> {
@@ -1278,15 +1389,17 @@ fn initialization_receipt(
     };
     let receipt: HostInitializationReceipt =
         serde_json::from_slice(&bytes).map_err(|_| HostError::InvalidProfile)?;
+    let supported_version = receipt.version == HOST_INITIALIZATION_RECEIPT_VERSION
+        || receipt.version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT;
+    let profile_path = lock
+        .profile()
+        .path()
+        .to_str()
+        .ok_or(HostError::InvalidProfile)?;
+    let current_owner = initialization_receipt_current_owner(lock, receipt.version)?;
     if serde_json::to_vec(&receipt).map_err(|_| HostError::InvalidProfile)? != bytes
-        || receipt.version != HOST_INITIALIZATION_RECEIPT_VERSION
-        || receipt.profile_path
-            != lock
-                .profile()
-                .path()
-                .to_str()
-                .ok_or(HostError::InvalidProfile)?
-        || receipt.owner != host_initialization_owner(lock)?
+        || !supported_version
+        || !initialization_receipt_context_matches(&receipt, profile_path, &current_owner)
     {
         return Err(HostError::InvalidProfile);
     }
@@ -1330,7 +1443,7 @@ fn make_initialization_receipt(
     identity: Option<&lomi_host_store::Identity>,
 ) -> Result<HostInitializationReceipt, HostError> {
     let receipt = HostInitializationReceipt {
-        version: HOST_INITIALIZATION_RECEIPT_VERSION,
+        version: HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT,
         state,
         profile_path: lock
             .profile()
@@ -2333,4 +2446,167 @@ fn stop_with_expected_host_id(
         thread::sleep(Duration::from_millis(20));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod initialization_receipt_tests {
+    use super::*;
+
+    fn receipt(
+        version: u8,
+        profile_path: &str,
+        owner: HostInitializationBinding,
+    ) -> HostInitializationReceipt {
+        HostInitializationReceipt {
+            version,
+            state: HostInitializationState::Complete,
+            profile_path: profile_path.to_owned(),
+            owner,
+            host_id: Some("host-id".to_owned()),
+            profile_id: Some("profile-id".to_owned()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_owner(
+        uid: u32,
+        gid: u32,
+        device: u64,
+        inode: u64,
+        volume_uuid: Option<&str>,
+    ) -> HostInitializationBinding {
+        #[cfg(not(target_os = "macos"))]
+        let _ = volume_uuid;
+        HostInitializationBinding::Unix {
+            uid,
+            gid,
+            device,
+            inode,
+            #[cfg(target_os = "macos")]
+            volume_uuid: volume_uuid.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn version_one_rejects_device_drift() {
+        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, None);
+        let current = unix_owner(501, 20, 16_777_233, 157_451_039, None);
+        assert!(!initialization_bindings_match(1, &stored, &current));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn version_two_binds_to_volume_uuid_and_inode_not_device() {
+        let stored = unix_owner(
+            501,
+            20,
+            16_777_231,
+            157_451_039,
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
+        );
+        let current = unix_owner(
+            501,
+            20,
+            16_777_233,
+            157_451_039,
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
+        );
+        assert!(initialization_bindings_match(2, &stored, &current));
+        assert!(initialization_receipt_context_matches(
+            &receipt(2, "/profile", stored),
+            "/profile",
+            &current,
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn version_two_receipt_uses_the_shared_camel_case_volume_field() {
+        let value = receipt(
+            2,
+            "/profile",
+            unix_owner(
+                501,
+                20,
+                16_777_231,
+                157_451_039,
+                Some("01234567-89ab-cdef-0123-456789abcdef"),
+            ),
+        );
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap(),
+            br#"{"version":2,"state":"complete","profilePath":"/profile","owner":{"platform":"unix","uid":501,"gid":20,"device":16777231,"inode":157451039,"volumeUuid":"01234567-89ab-cdef-0123-456789abcdef"},"hostId":"host-id","profileId":"profile-id"}"#,
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn version_two_rejects_changed_binding_fields_and_path() {
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, Some(uuid));
+        let current = unix_owner(501, 20, 16_777_233, 157_451_039, Some(uuid));
+
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &unix_owner(
+                501,
+                20,
+                16_777_233,
+                157_451_039,
+                Some("11234567-89ab-cdef-0123-456789abcdef")
+            ),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &unix_owner(501, 20, 16_777_233, 157_451_040, Some(uuid)),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &unix_owner(502, 20, 16_777_233, 157_451_039, Some(uuid)),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &unix_owner(501, 21, 16_777_233, 157_451_039, Some(uuid)),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &unix_owner(501, 20, 16_777_231, 157_451_039, Some("not-a-uuid")),
+            &current,
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &unix_owner(
+                501,
+                20,
+                16_777_231,
+                157_451_039,
+                Some("00000000-0000-0000-0000-000000000000"),
+            ),
+            &current,
+        ));
+        assert!(!initialization_receipt_context_matches(
+            &receipt(2, "/different-profile", stored),
+            "/profile",
+            &current,
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_version_one_receipt_bytes_are_unchanged() {
+        let value = receipt(
+            1,
+            "/tmp/profile",
+            unix_owner(501, 20, 16_777_231, 157_451_039, None),
+        );
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap(),
+            br#"{"version":1,"state":"complete","profilePath":"/tmp/profile","owner":{"platform":"unix","uid":501,"gid":20,"device":16777231,"inode":157451039},"hostId":"host-id","profileId":"profile-id"}"#,
+        );
+    }
 }

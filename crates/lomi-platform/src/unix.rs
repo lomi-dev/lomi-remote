@@ -431,6 +431,13 @@ impl OwnerLock {
     pub fn profile_identity(&self) -> (u64, u64) {
         (self.profile.identity.device, self.profile.identity.inode)
     }
+    /// Stable filesystem volume identity for this exact retained profile
+    /// directory descriptor. Available on macOS, where device numbers may
+    /// change after reboot while the mounted volume remains the same.
+    #[cfg(target_os = "macos")]
+    pub fn profile_volume_uuid(&self) -> Result<String> {
+        crate::volume_identity::volume_uuid(self.profile.directory()).map_err(Error::Io)
+    }
     /// Read the bounded, owner-private initialization receipt without
     /// following a link. The owner lock must remain held for the whole
     /// initialize/recover transition.

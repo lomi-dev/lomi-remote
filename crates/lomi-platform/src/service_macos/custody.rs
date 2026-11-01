@@ -45,7 +45,7 @@ const STRICT_FLAGS: Flags = Flags::STRICT_VALIDATE.union(Flags::CHECK_ALL_ARCHIT
 const DYNAMIC_VALIDATION_FLAGS: Flags = Flags::NONE;
 const BROKER_ARGUMENT: &str = "--internal-privileged-pty-broker";
 const APPLE_REQUIREMENT: &str = "anchor apple generic";
-const REGISTRATION_VERSION: u8 = 1;
+const REGISTRATION_VERSION: u8 = 2;
 
 #[path = "custody_drain.rs"]
 mod drain;
@@ -220,9 +220,23 @@ impl PrivilegedCustodianPeerProof {
 pub fn install_privileged_custodian(
     guard: &super::BootMaintenanceGuard,
 ) -> Result<PrivilegedCustodianRegistration> {
+    install_privileged_custodian_with_version(guard, REGISTRATION_VERSION, false)
+}
+
+pub(super) fn install_privileged_custodian_for_legacy_release(
+    guard: &super::BootMaintenanceGuard,
+) -> Result<PrivilegedCustodianRegistration> {
+    install_privileged_custodian_with_version(guard, 1, true)
+}
+
+fn install_privileged_custodian_with_version(
+    guard: &super::BootMaintenanceGuard,
+    version: u8,
+    require_exact_legacy_preimage: bool,
+) -> Result<PrivilegedCustodianRegistration> {
     require_root()?;
     let binding = guard.custody_binding()?;
-    let disk = registration_for_binding(&binding)?;
+    let mut disk = registration_for_binding_version(&binding, version)?;
     // Prepare the traversable socket directories before publishing any job
     // state. A bad /private/var/run ancestry must not leave a usable plist.
     Directory::open_or_create(Path::new(SOCKET_ROOT), SOCKET_DIRECTORY_MODE, None)?;
@@ -236,11 +250,35 @@ pub fn install_privileged_custodian(
     let daemons = Directory::open(Path::new(LAUNCH_DAEMONS), None, None)?;
     let registration_name = REGISTRATION_FILE;
     let plist_name = plist_name(&disk.launch_daemon_label);
+    let existing_bytes = state.read(registration_name)?;
+    let existing_plist = daemons.read(&plist_name)?;
+
+    let existing_registration = match existing_bytes.as_deref() {
+        Some(bytes) => {
+            let old = decode_registration(bytes)?;
+            if require_exact_legacy_preimage {
+                if old.version != 1 || disk.version != 1 {
+                    return Err(Error::Conflict);
+                }
+                ensure_binding_matches(&old, &binding)?;
+                // Restoring the verified old bytes can give the stable file
+                // a new inode. Require the same code image, volume observation
+                // and signature, while retaining v1's strict profile binding.
+                validate_registration_inner(&old, false, true, true)?;
+                if !legacy_restored_image_matches(&old, &disk) {
+                    return Err(Error::Conflict);
+                }
+            }
+            validate_update_preimage(&old, &disk, &binding)?;
+            preserve_historical_devices(&old, &mut disk);
+            Some(old)
+        }
+        None if require_exact_legacy_preimage => return Err(Error::Conflict),
+        None => None,
+    };
     let new_registration = encode_registration(&disk)?;
     let new_plist = plist(&disk)?;
 
-    let existing_bytes = state.read(registration_name)?;
-    let existing_plist = daemons.read(&plist_name)?;
     match (existing_bytes, existing_plist) {
         (None, None) => {
             state.publish(registration_name, &new_registration)?;
@@ -250,16 +288,13 @@ pub fn install_privileged_custodian(
             state.publish(registration_name, &new_registration)?;
         }
         (Some(old_bytes), None) => {
-            let old = decode_registration(&old_bytes)?;
-            validate_update_preimage(&old, &disk, &binding)?;
             daemons.publish(&plist_name, &new_plist)?;
             if old_bytes != new_registration {
                 state.replace_exact(registration_name, &old_bytes, &new_registration)?;
             }
         }
         (Some(old_bytes), Some(old_plist)) => {
-            let old = decode_registration(&old_bytes)?;
-            validate_update_preimage(&old, &disk, &binding)?;
+            let old = existing_registration.as_ref().ok_or(Error::Conflict)?;
             let expected_old_plist = plist(&old)?;
             if old_plist != expected_old_plist && old_plist != new_plist {
                 return Err(Error::Conflict);
@@ -277,6 +312,179 @@ pub fn install_privileged_custodian(
     let registration = PrivilegedCustodianRegistration { disk };
     validate_registration_disk(&registration.disk, true)?;
     Ok(registration)
+}
+
+/// Read-only preflight used before acquiring the Host maintenance guard. A
+/// repair is needed only for a valid v1 registration whose pinned profile and
+/// executable still match every non-device field, with at least one device
+/// number changed.
+pub fn legacy_custody_volume_repair_needed(
+    profile: &Path,
+    executable: &Path,
+    selected_account: &str,
+    mode: super::AdminHostMode,
+) -> Result<bool> {
+    require_root()?;
+    let binding = super::boot::custody_binding_for_admin_identity(
+        profile,
+        executable,
+        selected_account,
+        mode,
+    )?;
+    let paths = registration_paths(&binding)?;
+    let Some(state) =
+        Directory::open_optional_root(Path::new(&paths.state_directory), Some(STATE_MODE))?
+    else {
+        return Ok(false);
+    };
+    let Some(bytes) = state.read(REGISTRATION_FILE)? else {
+        return Ok(false);
+    };
+    let disk = decode_registration(&bytes)?;
+    if disk.version == 2 {
+        ensure_binding_matches(&disk, &binding)?;
+        validate_registration_disk(&disk, true)?;
+        return Ok(false);
+    }
+    ensure_legacy_binding_matches_except_device(&disk, &binding)?;
+    validate_registration_inner_with_legacy_device_drift(&disk, true, false, true, true)?;
+    let (current_executable, identity) = executable_identity(
+        Path::new(&disk.executable_path),
+        disk.owner_uid,
+        disk.owner_gid,
+    )?;
+    if identity != disk.signing_identity {
+        return Err(Error::Conflict);
+    }
+    Ok(disk.profile_pin.device != binding.profile_device
+        || disk.executable_pin.device != current_executable.device)
+}
+
+/// Read the current, authenticated registration format without changing it.
+/// An interrupted legacy recovery may already have published v2 while the
+/// stable release still needs upgrading to a format-capable image.
+pub fn admin_custody_uses_volume_identity(
+    profile: &Path,
+    executable: &Path,
+    selected_account: &str,
+    mode: super::AdminHostMode,
+) -> Result<bool> {
+    require_root()?;
+    let binding = super::boot::custody_binding_for_admin_identity(
+        profile,
+        executable,
+        selected_account,
+        mode,
+    )?;
+    let registration = read_optional_for_binding(&binding)?;
+    if let Some(registration) = registration {
+        validate_for_binding(&registration, &binding)?;
+        Ok(registration.disk.version == 2)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Quiesce the exact incompatible legacy runtime after a prior recovery
+/// published v2. No UUID is enrolled or registration bytes replaced here.
+pub fn prepare_legacy_custody_runtime_upgrade(guard: &super::BootMaintenanceGuard) -> Result<()> {
+    require_root()?;
+    if !guard.profile_owner_lock_held() {
+        return Err(Error::Conflict);
+    }
+    let binding = guard.custody_binding()?;
+    let registration = read_optional_for_binding(&binding)?.ok_or(Error::Conflict)?;
+    validate_for_binding(&registration, &binding)?;
+    if registration.disk.version != 2 {
+        return Err(Error::Conflict);
+    }
+    // A crash may interrupt inert image restoration after registration update
+    // but before its new digest reaches drained.json. Independently certify
+    // the all-Cleaned inventory and retain the instance lock through bootout.
+    let _offline_drain = certify_offline_privileged_custodian_drained(guard, &registration)?;
+    super::custody_lifecycle::stop_drained_legacy_job_for_volume_repair(&registration)
+}
+
+pub(super) fn guard_custody_uses_volume_identity(
+    guard: &super::BootMaintenanceGuard,
+) -> Result<bool> {
+    require_root()?;
+    if !guard.profile_owner_lock_held() {
+        return Err(Error::Conflict);
+    }
+    let binding = guard.custody_binding()?;
+    Ok(read_optional_for_binding(&binding)?
+        .is_some_and(|registration| registration.disk.version == 2))
+}
+
+/// Migrate a v1 registration only when the account, profile directory,
+/// executable contents/signature, root-owned paths, and all non-device pin
+/// fields remain exact. The caller must retain the selected-account
+/// maintenance guard; the broker lock proves that the custodian has no active
+/// worker, and any existing drain receipt plus the cleaned inventory must
+/// prove there is no unresolved generation.
+pub fn repair_legacy_custody_volume_binding(guard: &super::BootMaintenanceGuard) -> Result<bool> {
+    require_root()?;
+    if !guard.profile_owner_lock_held() {
+        return Err(Error::Conflict);
+    }
+    let binding = guard.custody_binding()?;
+    let paths = registration_paths(&binding)?;
+    let state = Directory::open(Path::new(&paths.state_directory), Some(STATE_MODE), None)?;
+    let old_bytes = state.read(REGISTRATION_FILE)?.ok_or(Error::Conflict)?;
+    let old = decode_registration(&old_bytes)?;
+    if old.version == 2 {
+        ensure_binding_matches(&old, &binding)?;
+        validate_registration_disk(&old, true)?;
+        return Ok(false);
+    }
+    if old.version != 1 {
+        return Err(Error::Conflict);
+    }
+    ensure_legacy_binding_matches_except_device(&old, &binding)?;
+    validate_registration_inner_with_legacy_device_drift(&old, true, false, true, true)?;
+
+    let broker_lock = state.regular("broker.lock", true)?.ok_or(Error::Conflict)?;
+    if unsafe { libc::flock(broker_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Error::NotReady);
+    }
+    let old_registration = PrivilegedCustodianRegistration { disk: old.clone() };
+    drain::ensure_legacy_repair_drained(&old_registration)?;
+
+    let (current_executable, identity) = executable_identity(
+        Path::new(&old.executable_path),
+        old.owner_uid,
+        old.owner_gid,
+    )?;
+    if identity != old.signing_identity
+        || current_executable.inode != old.executable_pin.inode
+        || current_executable.size != old.executable_pin.size
+        || current_executable.sha256 != old.executable_pin.sha256
+        || current_executable
+            .volume_uuid
+            .as_deref()
+            .is_none_or(|uuid| !canonical_volume_uuid(uuid))
+        || !canonical_volume_uuid(&binding.profile_volume_uuid)
+    {
+        return Err(Error::Conflict);
+    }
+
+    let mut updated = old;
+    updated.version = REGISTRATION_VERSION;
+    updated.profile_pin.volume_uuid = Some(binding.profile_volume_uuid);
+    updated.executable_pin.volume_uuid = current_executable.volume_uuid;
+    // The original device fields are durable cross-links from legacy
+    // generations and drain receipts. Only the UUID binding is newly enrolled.
+    let new_bytes = encode_registration(&updated)?;
+    if new_bytes == old_bytes {
+        return Ok(false);
+    }
+    // Holding the broker lock and the canonical cleanup proof also permits
+    // stopping a transient legacy crashloop PID without invoking its helper.
+    super::custody_lifecycle::stop_drained_legacy_job_for_volume_repair(&old_registration)?;
+    state.replace_exact(REGISTRATION_FILE, &old_bytes, &new_bytes)?;
+    validate_registration_maintenance(&updated)?;
+    Ok(true)
 }
 
 /// Read and validate the selected account's registration while the caller
@@ -787,7 +995,7 @@ struct UninstallTombstone {
     drain_receipt_sha256: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DirectoryPin {
     device: u64,
@@ -795,6 +1003,8 @@ struct DirectoryPin {
     uid: u32,
     gid: u32,
     mode: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volume_uuid: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -804,6 +1014,8 @@ struct ExecutablePin {
     inode: u64,
     size: u64,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volume_uuid: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -814,15 +1026,27 @@ struct CodeIdentity {
     code_directory_hash: String,
 }
 
-fn registration_for_binding(binding: &CustodyBinding) -> Result<DiskRegistration> {
+fn registration_for_binding_version(
+    binding: &CustodyBinding,
+    version: u8,
+) -> Result<DiskRegistration> {
+    if !matches!(version, 1 | 2) {
+        return Err(Error::Conflict);
+    }
     let paths = registration_paths(binding)?;
-    let (executable_pin, signing_identity) = executable_identity(
+    let (mut executable_pin, signing_identity) = executable_identity(
         Path::new(&paths.executable_path),
         binding.owner_uid,
         binding.owner_gid,
     )?;
+    let volume_uuid = if version == 2 {
+        Some(binding.profile_volume_uuid.clone())
+    } else {
+        executable_pin.volume_uuid = None;
+        None
+    };
     let disk = DiskRegistration {
-        version: REGISTRATION_VERSION,
+        version,
         registration_key: paths.registration_key,
         owner_uid: binding.owner_uid,
         owner_gid: binding.owner_gid,
@@ -835,6 +1059,7 @@ fn registration_for_binding(binding: &CustodyBinding) -> Result<DiskRegistration
             uid: binding.profile_uid,
             gid: binding.profile_gid,
             mode: binding.profile_mode,
+            volume_uuid,
         },
         executable_path: paths.executable_path,
         executable_pin,
@@ -891,8 +1116,128 @@ fn registration_key(uid: u32, canonical_profile: &str) -> String {
     hex(&digest.finalize())
 }
 
+fn canonical_volume_uuid(text: &str) -> bool {
+    uuid::Uuid::parse_str(text).is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == text)
+}
+
+fn profile_pin_matches_binding(version: u8, pin: &DirectoryPin, binding: &CustodyBinding) -> bool {
+    pin.inode == binding.profile_inode
+        && pin.uid == binding.profile_uid
+        && pin.gid == binding.profile_gid
+        && pin.mode == binding.profile_mode
+        && match version {
+            1 => pin.device == binding.profile_device && pin.volume_uuid.is_none(),
+            2 => {
+                canonical_volume_uuid(&binding.profile_volume_uuid)
+                    && pin.volume_uuid.as_deref() == Some(binding.profile_volume_uuid.as_str())
+            }
+            _ => false,
+        }
+}
+
+fn persisted_profile_pin_matches(
+    version: u8,
+    expected: &DirectoryPin,
+    current: &DirectoryPin,
+) -> bool {
+    expected.inode == current.inode
+        && expected.uid == current.uid
+        && expected.gid == current.gid
+        && expected.mode == current.mode
+        && match version {
+            1 => expected.device == current.device && expected.volume_uuid.is_none(),
+            2 => {
+                expected
+                    .volume_uuid
+                    .as_deref()
+                    .is_some_and(canonical_volume_uuid)
+                    && expected.volume_uuid == current.volume_uuid
+                    && current
+                        .volume_uuid
+                        .as_deref()
+                        .is_some_and(canonical_volume_uuid)
+            }
+            _ => false,
+        }
+}
+
+fn persisted_executable_pin_matches(
+    version: u8,
+    expected: &ExecutablePin,
+    current: &ExecutablePin,
+) -> bool {
+    expected.inode == current.inode
+        && expected.size == current.size
+        && expected.sha256 == current.sha256
+        && match version {
+            1 => expected.device == current.device && expected.volume_uuid.is_none(),
+            2 => {
+                expected
+                    .volume_uuid
+                    .as_deref()
+                    .is_some_and(canonical_volume_uuid)
+                    && expected.volume_uuid == current.volume_uuid
+                    && current
+                        .volume_uuid
+                        .as_deref()
+                        .is_some_and(canonical_volume_uuid)
+            }
+            _ => false,
+        }
+}
+
+fn registration_version_transition_allowed(old: u8, new: u8) -> bool {
+    matches!((old, new), (1, 1) | (1, 2) | (2, 2))
+}
+
+fn profile_pin_update_matches(
+    old_version: u8,
+    new_version: u8,
+    old: &DirectoryPin,
+    new: &DirectoryPin,
+) -> bool {
+    let same_object =
+        old.inode == new.inode && old.uid == new.uid && old.gid == new.gid && old.mode == new.mode;
+    same_object
+        && match (old_version, new_version) {
+            (1, 1) => {
+                old.device == new.device && old.volume_uuid.is_none() && new.volume_uuid.is_none()
+            }
+            (1, 2) => {
+                old.device == new.device
+                    && old.volume_uuid.is_none()
+                    && new
+                        .volume_uuid
+                        .as_deref()
+                        .is_some_and(canonical_volume_uuid)
+            }
+            (2, 2) => {
+                old.volume_uuid
+                    .as_deref()
+                    .is_some_and(canonical_volume_uuid)
+                    && old.volume_uuid == new.volume_uuid
+            }
+            _ => false,
+        }
+}
+
 fn validate_derived_fields(disk: &DiskRegistration) -> Result<()> {
-    if disk.version != REGISTRATION_VERSION
+    let versioned_volumes_valid = match disk.version {
+        1 => disk.profile_pin.volume_uuid.is_none() && disk.executable_pin.volume_uuid.is_none(),
+        2 => {
+            disk.profile_pin
+                .volume_uuid
+                .as_deref()
+                .is_some_and(canonical_volume_uuid)
+                && disk
+                    .executable_pin
+                    .volume_uuid
+                    .as_deref()
+                    .is_some_and(canonical_volume_uuid)
+        }
+        _ => false,
+    };
+    if !versioned_volumes_valid
         || disk.owner_uid == 0
         || disk.owner_gid == 0
         || disk.account_name.is_empty()
@@ -944,11 +1289,30 @@ fn ensure_binding_matches(disk: &DiskRegistration, binding: &CustodyBinding) -> 
         || disk.account_name != binding.account_name
         || disk.account_home != path_string(&binding.account_home)?
         || disk.profile_path != path_string(&binding.profile_path)?
-        || disk.profile_pin.device != binding.profile_device
+        || !profile_pin_matches_binding(disk.version, &disk.profile_pin, binding)
+        || disk.executable_path != path_string(&binding.executable_path)?
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+fn ensure_legacy_binding_matches_except_device(
+    disk: &DiskRegistration,
+    binding: &CustodyBinding,
+) -> Result<()> {
+    validate_derived_fields(disk)?;
+    if disk.version != 1
+        || disk.owner_uid != binding.owner_uid
+        || disk.owner_gid != binding.owner_gid
+        || disk.account_name != binding.account_name
+        || disk.account_home != path_string(&binding.account_home)?
+        || disk.profile_path != path_string(&binding.profile_path)?
         || disk.profile_pin.inode != binding.profile_inode
         || disk.profile_pin.uid != binding.profile_uid
         || disk.profile_pin.gid != binding.profile_gid
         || disk.profile_pin.mode != binding.profile_mode
+        || disk.profile_pin.volume_uuid.is_some()
         || disk.executable_path != path_string(&binding.executable_path)?
     {
         return Err(Error::Conflict);
@@ -963,13 +1327,14 @@ fn validate_update_preimage(
 ) -> Result<()> {
     validate_derived_fields(old)?;
     ensure_binding_matches(old, binding)?;
-    if old.registration_key != new.registration_key
+    if !registration_version_transition_allowed(old.version, new.version)
+        || old.registration_key != new.registration_key
         || old.owner_uid != new.owner_uid
         || old.owner_gid != new.owner_gid
         || old.account_name != new.account_name
         || old.account_home != new.account_home
         || old.profile_path != new.profile_path
-        || old.profile_pin != new.profile_pin
+        || !profile_pin_update_matches(old.version, new.version, &old.profile_pin, &new.profile_pin)
         || old.executable_path != new.executable_path
         || old.launch_daemon_label != new.launch_daemon_label
         || old.registration_path != new.registration_path
@@ -980,6 +1345,37 @@ fn validate_update_preimage(
         return Err(Error::Conflict);
     }
     Ok(())
+}
+
+fn preserve_historical_devices(old: &DiskRegistration, new: &mut DiskRegistration) {
+    // Profile device numbers are part of generation and drain evidence. Keep
+    // the original value while the same profile directory is bound by inode
+    // and its volume UUID (or while migrating a v1 pin under its strict checks).
+    new.profile_pin.device = old.profile_pin.device;
+
+    let same_executable_object = old.executable_pin.inode == new.executable_pin.inode
+        && old.executable_pin.size == new.executable_pin.size
+        && old.executable_pin.sha256 == new.executable_pin.sha256
+        && match old.version {
+            1 => old.executable_pin.volume_uuid.is_none(),
+            2 => old.executable_pin.volume_uuid == new.executable_pin.volume_uuid,
+            _ => false,
+        }
+        && old.signing_identity == new.signing_identity;
+    if same_executable_object {
+        new.executable_pin.device = old.executable_pin.device;
+    }
+}
+
+fn legacy_restored_image_matches(old: &DiskRegistration, new: &DiskRegistration) -> bool {
+    old.version == 1
+        && new.version == 1
+        && old.executable_pin.device == new.executable_pin.device
+        && old.executable_pin.size == new.executable_pin.size
+        && old.executable_pin.sha256 == new.executable_pin.sha256
+        && old.signing_identity == new.signing_identity
+        && old.executable_pin.volume_uuid.is_none()
+        && new.executable_pin.volume_uuid.is_none()
 }
 
 fn validate_registration_disk(disk: &DiskRegistration, validate_executable: bool) -> Result<()> {
@@ -995,6 +1391,22 @@ fn validate_registration_inner(
     validate_executable: bool,
     allow_missing_plist: bool,
     require_registration: bool,
+) -> Result<()> {
+    validate_registration_inner_with_legacy_device_drift(
+        disk,
+        validate_executable,
+        allow_missing_plist,
+        require_registration,
+        false,
+    )
+}
+
+fn validate_registration_inner_with_legacy_device_drift(
+    disk: &DiskRegistration,
+    validate_executable: bool,
+    allow_missing_plist: bool,
+    require_registration: bool,
+    allow_legacy_device_drift: bool,
 ) -> Result<()> {
     require_root()?;
     validate_derived_fields(disk)?;
@@ -1019,7 +1431,17 @@ fn validate_registration_inner(
         disk.owner_uid,
         disk.owner_gid,
     )?;
-    if pin_directory(&profile.0)? != disk.profile_pin {
+    let current_profile_pin = pin_directory(&profile.0)?;
+    let profile_pin_valid = if allow_legacy_device_drift && disk.version == 1 {
+        disk.profile_pin.inode == current_profile_pin.inode
+            && disk.profile_pin.uid == current_profile_pin.uid
+            && disk.profile_pin.gid == current_profile_pin.gid
+            && disk.profile_pin.mode == current_profile_pin.mode
+            && disk.profile_pin.volume_uuid.is_none()
+    } else {
+        persisted_profile_pin_matches(disk.version, &disk.profile_pin, &current_profile_pin)
+    };
+    if !profile_pin_valid {
         return Err(Error::Conflict);
     }
 
@@ -1048,7 +1470,15 @@ fn validate_registration_inner(
             disk.owner_uid,
             disk.owner_gid,
         )?;
-        if pin != disk.executable_pin || identity != disk.signing_identity {
+        let pin_valid = if allow_legacy_device_drift && disk.version == 1 {
+            disk.executable_pin.inode == pin.inode
+                && disk.executable_pin.size == pin.size
+                && disk.executable_pin.sha256 == pin.sha256
+                && disk.executable_pin.volume_uuid.is_none()
+        } else {
+            persisted_executable_pin_matches(disk.version, &disk.executable_pin, &pin)
+        };
+        if !pin_valid || identity != disk.signing_identity {
             return Err(Error::Conflict);
         }
     }
@@ -1123,6 +1553,7 @@ fn executable_identity(
     {
         return Err(Error::Conflict);
     }
+    let volume_uuid = crate::volume_identity::volume_uuid(&file).map_err(|_| Error::Conflict)?;
     crate::unix::reject_acl_grants(&file).map_err(|_| Error::Conflict)?;
     let mut digest = Sha256::new();
     let mut total = 0u64;
@@ -1171,11 +1602,14 @@ fn executable_identity(
     }
     let current = unsafe { File::from_raw_fd(current_fd) };
     let current_metadata = current.metadata().map_err(|_| Error::Conflict)?;
+    let current_volume_uuid =
+        crate::volume_identity::volume_uuid(&current).map_err(|_| Error::Conflict)?;
     if before.dev() != after.dev()
         || before.ino() != after.ino()
         || before.size() != after.size()
         || before.dev() != current_metadata.dev()
         || before.ino() != current_metadata.ino()
+        || volume_uuid != current_volume_uuid
         || current_metadata.nlink() != 1
     {
         return Err(Error::Conflict);
@@ -1186,6 +1620,7 @@ fn executable_identity(
             inode: before.ino(),
             size: before.len(),
             sha256: hex(&digest.finalize()),
+            volume_uuid: Some(volume_uuid),
         },
         identity,
     ))
@@ -1809,6 +2244,9 @@ fn pin_directory(directory: &File) -> Result<DirectoryPin> {
         uid: metadata.uid(),
         gid: metadata.gid(),
         mode: metadata.mode() & 0o777,
+        volume_uuid: Some(
+            crate::volume_identity::volume_uuid(directory).map_err(|_| Error::Conflict)?,
+        ),
     })
 }
 
@@ -1966,6 +2404,258 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn volume() -> String {
+        "123e4567-e89b-12d3-a456-426614174000".to_owned()
+    }
+
+    fn directory_pin(device: u64, volume_uuid: Option<String>) -> DirectoryPin {
+        DirectoryPin {
+            device,
+            inode: 22,
+            uid: 501,
+            gid: 20,
+            mode: STATE_MODE,
+            volume_uuid,
+        }
+    }
+
+    fn executable_pin(device: u64, volume_uuid: Option<String>) -> ExecutablePin {
+        ExecutablePin {
+            device,
+            inode: 33,
+            size: 44,
+            sha256: "a".repeat(64),
+            volume_uuid,
+        }
+    }
+
+    fn registration_fixture(version: u8) -> DiskRegistration {
+        let profile_path = "/Users/lomi-test/Library/Application Support/LomiRemote".to_owned();
+        let executable_path =
+            "/Library/Application Support/LomiRemote/Install/501/lomiremote".to_owned();
+        let key = registration_key(501, &profile_path);
+        let state_directory = format!("{CUSTODY_ROOT}/{key}");
+        DiskRegistration {
+            version,
+            registration_key: key.clone(),
+            owner_uid: 501,
+            owner_gid: 20,
+            account_name: "lomi-test".to_owned(),
+            account_home: "/Users/lomi-test".to_owned(),
+            profile_path,
+            profile_pin: directory_pin(11, (version == 2).then(volume)),
+            executable_path,
+            executable_pin: executable_pin(11, (version == 2).then(volume)),
+            signing_identity: CodeIdentity {
+                identifier: "dev.lomi.remote".to_owned(),
+                team_identifier: "TEAM123456".to_owned(),
+                code_directory_hash: "b".repeat(40),
+            },
+            launch_daemon_label: format!("dev.lomi.remote.privileged-custody.{key}"),
+            registration_path: format!("{state_directory}/{REGISTRATION_FILE}"),
+            state_directory,
+            socket_parent: format!("{SOCKET_ROOT}/{key}"),
+            socket_path: format!("{SOCKET_ROOT}/{key}/broker.sock"),
+        }
+    }
+
+    #[test]
+    fn persisted_v2_pins_allow_only_device_number_drift() {
+        let expected_profile = directory_pin(11, Some(volume()));
+        let current_profile = directory_pin(12, Some(volume()));
+        assert!(persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &current_profile
+        ));
+        assert_ne!(expected_profile, current_profile);
+
+        let expected_executable = executable_pin(11, Some(volume()));
+        let current_executable = executable_pin(12, Some(volume()));
+        assert!(persisted_executable_pin_matches(
+            2,
+            &expected_executable,
+            &current_executable
+        ));
+        assert_ne!(expected_executable, current_executable);
+
+        let mut changed_profile = current_profile.clone();
+        changed_profile.volume_uuid = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned());
+        assert!(!persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &changed_profile
+        ));
+        changed_profile = current_profile.clone();
+        changed_profile.inode += 1;
+        assert!(!persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &changed_profile
+        ));
+        changed_profile = current_profile.clone();
+        changed_profile.uid += 1;
+        assert!(!persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &changed_profile
+        ));
+        changed_profile = current_profile.clone();
+        changed_profile.gid += 1;
+        assert!(!persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &changed_profile
+        ));
+        changed_profile = current_profile.clone();
+        changed_profile.mode ^= 0o100;
+        assert!(!persisted_profile_pin_matches(
+            2,
+            &expected_profile,
+            &changed_profile
+        ));
+
+        let mut changed_executable = current_executable.clone();
+        changed_executable.sha256 = "c".repeat(64);
+        assert!(!persisted_executable_pin_matches(
+            2,
+            &expected_executable,
+            &changed_executable
+        ));
+        changed_executable = current_executable.clone();
+        changed_executable.inode += 1;
+        assert!(!persisted_executable_pin_matches(
+            2,
+            &expected_executable,
+            &changed_executable
+        ));
+    }
+
+    #[test]
+    fn legacy_v1_pins_are_device_strict_and_remain_byte_identical() {
+        let expected_profile = directory_pin(11, None);
+        let current_profile = directory_pin(11, Some(volume()));
+        assert!(persisted_profile_pin_matches(
+            1,
+            &expected_profile,
+            &current_profile
+        ));
+        let changed_profile = directory_pin(12, Some(volume()));
+        assert!(!persisted_profile_pin_matches(
+            1,
+            &expected_profile,
+            &changed_profile
+        ));
+
+        let expected_executable = executable_pin(11, None);
+        let current_executable = executable_pin(11, Some(volume()));
+        assert!(persisted_executable_pin_matches(
+            1,
+            &expected_executable,
+            &current_executable
+        ));
+        let changed_executable = executable_pin(12, Some(volume()));
+        assert!(!persisted_executable_pin_matches(
+            1,
+            &expected_executable,
+            &changed_executable
+        ));
+
+        let legacy = registration_fixture(1);
+        let bytes = serde_json::to_vec(&legacy).expect("serialize legacy registration");
+        assert!(!String::from_utf8_lossy(&bytes).contains("volume_uuid"));
+        let decoded = decode_registration(&bytes).expect("decode v1 registration");
+        assert_eq!(decoded, legacy);
+        assert_eq!(encode_registration(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn registration_update_can_keep_or_upgrade_v1_but_never_downgrade_v2() {
+        assert!(registration_version_transition_allowed(1, 1));
+        assert!(registration_version_transition_allowed(1, 2));
+        assert!(registration_version_transition_allowed(2, 2));
+        assert!(!registration_version_transition_allowed(2, 1));
+
+        let old_v1 = directory_pin(11, None);
+        let current_v1 = directory_pin(11, None);
+        assert!(profile_pin_update_matches(1, 1, &old_v1, &current_v1));
+        let device_drift = directory_pin(12, None);
+        assert!(!profile_pin_update_matches(1, 1, &old_v1, &device_drift));
+
+        let migrated_v2 = directory_pin(11, Some(volume()));
+        assert!(profile_pin_update_matches(1, 2, &old_v1, &migrated_v2));
+        let old_v2 = directory_pin(11, Some(volume()));
+        assert!(!profile_pin_update_matches(2, 1, &old_v2, &current_v1));
+    }
+
+    #[test]
+    fn registration_rejects_missing_or_invalid_v2_volume_uuids_and_paths() {
+        let valid = registration_fixture(2);
+        assert!(validate_derived_fields(&valid).is_ok());
+
+        let mut missing = valid.clone();
+        missing.profile_pin.volume_uuid = None;
+        assert!(validate_derived_fields(&missing).is_err());
+        let mut zero = valid.clone();
+        zero.executable_pin.volume_uuid = Some(uuid::Uuid::nil().to_string());
+        assert!(validate_derived_fields(&zero).is_err());
+        let mut malformed = valid.clone();
+        malformed.profile_pin.volume_uuid = Some("not-a-uuid".to_owned());
+        assert!(validate_derived_fields(&malformed).is_err());
+        let mut noncanonical = valid.clone();
+        noncanonical.executable_pin.volume_uuid = Some(volume().to_ascii_uppercase());
+        assert!(validate_derived_fields(&noncanonical).is_err());
+        let mut invalid_path = valid;
+        invalid_path.profile_path = "/Users/lomi-test/../other".to_owned();
+        assert!(validate_derived_fields(&invalid_path).is_err());
+    }
+
+    #[test]
+    fn update_keeps_historical_profile_device_and_only_same_image_device() {
+        let old = registration_fixture(2);
+        let mut updated = old.clone();
+        updated.profile_pin.device = 12;
+        updated.executable_pin.device = 12;
+        preserve_historical_devices(&old, &mut updated);
+        assert_eq!(updated.profile_pin.device, old.profile_pin.device);
+        assert_eq!(updated.executable_pin.device, old.executable_pin.device);
+
+        let mut replaced_image = old.clone();
+        replaced_image.profile_pin.device = 12;
+        replaced_image.executable_pin.device = 12;
+        replaced_image.executable_pin.inode += 1;
+        preserve_historical_devices(&old, &mut replaced_image);
+        assert_eq!(replaced_image.profile_pin.device, old.profile_pin.device);
+        assert_eq!(replaced_image.executable_pin.device, 12);
+
+        let legacy = registration_fixture(1);
+        let mut legacy_refresh = legacy.clone();
+        preserve_historical_devices(&legacy, &mut legacy_refresh);
+        assert_eq!(legacy_refresh.profile_pin.device, legacy.profile_pin.device);
+        assert_eq!(
+            legacy_refresh.executable_pin.device,
+            legacy.executable_pin.device
+        );
+        assert!(legacy_refresh.profile_pin.volume_uuid.is_none());
+        assert!(legacy_refresh.executable_pin.volume_uuid.is_none());
+    }
+
+    #[test]
+    fn legacy_image_restoration_allows_new_inode_but_no_other_image_drift() {
+        let old = registration_fixture(1);
+        let mut restored = old.clone();
+        restored.executable_pin.inode += 1;
+        assert!(legacy_restored_image_matches(&old, &restored));
+        restored.executable_pin.device += 1;
+        assert!(!legacy_restored_image_matches(&old, &restored));
+        restored = old.clone();
+        restored.executable_pin.sha256 = "f".repeat(64);
+        assert!(!legacy_restored_image_matches(&old, &restored));
+        restored = old.clone();
+        restored.signing_identity.identifier = "another.image".into();
+        assert!(!legacy_restored_image_matches(&old, &restored));
+    }
 
     #[test]
     fn executable_parent_accepts_protected_root_admin_directory() {

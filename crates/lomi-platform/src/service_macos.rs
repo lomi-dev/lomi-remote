@@ -75,6 +75,25 @@ fn c(value: &OsStr) -> Result<CString> {
 
 pub use boot::BootMaintenanceGuard;
 
+/// Read-only preflight for the one-time repair of a legacy custody record
+/// whose filesystem device number changed while its pinned objects remained
+/// otherwise identical. Call before acquiring the maintenance guard so a
+/// healthy host is not stopped by recovery detection.
+pub fn legacy_custody_volume_repair_needed(
+    profile: &Path,
+    executable: &Path,
+    selected_account: &str,
+    mode: AdminHostMode,
+) -> Result<bool> {
+    custody::legacy_custody_volume_repair_needed(profile, executable, selected_account, mode)
+}
+
+/// Migrate only a validated legacy v1 custody volume binding while the
+/// selected account's boot maintenance guard remains held.
+pub fn repair_legacy_custody_volume_binding(guard: &BootMaintenanceGuard) -> Result<bool> {
+    custody::repair_legacy_custody_volume_binding(guard)
+}
+
 /// Explicit Host autostart mode for an administrator-managed protected CLI.
 /// The root custodian is independent of this choice and never runs the Host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +188,28 @@ pub fn finish_admin_host_custody_maintenance(
     state: AdminHostCustodyMaintenanceState,
 ) -> Result<()> {
     custody_lifecycle::finish_maintenance(guard, state.0)
+}
+
+/// Restore the legacy custody registration format after rollback to an
+/// activated protected CLI that cannot read volume UUID pins. This refuses a
+/// v2-to-v1 downgrade and requires the current image to match the prior v1
+/// registration exactly.
+pub fn finish_admin_host_custody_maintenance_for_legacy_release(
+    guard: &BootMaintenanceGuard,
+    state: AdminHostCustodyMaintenanceState,
+) -> Result<()> {
+    custody_lifecycle::finish_maintenance_for_legacy_release(guard, state.0)
+}
+
+pub fn finish_admin_host_custody_maintenance_inert(
+    guard: &BootMaintenanceGuard,
+    state: AdminHostCustodyMaintenanceState,
+) -> Result<()> {
+    custody_lifecycle::finish_maintenance_inert(guard, state.0)
+}
+
+pub fn admin_guard_custody_uses_volume_identity(guard: &BootMaintenanceGuard) -> Result<bool> {
+    custody::guard_custody_uses_volume_identity(guard)
 }
 
 pub fn uninstall_admin_host_custodian(guard: &BootMaintenanceGuard) -> Result<()> {
@@ -753,6 +794,10 @@ fn valid_decimal_uid(value: &str) -> bool {
         .is_ok_and(|uid| uid.to_string() == value)
 }
 
+fn valid_gui_uid(value: &str) -> bool {
+    valid_decimal_uid(value) && value.parse::<u32>().is_ok_and(|uid| uid != 0)
+}
+
 fn valid_lomi_label(value: &str) -> bool {
     value
         .strip_prefix("dev.lomi.remote.")
@@ -791,6 +836,28 @@ fn gui_query_absence_diagnostic(args: &[&str]) -> Option<&'static [u8]> {
     }
 }
 
+/// macOS 27 reports an absent per-user GUI domain as launchctl status 112.
+/// Whitelist only the exact read-only queries issued by this adapter, and
+/// bind the diagnostic to the queried UID so other manager errors stay fatal.
+fn gui_domain_absence_diagnostic(args: &[&str]) -> Option<Vec<u8>> {
+    let uid = match args {
+        ["print", target] => {
+            let target = target.strip_prefix("gui/")?;
+            match target.split_once('/') {
+                Some((uid, label)) if valid_lomi_label(label) => uid,
+                None => target,
+                _ => return None,
+            }
+        }
+        ["print-disabled", domain] => domain.strip_prefix("gui/")?,
+        _ => return None,
+    };
+    if !valid_gui_uid(uid) {
+        return None;
+    }
+    Some(format!("Bad request.\nCould not find domain for user gui: {uid}\n").into_bytes())
+}
+
 fn classify_manager_result(
     args: &[&str],
     success: bool,
@@ -804,6 +871,12 @@ fn classify_manager_result(
             .map_err(|_| Error::Manager);
     }
     if code == Some(113) {
+        return Ok(None);
+    }
+    if code == Some(112)
+        && stdout.is_empty()
+        && gui_domain_absence_diagnostic(args).as_deref() == Some(stderr)
+    {
         return Ok(None);
     }
     if code == Some(125) && stdout.is_empty() && gui_query_absence_diagnostic(args) == Some(stderr)
@@ -1238,6 +1311,35 @@ mod launchctl_observation_tests {
     }
 
     #[test]
+    fn manager_accepts_captured_status_112_gui_domain_absence() {
+        let captured = b"Bad request.\nCould not find domain for user gui: 503\n";
+        assert_eq!(
+            classify_manager_result(&["print", "gui/503"], false, Some(112), b"", captured),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_manager_result(
+                &["print", &format!("gui/503/{VALID_LABEL}")],
+                false,
+                Some(112),
+                b"",
+                captured,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_manager_result(
+                &["print-disabled", "gui/503"],
+                false,
+                Some(112),
+                b"",
+                captured,
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
     fn manager_keeps_exit_113_and_rejects_other_exit_125_results() {
         assert_eq!(
             classify_manager_result(&["print", "system"], false, Some(113), b"", b""),
@@ -1248,6 +1350,8 @@ mod launchctl_observation_tests {
             b"Could not print domain: 125: Domain does not support specified action\n";
         let cache_diagnostic =
             b"Could not print cache: 125: Domain does not support specified action\n";
+        let gui_112_diagnostic = b"Bad request.\nCould not find domain for user gui: 503\n";
+        let wrong_uid_112_diagnostic = b"Bad request.\nCould not find domain for user gui: 504\n";
         let cases: &[(&[&str], &[u8], &[u8], i32)] = &[
             // Read-only diagnostics for unrelated launchctl domains stay strict.
             (&["print", "system"], b"", print_diagnostic, 125),
@@ -1282,6 +1386,55 @@ mod launchctl_observation_tests {
             ),
             // Permission errors remain manager failures even for a valid GUI query.
             (&["print", "gui/503"], b"", print_diagnostic, 1),
+            // Status 112 is accepted only for exact read-only GUI queries and
+            // a diagnostic that names the same canonical UID.
+            (&["print", "system"], b"", gui_112_diagnostic, 112),
+            (
+                &["bootstrap", "gui/503", "/tmp/job.plist"],
+                b"",
+                gui_112_diagnostic,
+                112,
+            ),
+            (
+                &["print", "gui/503"],
+                b"unexpected",
+                gui_112_diagnostic,
+                112,
+            ),
+            (&["print", "gui/503"], b"", wrong_uid_112_diagnostic, 112),
+            (
+                &["print", "gui/503"],
+                b"",
+                b"Bad request.\nCould not find domain for user gui: 503\nextra\n",
+                112,
+            ),
+            (
+                &["print", "gui/503/dev.lomi.remote.invalid"],
+                b"",
+                gui_112_diagnostic,
+                112,
+            ),
+            (
+                &["print", "gui/0503"],
+                b"",
+                b"Bad request.\nCould not find domain for user gui: 0503\n",
+                112,
+            ),
+            (
+                &["print", "gui/0"],
+                b"",
+                b"Bad request.\nCould not find domain for user gui: 0\n",
+                112,
+            ),
+            (
+                &[
+                    "print-disabled",
+                    "gui/503/dev.lomi.remote.0123456789abcdef0123456789abcdef",
+                ],
+                b"",
+                gui_112_diagnostic,
+                112,
+            ),
         ];
         for (args, stdout, stderr, code) in cases {
             assert_eq!(

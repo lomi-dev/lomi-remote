@@ -34,6 +34,13 @@ use url::Url;
 
 #[cfg(unix)]
 mod activation;
+#[cfg(target_os = "macos")]
+mod macos_volume_recovery;
+#[cfg(target_os = "macos")]
+pub use macos_volume_recovery::{
+    AdminVolumeBindingState, admin_legacy_volume_binding_repair_needed, admin_volume_binding_state,
+    repair_admin_legacy_volume_bindings,
+};
 #[cfg(windows)]
 mod activation_windows;
 #[cfg(windows)]
@@ -687,21 +694,23 @@ fn complete_admin_host_mutation<T>(
 ) -> Result<T> {
     match result {
         Ok(value) => {
-            profile_barrier.finish_admin_host_custody_maintenance(custody_state)?;
-            resume_admin_host_if_was_running(
-                profile_barrier,
-                profile_dir,
-                install_dir,
-                selected_account,
-            )?;
+            if profile_barrier.finish_admin_host_custody_maintenance(custody_state, install_dir)? {
+                resume_admin_host_if_was_running(
+                    profile_barrier,
+                    profile_dir,
+                    install_dir,
+                    selected_account,
+                )?;
+            }
             Ok(value)
         }
         Err(error) => {
-            // A pending activation keeps the Host and custodian stopped until
-            // the next verified recovery pass. If activation rolled back
-            // cleanly, the previous signed image can safely resume its mode.
-            if matches!(admin_host_release_recovery_pending(install_dir), Ok(false)) {
-                profile_barrier.finish_admin_host_custody_maintenance(custody_state)?;
+            // Pending activation retains the stopped barrier until verified
+            // recovery. An incompatible restored image also stays inert.
+            if matches!(admin_host_release_recovery_pending(install_dir), Ok(false))
+                && profile_barrier
+                    .finish_admin_host_custody_maintenance(custody_state, install_dir)?
+            {
                 resume_admin_host_if_was_running(
                     profile_barrier,
                     profile_dir,
@@ -713,6 +722,7 @@ fn complete_admin_host_mutation<T>(
         }
     }
 }
+
 impl ProfileBarrier {
     fn profile_path(&self) -> &Path {
         match self {
@@ -766,6 +776,7 @@ impl ProfileBarrier {
     fn publish_admin_host_identity_binding(
         &self,
         identity: &AdminHostProfileIdentity,
+        install_dir: &Path,
     ) -> Result<()> {
         match self {
             Self::MacAdminHost { _guard } => {
@@ -773,8 +784,11 @@ impl ProfileBarrier {
                     _guard,
                     &identity.host_id_text(),
                     &identity.profile_id_text(),
-                )
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                )?;
+                if activation::active_supports_volume_identity(install_dir)? {
+                    macos_volume_recovery::upgrade_valid_initialization_receipt(_guard, identity)?;
+                }
+                Ok(())
             }
             _ => Err(invalid("admin Host profile guard is unavailable")),
         }
@@ -807,11 +821,27 @@ impl ProfileBarrier {
     fn finish_admin_host_custody_maintenance(
         &self,
         state: lomi_platform::service_macos::AdminHostCustodyMaintenanceState,
-    ) -> Result<()> {
+        install_dir: &Path,
+    ) -> Result<bool> {
         match self {
             Self::MacAdminHost { _guard } => {
-                lomi_platform::service_macos::finish_admin_host_custody_maintenance(_guard, state)
-                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                if activation::active_supports_volume_identity(install_dir)? {
+                    lomi_platform::service_macos::finish_admin_host_custody_maintenance(
+                        _guard, state,
+                    )?;
+                    Ok(true)
+                } else if lomi_platform::service_macos::admin_guard_custody_uses_volume_identity(
+                    _guard,
+                )? || macos_volume_recovery::host_receipt_uses_volume_identity(_guard)?
+                {
+                    lomi_platform::service_macos::finish_admin_host_custody_maintenance_inert(
+                        _guard, state,
+                    )?;
+                    Ok(false)
+                } else {
+                    lomi_platform::service_macos::finish_admin_host_custody_maintenance_for_legacy_release(_guard, state)?;
+                    Ok(true)
+                }
             }
             _ => Err(invalid("admin Host profile barrier is unavailable")),
         }
@@ -1821,7 +1851,7 @@ pub fn recover_interrupted_admin_host_release(
                     "completed admin profile identity receipt is unavailable",
                 ));
             }
-            profile_barrier.publish_admin_host_identity_binding(identity)?;
+            profile_barrier.publish_admin_host_identity_binding(identity, install_dir)?;
         }
         Ok(())
     })();
@@ -1877,7 +1907,7 @@ pub fn recover_interrupted_admin_host_release(
                 &identity.host_id_text(),
                 &identity.profile_id_text(),
             )?;
-            profile_barrier.publish_admin_host_identity_binding(&identity)?;
+            profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
             return Ok(Some(schema));
         }
         if let Some(receipt) = root_receipt.as_ref()
@@ -1897,7 +1927,7 @@ pub fn recover_interrupted_admin_host_release(
             {
                 return Err(invalid("completed admin profile receipt is not valid"));
             }
-            profile_barrier.publish_admin_host_identity_binding(&identity)?;
+            profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
         } else if activation_pending && root_receipt.is_none() {
             let (schema, identity) = profile_barrier.admin_host_profile_snapshot(install_dir)?;
             let identity = identity.ok_or_else(|| {
@@ -1919,7 +1949,7 @@ pub fn recover_interrupted_admin_host_release(
                 &identity.host_id_text(),
                 &identity.profile_id_text(),
             )?;
-            profile_barrier.publish_admin_host_identity_binding(&identity)?;
+            profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
             return Ok(Some(schema));
         }
         Ok(Some(actual_profile_schema))
@@ -2741,7 +2771,7 @@ impl TrustStore {
                             "admin profile initialization receipt is not complete",
                         ));
                     }
-                    profile_barrier.publish_admin_host_identity_binding(identity)?;
+                    profile_barrier.publish_admin_host_identity_binding(identity, install_dir)?;
                 }
                 Ok(())
             })();
@@ -2833,7 +2863,7 @@ impl TrustStore {
                     &identity.host_id_text(),
                     &identity.profile_id_text(),
                 )?;
-                profile_barrier.publish_admin_host_identity_binding(&identity)?;
+                profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
                 return Ok(object);
             }
             let transport = BoundedHttps::new(release_origin)?;
@@ -2903,7 +2933,7 @@ impl TrustStore {
                     &identity.host_id_text(),
                     &identity.profile_id_text(),
                 )?;
-                profile_barrier.publish_admin_host_identity_binding(&identity)?;
+                profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
             } else if let Some(receipt) = root_receipt.as_ref()
                 && receipt.is_complete()
             {
@@ -2930,7 +2960,7 @@ impl TrustStore {
                         "completed admin profile identity changed during update",
                     ));
                 }
-                profile_barrier.publish_admin_host_identity_binding(&identity)?;
+                profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
             } else if root_receipt.is_none() {
                 let (actual_schema, identity) =
                     profile_barrier.admin_host_profile_snapshot(install_dir)?;
@@ -2958,7 +2988,7 @@ impl TrustStore {
                     &identity.host_id_text(),
                     &identity.profile_id_text(),
                 )?;
-                profile_barrier.publish_admin_host_identity_binding(&identity)?;
+                profile_barrier.publish_admin_host_identity_binding(&identity, install_dir)?;
             }
             Ok(object)
         }

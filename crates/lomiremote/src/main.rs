@@ -1002,12 +1002,63 @@ fn prepare_setup_account(arguments: &ArgMatches) -> Result<Option<u8>, Failure> 
         Err(Failure::nonroot_account_required())
     }
 }
+#[cfg(any(target_os = "macos", test))]
+fn privileged_pty_admin_drain(mode: &std::ffi::OsStr) -> Option<bool> {
+    match mode.to_str() {
+        Some("--internal-privileged-pty-admin-status") => Some(false),
+        Some("--internal-privileged-pty-admin-drain") => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_privileged_pty_admin_arguments(
+    mode: &std::ffi::OsStr,
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<Result<(PathBuf, bool), ()>> {
+    let drain = privileged_pty_admin_drain(mode)?;
+    let Some(registration) = arguments.next() else {
+        return Some(Err(()));
+    };
+    if arguments.next().is_some() {
+        return Some(Err(()));
+    }
+    Some(Ok((PathBuf::from(registration), drain)))
+}
+
+/// These authenticated broker probes must remain available while a
+/// verified activation journal blocks ordinary startup. The broker performs
+/// the root, registration, executable, and socket checks for each request.
+#[cfg(target_os = "macos")]
+fn dispatch_privileged_pty_admin_before_installation_check() -> Option<ExitCode> {
+    let mut arguments = env::args_os().skip(1);
+    let mode = arguments.next()?;
+    privileged_pty_admin_drain(&mode)?;
+    if lomi_platform::process::initialize_child_ownership().is_err() {
+        eprintln!("CHILD_OWNERSHIP_UNAVAILABLE");
+        return Some(ExitCode::from(4));
+    }
+    let invocation = parse_privileged_pty_admin_arguments(&mode, arguments)
+        .expect("admin mode was checked above");
+    let (registration, drain) = match invocation {
+        Ok(invocation) => invocation,
+        Err(()) => return Some(ExitCode::from(2)),
+    };
+    Some(ExitCode::from(
+        lomi_terminal::run_internal_privileged_pty_admin(&registration, drain) as u8,
+    ))
+}
+
 fn main() -> ExitCode {
     if let Some(code) = lomiremote::maintenance_commands::dispatch_internal() {
         return ExitCode::from(code);
     }
     #[cfg(all(target_os = "linux", feature = "linux-setup-handoff"))]
     if let Some(code) = lomiremote::linux_selected_install::dispatch() {
+        return code;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = dispatch_privileged_pty_admin_before_installation_check() {
         return code;
     }
     let maintenance_entry = is_maintenance_entry();
@@ -1109,8 +1160,6 @@ fn main() -> ExitCode {
                 "--internal-privileged-pty-broker"
                     | "--internal-privileged-pty-controller"
                     | "--internal-privileged-pty-child"
-                    | "--internal-privileged-pty-admin-status"
-                    | "--internal-privileged-pty-admin-drain"
             )
         )
     {
@@ -1140,14 +1189,9 @@ fn main() -> ExitCode {
         if args.next().is_some() {
             return ExitCode::from(2);
         }
-        return ExitCode::from(if mode == "--internal-privileged-pty-broker" {
-            lomi_terminal::run_internal_privileged_pty_broker(registration)
-        } else {
-            lomi_terminal::run_internal_privileged_pty_admin(
-                registration,
-                mode == "--internal-privileged-pty-admin-drain",
-            )
-        } as u8);
+        return ExitCode::from(
+            lomi_terminal::run_internal_privileged_pty_broker(registration) as u8,
+        );
     }
     #[cfg(all(target_os = "macos", feature = "experimental-macos-coalition-cleanup"))]
     if env::args_os().nth(1).as_deref()
@@ -1520,4 +1564,59 @@ fn verify_macos_daemon_executable(profile: &Path) -> Result<(), Failure> {
         return Err(Failure::macos_admin_install_required());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod privileged_pty_admin_dispatch_tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    fn parse(mode: &str, arguments: &[&str]) -> Option<Result<(PathBuf, bool), ()>> {
+        parse_privileged_pty_admin_arguments(OsStr::new(mode), arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn admin_status_and_drain_accept_one_registration_argument() {
+        assert_eq!(
+            parse(
+                "--internal-privileged-pty-admin-status",
+                &["/var/db/lomi/registration.json"]
+            ),
+            Some(Ok((PathBuf::from("/var/db/lomi/registration.json"), false)))
+        );
+        assert_eq!(
+            parse(
+                "--internal-privileged-pty-admin-drain",
+                &["/var/db/lomi/registration.json"]
+            ),
+            Some(Ok((PathBuf::from("/var/db/lomi/registration.json"), true)))
+        );
+    }
+
+    #[test]
+    fn admin_modes_reject_missing_or_extra_arguments() {
+        for mode in [
+            "--internal-privileged-pty-admin-status",
+            "--internal-privileged-pty-admin-drain",
+        ] {
+            assert_eq!(parse(mode, &[]), Some(Err(())));
+            assert_eq!(
+                parse(mode, &["/var/db/lomi/registration.json", "extra"]),
+                Some(Err(()))
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_internal_and_ordinary_modes_do_not_use_admin_dispatch() {
+        for mode in [
+            "--internal-privileged-pty-broker",
+            "--internal-privileged-pty-controller",
+            "--internal-privileged-pty-child",
+            "--internal-host-status",
+            "status",
+        ] {
+            assert_eq!(parse(mode, &["/var/db/lomi/registration.json"]), None);
+        }
+    }
 }

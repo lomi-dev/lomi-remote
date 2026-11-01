@@ -299,6 +299,58 @@ pub fn verify_privileged_custodian_drained(
     Ok(PrivilegedCustodianDrainReceipt { disk })
 }
 
+/// Validate the immutable v1 drain evidence while an explicit root repair is
+/// permitted to inspect a legacy registration with device-number drift. An
+/// existing receipt must validate and remains byte-identical. If a crashed
+/// daemon never published one, require the canonical inventory to be wholly
+/// cleaned and publish a new offline receipt. Generation records and existing
+/// receipts are never rewritten.
+pub(super) fn ensure_legacy_repair_drained(
+    registration: &PrivilegedCustodianRegistration,
+) -> Result<()> {
+    require_root()?;
+    let state = Directory::open(registration.state_directory(), Some(STATE_MODE), None)?;
+    if let Some(bytes) = state.read(DRAIN_FILE)? {
+        let disk: DrainDisk = serde_json::from_slice(&bytes).map_err(|_| Error::Conflict)?;
+        validate_receipt(registration, &disk)
+    } else {
+        // The repair caller holds the broker's exclusive instance lock. Only
+        // publish fresh offline evidence after every durable generation is
+        // independently validated as Cleaned.
+        cleaned_inventory(registration)?;
+        let runtime_id = uuid::Uuid::new_v4().to_string();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        write_receipt_if_absent(registration, &runtime_id, &request_id)
+    }
+}
+
+fn write_receipt_if_absent(
+    registration: &PrivilegedCustodianRegistration,
+    runtime_id: &str,
+    request_id: &str,
+) -> Result<()> {
+    if !canonical_uuid(runtime_id) || !canonical_uuid(request_id) {
+        return Err(Error::Invalid);
+    }
+    let (count, hash) = cleaned_inventory(registration)?;
+    let disk = DrainDisk {
+        version: 1,
+        registration_key: registration.registration_key().to_owned(),
+        owner_uid: registration.owner_uid(),
+        profile_device: registration.profile_device(),
+        profile_inode: registration.profile_inode(),
+        executable_sha256: registration.executable_sha256().to_owned(),
+        runtime_id: runtime_id.to_owned(),
+        request_id: request_id.to_owned(),
+        drained_generation_count: count,
+        drained_set_sha256: hash,
+    };
+    let bytes = serde_json::to_vec(&disk).map_err(|_| Error::Invalid)?;
+    let state = Directory::open(registration.state_directory(), Some(STATE_MODE), None)?;
+    state.publish(DRAIN_FILE, &bytes)?;
+    validate_receipt(registration, &disk)
+}
+
 pub(super) fn verify_uninstalled(
     registration: &PrivilegedCustodianRegistration,
     expected_sha256: &str,
