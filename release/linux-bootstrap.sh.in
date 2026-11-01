@@ -63,6 +63,13 @@ done
 
 openssl_version=$(openssl version 2>/dev/null) || fail 'OpenSSL 3 is required'
 case "$openssl_version" in OpenSSL\ 3.*) ;; *) fail 'OpenSSL 3 is required' ;; esac
+if command -v unzip >/dev/null 2>&1; then
+    archive_extractor=unzip
+elif command -v python3 >/dev/null 2>&1; then
+    archive_extractor=python3
+else
+    fail 'Linux archive extraction requires either unzip or python3; install unzip or Python 3 before retrying'
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/lomi-bootstrap.XXXXXXXX") \
     || fail 'could not create a private bootstrap directory'
@@ -147,11 +154,121 @@ actual_archive_sha256=${actual_archive_sha256%% *}
     || fail 'release archive digest is invalid'
 
 status 'Extracting the verified Linux release...'
-unzip -tq "$work/archive.zip" >/dev/null \
-    || fail 'release archive is not a valid ZIP file'
-unzip -q "$work/archive.zip" -d "$work/extracted" \
-    || fail 'release archive could not be extracted'
+if [ "$archive_extractor" = unzip ]; then
+    unzip -tq "$work/archive.zip" >/dev/null \
+        || fail 'release archive is not a valid ZIP file (unzip validation failed)'
+    unzip -q "$work/archive.zip" -d "$work/extracted" \
+        || fail 'release archive could not be extracted by unzip'
+else
+    python3 -I - "$work/archive.zip" "$work/extracted" <<'LOMI_BOOTSTRAP_PYTHON_ZIP'
+import os
+import stat
+import sys
+import zipfile
+
+archive_path, destination = sys.argv[1:]
+
+
+def reject(message):
+    raise ValueError(message)
+
+
+try:
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        entries = archive.infolist()
+        if len(entries) > 1000:
+            reject("archive contains too many entries")
+
+        recorded = {}
+        total_size = 0
+        for entry in entries:
+            name = entry.filename
+            is_directory = name.endswith("/")
+            path = name[:-1] if is_directory else name
+            if (not path or name.startswith("/") or "\\" in name
+                    or ":" in path.split("/", 1)[0]):
+                reject("archive contains an absolute or invalid path")
+            parts = path.split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                reject("archive contains an absolute or traversal path")
+
+            mode = (entry.external_attr >> 16) & 0xFFFF
+            file_type = stat.S_IFMT(mode) if entry.create_system == 3 else 0
+            if file_type not in (0, stat.S_IFDIR, stat.S_IFREG):
+                reject("archive contains a symlink or special file")
+            if is_directory:
+                if file_type == stat.S_IFREG or entry.file_size != 0:
+                    reject("archive contains an invalid directory entry")
+            elif file_type == stat.S_IFDIR:
+                reject("archive contains an invalid file entry")
+
+            if path in recorded:
+                reject("archive contains duplicate entry names")
+            recorded[path] = is_directory
+
+            if not is_directory:
+                if entry.file_size > 256 * 1024 * 1024:
+                    reject("archive entry exceeds its size limit")
+                total_size += entry.file_size
+                if total_size > 1024 * 1024 * 1024:
+                    reject("archive contents exceed their size limit")
+
+        for path, is_directory in recorded.items():
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                parent = "/".join(parts[:index])
+                if parent in recorded and not recorded[parent]:
+                    reject("archive file conflicts with a parent directory")
+            if not is_directory and any(
+                other.startswith(path + "/") for other in recorded
+            ):
+                reject("archive file conflicts with a child entry")
+
+        if "install.sh" not in recorded or recorded["install.sh"]:
+            reject("archive lacks install.sh")
+        if "lomi-update-trust" not in recorded or recorded["lomi-update-trust"]:
+            reject("archive lacks lomi-update-trust")
+
+        os.makedirs(destination, mode=0o700, exist_ok=True)
+        for entry in entries:
+            path = entry.filename[:-1] if entry.filename.endswith("/") else entry.filename
+            target = os.path.join(destination, *path.split("/"))
+            if entry.filename.endswith("/"):
+                os.makedirs(target, mode=0o755, exist_ok=True)
+                continue
+
+            parent = os.path.dirname(target)
+            os.makedirs(parent, mode=0o755, exist_ok=True)
+            copied = 0
+            with archive.open(entry, "r") as source, open(target, "xb") as output:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > entry.file_size:
+                        reject("archive entry exceeds its declared size")
+                    output.write(chunk)
+            if copied != entry.file_size:
+                reject("archive entry size does not match its declaration")
+
+            mode = (entry.external_attr >> 16) & 0xFFFF
+            permissions = mode & 0o777 if entry.create_system == 3 else 0o644
+            if not permissions:
+                permissions = 0o644
+            os.chmod(target, permissions)
+except Exception as error:
+    print("Lomi Remote Linux bootstrap: Python ZIP extraction failed: " + str(error), file=sys.stderr)
+    sys.exit(1)
+LOMI_BOOTSTRAP_PYTHON_ZIP
+fi
 [ -f "$work/extracted/install.sh" ] \
     || fail 'authenticated release archive lacks install.sh'
+[ -f "$work/extracted/lomi-update-trust" ] \
+    || fail 'authenticated release archive lacks lomi-update-trust'
+[ -x "$work/extracted/install.sh" ] \
+    || fail 'authenticated release archive install.sh is not executable'
+[ -x "$work/extracted/lomi-update-trust" ] \
+    || fail 'authenticated release archive lomi-update-trust is not executable'
 status 'Starting the authenticated Linux installer...'
 /bin/sh "$work/extracted/install.sh" "$@"

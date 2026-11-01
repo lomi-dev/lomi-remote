@@ -267,8 +267,11 @@ pinned key fingerprint, compares the manifest with its expected canonical
 contents, verifies the Ed25519 signature, and checks the archive digest. Linux
 targets must match the machine's Linux architecture before any download.
 Targets and Linux release runners need OpenSSL 3; targets also need curl,
-sha256sum, unzip, GNU coreutils `head -c`, and the standard system shell and
-core utilities. Run the authenticated preflight command for Linux install and
+sha256sum, either unzip or Python 3, GNU coreutils `head -c`, and the standard
+system shell and core utilities. The bootstrap uses Python's isolated standard
+library ZIP reader when unzip is absent, preserves executable permissions, and
+rejects unsafe archive entries before invoking the authenticated installer.
+Run the authenticated preflight command for Linux install and
 update; `install.sh` inside the ZIP is an internal entry point after the bundle
 has been authenticated. The macOS and Windows bootstrap paths are unchanged.
 

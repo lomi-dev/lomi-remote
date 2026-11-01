@@ -17,7 +17,7 @@ Python 3.11+, the repository Rust toolchain, Node for local catalog rendering,
 OpenSSL 3 and the configured macOS signing/notarization identity are required
 on the Mac. The Linux build host needs Python 3.11+, Rust, GCC, make, CMake,
 pkg-config and OpenSSL development files. Linux installation also needs curl,
-OpenSSL 3 and unzip. SSH authentication stays with OpenSSH; no passwords are
+OpenSSL 3 and either unzip or Python 3. SSH authentication stays with OpenSSH; no passwords are
 stored by the tooling.
 SSH connections reuse a private OpenSSH control socket for ten minutes of
 idle time, so a build does not repeatedly ask for the same account password.
