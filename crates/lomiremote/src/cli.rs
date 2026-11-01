@@ -72,7 +72,7 @@ pub fn command() -> Command {
             .subcommand(Command::new("configure")
                 .arg(Arg::new("origin").long("origin").help("Explicit identity origin; omit all public endpoint flags to use this release's built-in configuration"))
                 .arg(Arg::new("remote-api-origin").long("remote-api-origin").value_name("HTTPS_ORIGIN").help("Pin a trusted operator-supplied canonical HTTPS Remote API origin, distinct from the identity origin"))
-                .arg(Arg::new("relay-endpoint").long("relay-endpoint").value_name("WSS_ENDPOINT").help("Pin a separately trusted operator-supplied canonical wss://host/v2/relay endpoint; no default or inference"))
+                .arg(Arg::new("relay-endpoint").long("relay-endpoint").value_name("WSS_ENDPOINT").help("Pin a separately trusted operator-supplied canonical Remote relay WebSocket endpoint; no default or inference"))
                 .arg(Arg::new("client-id").long("client-id"))
                 .arg(Arg::new("provider").long("provider").value_parser(["protected-file", "macos-keychain", "windows-dpapi", "linux-secret-service"]))
                 .arg(Arg::new("keychain-path").long("keychain-path").value_parser(value_parser!(PathBuf)))

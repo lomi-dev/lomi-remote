@@ -201,7 +201,7 @@ impl Coordinator {
             )
             .ok()?;
             format!(
-                "{origin}/?view=remote-v2&host={}&workspace={}",
+                "{origin}/?host={}&workspace={}",
                 String::from(identity.host_id),
                 String::from(workspace_id)
             )
