@@ -438,11 +438,13 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainError, OwnerError, OwnerOperation, read_owner_status_with_busy_retry,
-        read_owner_status_with_busy_retry_and_wait,
+        DomainError, OwnerError, OwnerOperation, await_explicit_retry,
+        read_owner_status_with_busy_retry, read_owner_status_with_busy_retry_and_wait,
     };
     use std::{
         sync::atomic::{AtomicBool, Ordering},
+        sync::{Arc, mpsc},
+        thread,
         time::{Duration, Instant},
     };
 
@@ -510,6 +512,64 @@ mod tests {
 
         assert!(hard_error.is_err());
         assert_eq!(hard_error_attempts, 1);
+    }
+
+    #[test]
+    fn explicit_retry_wait_returns_immediately_when_stopping() {
+        let stopping = Arc::new(AtomicBool::new(true));
+        let retry_requested = Arc::new(AtomicBool::new(false));
+        let (command_sender, receiver) = mpsc::channel();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let result = await_explicit_retry(&receiver, &stopping, &retry_requested);
+            done_sender.send(result).unwrap();
+        });
+
+        assert!(
+            !done_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("stopped retry wait should return promptly")
+        );
+        waiter.join().unwrap();
+        drop(command_sender);
+    }
+
+    #[test]
+    fn explicit_retry_wait_observes_stop_while_waiting() {
+        let stopping = Arc::new(AtomicBool::new(false));
+        let retry_requested = Arc::new(AtomicBool::new(false));
+        let (command_sender, receiver) = mpsc::channel();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let thread_stopping = Arc::clone(&stopping);
+        let waiter = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            let result = await_explicit_retry(&receiver, &thread_stopping, &retry_requested);
+            done_sender.send(result).unwrap();
+        });
+
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retry waiter should start");
+        thread::sleep(Duration::from_millis(20));
+        stopping.store(true, Ordering::Release);
+
+        assert!(
+            !done_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("retry wait should observe stop within one poll interval")
+        );
+        waiter.join().unwrap();
+        drop(command_sender);
+    }
+
+    #[test]
+    fn explicit_retry_wait_still_returns_for_a_requested_retry() {
+        let stopping = AtomicBool::new(false);
+        let retry_requested = AtomicBool::new(true);
+        let (_command_sender, receiver) = mpsc::channel();
+
+        assert!(await_explicit_retry(&receiver, &stopping, &retry_requested));
     }
 }
 
@@ -756,6 +816,9 @@ fn await_explicit_retry(
     // Never automatically repeat an uncertain publication. A fresh explicit
     // login/logout command permits reopening and inspecting the same provider.
     loop {
+        if stopping.load(Ordering::Acquire) {
+            return false;
+        }
         if retry_requested.load(Ordering::Acquire) {
             return true;
         }
@@ -765,7 +828,6 @@ fn await_explicit_retry(
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
         }
     }
-    false
 }
 fn suspend(runtime: Runtime<'_>) {
     runtime.gate.store(true, Ordering::Release);
