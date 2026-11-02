@@ -1317,6 +1317,21 @@ impl PendingRemoteConnection {
         }
         self.check(f, sample)
     }
+    pub(in super::super) fn refresh_peer(
+        &mut self,
+        read: PeerRead<'_>,
+        f: &OwnerFacts<'_>,
+        sample: &mut impl FnMut() -> TrustedNow,
+    ) -> Result<()> {
+        let result = self
+            .check(f, sample)
+            .and_then(|_| self.core.refresh(read, f, sample))
+            .and_then(|_| self.check(f, sample));
+        if result.is_err() {
+            self.dispose();
+        }
+        result
+    }
     pub(in super::super) fn write(
         &mut self,
         f: &OwnerFacts<'_>,
@@ -2333,3 +2348,7 @@ impl SealedRemoteGitStartedReceipt<'_, '_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "remote_connection_tests.rs"]
+mod tests;

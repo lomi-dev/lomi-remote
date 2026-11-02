@@ -9068,6 +9068,16 @@ impl RemoteWorkspaceTurn<'_, '_, '_, '_, '_, '_> {
         }
         pending.write(&self.facts(), &mut || self.now())
     }
+    pub(super) fn refresh_pending_peer(
+        &self,
+        pending: &mut super::auth::remote_connection::PendingRemoteConnection,
+    ) -> Result<(), super::auth::remote_connection::GateError> {
+        if let Err(error) = self.check() {
+            pending.dispose();
+            return Err(error);
+        }
+        pending.refresh_peer(self.peer.read(), &self.facts(), &mut || self.now())
+    }
     pub(super) fn finish_connection(
         &self,
         mut pending: super::auth::remote_connection::PendingRemoteConnection,

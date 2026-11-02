@@ -3324,6 +3324,18 @@ impl<'cancel> Connection<'cancel> {
                 .peer_original_boundary(operation, continuation)
                 .map_err(|_| BudgetStop::Cancelled)
         };
+        if current.observed_at() > self.applied_observation
+            && let Crypto::ReadFirst(pending)
+            | Crypto::WriteSecond(pending)
+            | Crypto::ReadThird(pending) = &mut self.crypto
+        {
+            let turn = runtime
+                .owner
+                .try_remote_workspace_turn(&evidence, &current, &self.workspace)
+                .map_err(owner_error_at!())?;
+            turn.refresh_pending_peer(pending).map_err(invalid_at!())?;
+            self.applied_observation = current.observed_at();
+        }
         let stage = std::mem::replace(&mut self.crypto, Crypto::Vacant);
         let mut request = None;
         let mut advanced = false;
