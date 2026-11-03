@@ -245,7 +245,7 @@ fn install_privileged_custodian_with_version(
         SOCKET_DIRECTORY_MODE,
         Some((disk.owner_uid, disk.owner_gid)),
     )?;
-    validate_optional_socket(&socket_parent, disk.owner_uid)?;
+    validate_optional_socket(&socket_parent.0, disk.owner_uid)?;
     let state = Directory::open_or_create(Path::new(&disk.state_directory), STATE_MODE, None)?;
     let daemons = Directory::open(Path::new(LAUNCH_DAEMONS), None, None)?;
     let registration_name = REGISTRATION_FILE;
@@ -604,12 +604,8 @@ pub fn privileged_custodian_client_binding(
     if socket_path.as_os_str().as_bytes().len() > 103 {
         return Err(Error::Conflict);
     }
-    let parent = Directory::open(
-        &socket_parent,
-        Some(SOCKET_DIRECTORY_MODE),
-        Some((owner_uid, owner_gid)),
-    )?;
-    validate_optional_socket(&parent, owner_uid)?;
+    let parent = SocketDirectory::open(&socket_parent, owner_uid, owner_gid)?;
+    validate_optional_socket(&parent.0, owner_uid)?;
     Ok(PrivilegedCustodianClientBinding {
         registration_key,
         socket_path,
@@ -1463,7 +1459,7 @@ fn validate_registration_inner_with_legacy_device_drift(
         Some(SOCKET_DIRECTORY_MODE),
         Some((disk.owner_uid, disk.owner_gid)),
     )?;
-    validate_optional_socket(&socket_parent, disk.owner_uid)?;
+    validate_optional_socket(&socket_parent.0, disk.owner_uid)?;
     if validate_executable {
         let (pin, identity) = executable_identity(
             Path::new(&disk.executable_path),
@@ -1485,12 +1481,12 @@ fn validate_registration_inner_with_legacy_device_drift(
     Ok(())
 }
 
-fn validate_optional_socket(parent: &Directory, owner_uid: u32) -> Result<()> {
+fn validate_optional_socket(parent: &File, owner_uid: u32) -> Result<()> {
     let name = c(OsStr::new("broker.sock"))?;
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
         libc::fstatat(
-            parent.0.as_raw_fd(),
+            parent.as_raw_fd(),
             name.as_ptr(),
             metadata.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
@@ -1740,6 +1736,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 struct Directory(File);
+struct SocketDirectory(File);
 
 #[derive(Clone, Copy)]
 enum RootLeafGroupPolicy {
@@ -1960,72 +1957,16 @@ impl Directory {
         allow_profile_ancestors: bool,
         root_leaf_group_policy: RootLeafGroupPolicy,
     ) -> Result<Self> {
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-        {
-            return Err(Error::Invalid);
-        }
-        let mut current = File::open("/").map_err(|_| Error::Invalid)?;
-        crate::unix::reject_acl_grants(&current).map_err(|_| Error::Invalid)?;
-        let components: Vec<_> = path.components().skip(1).collect();
-        for (index, component) in components.iter().enumerate() {
-            let Component::Normal(name) = component else {
-                return Err(Error::Invalid);
-            };
-            let name = c(name)?;
-            let fd = unsafe {
-                libc::openat(
-                    current.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(Error::Conflict);
-            }
-            let next = unsafe { File::from_raw_fd(fd) };
-            let metadata = next.metadata().map_err(|_| Error::Conflict)?;
-            let final_component = index + 1 == components.len();
-            // Standard protected ancestors may be root:admin or root:daemon.
-            // Custody-owned root leaves still use the exact root:wheel metadata.
-            if !valid_directory_component(
-                metadata.is_dir(),
-                metadata.uid(),
-                metadata.gid(),
-                metadata.mode(),
-                final_component,
-                final_owner,
-                final_mode,
-                accessible_user,
-                allow_profile_ancestors,
-                root_leaf_group_policy,
-            ) {
-                return Err(Error::Conflict);
-            }
-            crate::unix::reject_acl_grants(&next).map_err(|_| Error::Conflict)?;
-            current = next;
-        }
-        if path.canonicalize().map_err(|_| Error::Conflict)? != path {
-            return Err(Error::Conflict);
-        }
-        let metadata = current.metadata().map_err(|_| Error::Conflict)?;
-        if !valid_directory_component(
-            metadata.is_dir(),
-            metadata.uid(),
-            metadata.gid(),
-            metadata.mode(),
-            true,
+        open_with_owner_access(
+            path,
             final_owner,
             final_mode,
             accessible_user,
             allow_profile_ancestors,
             root_leaf_group_policy,
-        ) {
-            return Err(Error::Conflict);
-        }
-        Ok(Self(current))
+            false,
+        )
+        .map(Self)
     }
 
     fn open_or_create(
@@ -2233,6 +2174,117 @@ impl Directory {
     }
 }
 
+impl SocketDirectory {
+    /// Open only for metadata inspection. Preserve the traditional readable
+    /// path, and use O_SEARCH solely when a socket client cannot read the
+    /// otherwise searchable protected directory.
+    fn open(path: &Path, owner_uid: u32, owner_gid: u32) -> Result<Self> {
+        open_with_owner_access(
+            path,
+            0,
+            Some(SOCKET_DIRECTORY_MODE),
+            Some((owner_uid, owner_gid)),
+            false,
+            RootLeafGroupPolicy::Wheel,
+            true,
+        )
+        .map(Self)
+    }
+}
+
+fn open_with_owner_access(
+    path: &Path,
+    final_owner: u32,
+    final_mode: Option<u32>,
+    accessible_user: Option<(u32, u32)>,
+    allow_profile_ancestors: bool,
+    root_leaf_group_policy: RootLeafGroupPolicy,
+    search_only_on_eacces: bool,
+) -> Result<File> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(Error::Invalid);
+    }
+    let mut current = File::open("/").map_err(|_| Error::Invalid)?;
+    crate::unix::reject_acl_grants(&current).map_err(|_| Error::Invalid)?;
+    let components: Vec<_> = path.components().skip(1).collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(Error::Invalid);
+        };
+        let name = c(name)?;
+        let directory_flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | directory_flags,
+            )
+        };
+        if fd < 0
+            && search_only_on_eacces
+            && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        {
+            // O_SEARCH is available on newer Darwin systems. Older systems
+            // fail this open and remain fail-closed; readable directories
+            // continue to use the O_RDONLY path above.
+            fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_SEARCH | directory_flags,
+                )
+            };
+        }
+        if fd < 0 {
+            return Err(Error::Conflict);
+        }
+        let next = unsafe { File::from_raw_fd(fd) };
+        let metadata = next.metadata().map_err(|_| Error::Conflict)?;
+        let final_component = index + 1 == components.len();
+        // Standard protected ancestors may be root:admin or root:daemon.
+        // Custody-owned root leaves still use the exact root:wheel metadata.
+        if !valid_directory_component(
+            metadata.is_dir(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            final_component,
+            final_owner,
+            final_mode,
+            accessible_user,
+            allow_profile_ancestors,
+            root_leaf_group_policy,
+        ) {
+            return Err(Error::Conflict);
+        }
+        crate::unix::reject_acl_grants(&next).map_err(|_| Error::Conflict)?;
+        current = next;
+    }
+    if path.canonicalize().map_err(|_| Error::Conflict)? != path {
+        return Err(Error::Conflict);
+    }
+    let metadata = current.metadata().map_err(|_| Error::Conflict)?;
+    if !valid_directory_component(
+        metadata.is_dir(),
+        metadata.uid(),
+        metadata.gid(),
+        metadata.mode(),
+        true,
+        final_owner,
+        final_mode,
+        accessible_user,
+        allow_profile_ancestors,
+        root_leaf_group_policy,
+    ) {
+        return Err(Error::Conflict);
+    }
+    Ok(current)
+}
+
 fn pin_directory(directory: &File) -> Result<DirectoryPin> {
     let metadata = directory.metadata().map_err(|_| Error::Conflict)?;
     if !metadata.is_dir() {
@@ -2404,6 +2456,11 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+        process::Command,
+    };
 
     fn volume() -> String {
         "123e4567-e89b-12d3-a456-426614174000".to_owned()
@@ -2458,6 +2515,70 @@ mod tests {
             socket_parent: format!("{SOCKET_ROOT}/{key}"),
             socket_path: format!("{SOCKET_ROOT}/{key}/broker.sock"),
         }
+    }
+
+    struct SearchDirectoryFixture(PathBuf);
+
+    impl SearchDirectoryFixture {
+        fn new() -> Self {
+            let parent = std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory");
+            let path = parent.join(format!(
+                "lomi-custody-search-{}-{}",
+                unsafe { libc::getpid() },
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir(&path).expect("create private test directory");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("secure private test directory");
+            Self(path)
+        }
+
+        fn leaf(&self, name: &str, mode: u32) -> PathBuf {
+            let path = self.0.join(name);
+            fs::create_dir(&path).expect("create socket parent fixture");
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                .expect("set socket parent fixture mode");
+            path
+        }
+    }
+
+    impl Drop for SearchDirectoryFixture {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            if let Ok(entries) = fs::read_dir(&self.0) {
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        let _ =
+                            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700));
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open_test_socket_directory(
+        path: &Path,
+        expected_mode: u32,
+        search_fallback: bool,
+    ) -> Result<File> {
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        open_with_owner_access(
+            path,
+            uid,
+            Some(expected_mode),
+            Some((uid, gid)),
+            true,
+            RootLeafGroupPolicy::Wheel,
+            search_fallback,
+        )
+    }
+
+    fn skip_root_test() -> bool {
+        unsafe { libc::geteuid() == 0 }
     }
 
     #[test]
@@ -2740,6 +2861,84 @@ mod tests {
             selected_user,
             false,
             protected_policy,
+        ));
+    }
+
+    #[test]
+    fn socket_client_uses_search_only_descriptor_for_nonreadable_directory_metadata() {
+        if skip_root_test() {
+            return;
+        }
+        let fixture = SearchDirectoryFixture::new();
+        let directory_path = fixture.leaf("socket-parent", 0o111);
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+
+        // The general root-facing directory constructor remains O_RDONLY and
+        // cannot adopt an unreadable path for listing or mutation.
+        assert!(
+            Directory::open_with_owner(
+                &directory_path,
+                uid,
+                Some(0o111),
+                Some((uid, gid)),
+                true,
+                RootLeafGroupPolicy::Wheel,
+            )
+            .is_err()
+        );
+
+        let directory = open_test_socket_directory(&directory_path, 0o111, true)
+            .expect("search-only socket metadata directory");
+        let metadata = directory.metadata().expect("fstat search-only descriptor");
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.mode() & 0o777, 0o111);
+        crate::unix::reject_acl_grants(&directory)
+            .expect("ACL check accepts the filesystem's no-ACL result");
+        validate_optional_socket(&directory, uid)
+            .expect("fstatat can inspect a missing socket without read access");
+    }
+
+    #[test]
+    fn socket_search_fallback_rejects_unsearchable_directories_and_symlinks() {
+        if skip_root_test() {
+            return;
+        }
+        let fixture = SearchDirectoryFixture::new();
+        let unsearchable = fixture.leaf("unsearchable", 0o000);
+        assert!(matches!(
+            open_test_socket_directory(&unsearchable, 0o000, true),
+            Err(Error::Conflict)
+        ));
+
+        let target = fixture.leaf("symlink-target", 0o111);
+        let link = fixture.0.join("socket-link");
+        symlink(&target, &link).expect("create symlink fixture");
+        assert!(matches!(
+            open_test_socket_directory(&link, 0o111, true),
+            Err(Error::Conflict)
+        ));
+    }
+
+    #[test]
+    fn socket_search_fallback_rejects_extended_acl_allow_entries() {
+        if skip_root_test() {
+            return;
+        }
+        let fixture = SearchDirectoryFixture::new();
+        let directory = fixture.leaf("acl-parent", 0o111);
+        let status = Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("everyone allow search")
+            .arg(&directory)
+            .status()
+            .expect("run macOS chmod to add ACL fixture");
+        assert!(status.success(), "chmod ACL fixture exited with {status}");
+
+        assert!(matches!(
+            open_test_socket_directory(&directory, 0o111, true),
+            Err(Error::Conflict)
         ));
     }
 
