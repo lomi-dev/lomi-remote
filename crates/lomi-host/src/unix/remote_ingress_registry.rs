@@ -58,6 +58,10 @@ impl<'cancel> Registry<'cancel> {
         self.entries.values().any(Driver::has_retained_operation)
     }
 
+    pub(in crate::unix::auth) fn has_pending_setup(&self) -> bool {
+        self.entries.values().any(Driver::has_pending_setup)
+    }
+
     pub(in crate::unix::auth) fn has_active_git_writer(&self) -> bool {
         self.entries.values().any(Driver::has_active_git_writer)
     }

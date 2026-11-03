@@ -475,6 +475,14 @@ impl<'cancel> Driver<'cancel> {
                 .as_ref()
                 .is_some_and(Connection::has_retained_operation)
     }
+    pub(super) fn has_pending_setup(&self) -> bool {
+        self.candidate.is_some()
+            || self.ticketed.is_some()
+            || self
+                .connection
+                .as_ref()
+                .is_some_and(Connection::has_pending_setup)
+    }
     pub(super) fn has_active_git_writer(&self) -> bool {
         self.connection
             .as_ref()
@@ -1185,6 +1193,13 @@ impl<'cancel> Connection<'cancel> {
             || self.git_mutation.is_some()
             || !matches!(&self.crypto, Crypto::Established(_))
             || self.peer_refresh_deadline(Instant::now()).is_some()
+    }
+
+    fn has_pending_setup(&self) -> bool {
+        matches!(
+            &self.crypto,
+            Crypto::ReadFirst(_) | Crypto::WriteSecond(_) | Crypto::ReadThird(_)
+        )
     }
 
     fn has_active_git_writer(&self) -> bool {

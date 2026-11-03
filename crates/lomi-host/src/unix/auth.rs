@@ -438,7 +438,7 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainError, OwnerError, OwnerOperation, await_explicit_retry,
+        DomainError, IdleScheduler, OwnerError, OwnerOperation, await_explicit_retry,
         read_owner_status_with_busy_retry, read_owner_status_with_busy_retry_and_wait,
     };
     use std::{
@@ -447,6 +447,36 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn idle_scheduler_defers_without_changing_class_alternation() {
+        let mut idle = IdleScheduler::default();
+
+        assert_eq!(idle.select_channel(true, true), None);
+        assert_eq!(idle.select_channel(true, false), Some(false));
+        assert_eq!(idle.select_channel(true, true), None);
+        assert_eq!(idle.select_channel(true, false), Some(true));
+    }
+
+    #[test]
+    fn established_ingress_work_does_not_suppress_pair_channel_alternation() {
+        let mut idle = IdleScheduler::default();
+
+        assert_eq!(idle.select_channel(true, false), Some(false));
+        assert_eq!(idle.select_channel(true, false), Some(true));
+        assert_eq!(idle.select_channel(true, false), Some(false));
+        assert_eq!(idle.select_channel(true, false), Some(true));
+    }
+
+    #[test]
+    fn idle_scheduler_keeps_peer_only_when_channels_are_disabled() {
+        let mut idle = IdleScheduler::default();
+
+        assert_eq!(idle.select_channel(false, false), Some(false));
+        assert_eq!(idle.select_channel(false, false), Some(false));
+        assert_eq!(idle.select_channel(true, false), Some(false));
+        assert_eq!(idle.select_channel(true, false), Some(true));
+    }
 
     #[test]
     fn status_read_retries_typed_domain_busy_under_the_same_operation() {
@@ -1222,13 +1252,16 @@ struct IdleScheduler {
     channel_next: bool,
 }
 impl IdleScheduler {
-    fn select_channel(&mut self, channels_enabled: bool) -> bool {
+    fn select_channel(&mut self, channels_enabled: bool, defer_discovery: bool) -> Option<bool> {
+        if defer_discovery {
+            return None;
+        }
         if !channels_enabled {
-            return false;
+            return Some(false);
         }
         let selected = self.channel_next;
         self.channel_next = !self.channel_next;
-        selected
+        Some(selected)
     }
 }
 // Retain the former publication wait behavior only for its cancellation tests.
@@ -1745,24 +1778,34 @@ fn run_with_apis_inner(
                         let outcome = cloud.step(auth, config, runtime, fence.generation)?;
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
                             if apis.enabled {
-                                // Exactly one class runs, even when its selected turn
-                                // only prepares locally or waits for bounded backoff.
-                                if idle.select_channel(apis.channels_enabled) {
-                                    channel.step(
-                                        auth,
-                                        config,
-                                        runtime,
-                                        &eligibility,
-                                        apis.channel,
-                                    )?;
-                                    ingress.after_channel_step(
-                                        &mut channel,
-                                        auth,
-                                        runtime,
-                                        &eligibility,
-                                    );
-                                } else {
-                                    peer.step(auth, config, runtime, &eligibility, apis.pairing)?;
+                                // Defer discovery only for an in-flight handshake setup.
+                                let defer_discovery = ingress.has_pending_setup();
+                                if let Some(select_channel) =
+                                    idle.select_channel(apis.channels_enabled, defer_discovery)
+                                {
+                                    if select_channel {
+                                        channel.step(
+                                            auth,
+                                            config,
+                                            runtime,
+                                            &eligibility,
+                                            apis.channel,
+                                        )?;
+                                        ingress.after_channel_step(
+                                            &mut channel,
+                                            auth,
+                                            runtime,
+                                            &eligibility,
+                                        );
+                                    } else {
+                                        peer.step(
+                                            auth,
+                                            config,
+                                            runtime,
+                                            &eligibility,
+                                            apis.pairing,
+                                        )?;
+                                    }
                                 }
                             }
                         }
