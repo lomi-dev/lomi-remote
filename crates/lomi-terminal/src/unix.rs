@@ -1,6 +1,9 @@
 use super::*;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    os::fd::AsRawFd,
+};
 
 fn preserves_child_status() -> bool {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -298,6 +301,11 @@ impl Pty {
         master: std::fs::File,
         worker: supervisor::Worker,
     ) -> Result<(Self, Box<dyn Read + Send>)> {
+        let fd = master.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(Error::SpawnOutcomeUnknown);
+        }
         let reader = master.try_clone().map_err(|_| Error::SpawnOutcomeUnknown)?;
         let writer = master.try_clone().map_err(|_| Error::SpawnOutcomeUnknown)?;
         Ok((

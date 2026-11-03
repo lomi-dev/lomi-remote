@@ -483,3 +483,46 @@ mod macos;
 pub(super) mod macos_coalition;
 #[cfg(target_os = "macos")]
 pub(super) mod macos_privileged;
+
+#[cfg(test)]
+mod delegated_pty_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    #[test]
+    fn delegated_pty_reader_is_nonblocking_and_can_stop_while_idle() {
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        let opened = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "{}", io::Error::last_os_error());
+        let master = unsafe { File::from_raw_fd(master_fd) };
+        let _slave = unsafe { File::from_raw_fd(slave_fd) };
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let (reaper, _receiver) = std::sync::mpsc::sync_channel::<Child>(1);
+        let worker = Worker::Child(ChildWorker {
+            socket,
+            child: None,
+            stopped: true,
+            reaper,
+        });
+
+        let master_fd = master.as_raw_fd();
+        let (mut pty, mut reader) = crate::unix::Pty::from_worker(master, worker).unwrap();
+        let flags = unsafe { libc::fcntl(master_fd, libc::F_GETFL) };
+        assert!(flags >= 0, "{}", io::Error::last_os_error());
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+
+        let error = reader.read(&mut [0]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(reader);
+        pty.stop().unwrap();
+    }
+}
