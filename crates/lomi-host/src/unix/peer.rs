@@ -237,14 +237,21 @@ pub(super) fn owner_error(error: shared_owner::Error) -> PeerError {
 /// provider or transport; all retries use the original operation and values.
 pub(super) fn owner_turn<T>(
     runtime: Runtime<'_>,
+    step: impl FnMut() -> Result<T, shared_owner::Error>,
+) -> ResultPeer<T> {
+    retry_owner_turn(|| check_peer_runtime(runtime), || runtime.busy(), step)
+}
+fn retry_owner_turn<T>(
+    mut check: impl FnMut() -> Result<(), StepError>,
+    mut wait: impl FnMut() -> Result<(), StepError>,
     mut step: impl FnMut() -> Result<T, shared_owner::Error>,
 ) -> ResultPeer<T> {
     loop {
-        check_peer_runtime(runtime)?;
+        check()?;
         match step() {
             Ok(value) => return Ok(value),
             Err(shared_owner::Error::Domain(owner_domain::Error::Busy))
-            | Err(shared_owner::Error::Store(StoreError::Busy)) => runtime.busy()?,
+            | Err(shared_owner::Error::Store(StoreError::Busy)) => wait()?,
             Err(shared_owner::Error::Store(error)) => return durable(Err(error)),
             Err(shared_owner::Error::Domain(_)) => return Err(StepError::Stale.into()),
             Err(shared_owner::Error::UncertainStore(_)) => {
@@ -2123,4 +2130,134 @@ fn started_git_auth_snapshot(
         return Err(StepError::Stale);
     }
     Ok((status, selection))
+}
+
+#[cfg(test)]
+mod owner_turn_retry_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn owner_turn_retries_domain_and_store_busy() {
+        let attempts = Cell::new(0);
+        let waits = Cell::new(0);
+        let result = retry_owner_turn(
+            || Ok(()),
+            || {
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                match attempt {
+                    1 => Err(shared_owner::Error::Domain(owner_domain::Error::Busy)),
+                    2 => Err(shared_owner::Error::Store(StoreError::Busy)),
+                    _ => Ok("complete"),
+                }
+            },
+        );
+
+        assert!(matches!(result, Ok("complete")));
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(waits.get(), 2);
+    }
+
+    #[test]
+    fn persistent_busy_stops_at_the_original_deadline() {
+        let deadline = 3;
+        let now = Cell::new(0);
+        let attempts = Cell::new(0);
+        let result = retry_owner_turn::<()>(
+            || (now.get() < deadline).then_some(()).ok_or(StepError::Stale),
+            || {
+                if now.get() >= deadline {
+                    return Err(StepError::Stale);
+                }
+                now.set(now.get() + 1);
+                if now.get() < deadline {
+                    Ok(())
+                } else {
+                    Err(StepError::Stale)
+                }
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(shared_owner::Error::Domain(owner_domain::Error::Busy))
+            },
+        );
+
+        assert!(matches!(result, Err(PeerError::Fatal(StepError::Stale))));
+        assert_eq!(attempts.get(), deadline);
+    }
+
+    #[test]
+    fn cancellation_stops_busy_retry_before_replaying_the_owner_turn() {
+        let cancelled = Cell::new(false);
+        let attempts = Cell::new(0);
+        let waits = Cell::new(0);
+        let result = retry_owner_turn::<()>(
+            || {
+                if cancelled.get() {
+                    Err(StepError::Stale)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                waits.set(waits.get() + 1);
+                cancelled.set(true);
+                Ok(())
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(shared_owner::Error::Store(StoreError::Busy))
+            },
+        );
+
+        assert!(matches!(result, Err(PeerError::Fatal(StepError::Stale))));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(waits.get(), 1);
+    }
+
+    #[test]
+    fn stale_and_uncertain_store_busy_fail_closed_without_replaying() {
+        let attempts = Cell::new(0);
+        let waits = Cell::new(0);
+        let stale = retry_owner_turn::<()>(
+            || Ok(()),
+            || {
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(shared_owner::Error::Domain(owner_domain::Error::Stale))
+            },
+        );
+        assert!(matches!(stale, Err(PeerError::Fatal(StepError::Stale))));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(waits.get(), 0);
+
+        attempts.set(0);
+        let uncertain = retry_owner_turn::<()>(
+            || Ok(()),
+            || {
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(shared_owner::Error::UncertainStore(StoreError::Busy))
+            },
+        );
+        assert!(matches!(
+            uncertain,
+            Err(PeerError::Fatal(StepError::Auth(
+                lomi_host_auth::Error::Sealed
+            )))
+        ));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(waits.get(), 0);
+    }
 }

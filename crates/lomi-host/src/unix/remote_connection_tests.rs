@@ -352,6 +352,22 @@ impl Fixture {
         )
     }
 
+    fn established_connection(
+        &self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+    ) -> RemoteConnectionState {
+        let facts = self.facts();
+        let mut pending = self.begin(auth).unwrap();
+        let mut consumer = self.initiator();
+        let first = consumer.write().unwrap();
+        pending.read(&first, &facts, &mut || self.now(200)).unwrap();
+        let second = pending.write(&facts, &mut || self.now(400)).unwrap();
+        consumer.read(&second).unwrap();
+        let third = consumer.write().unwrap();
+        pending.read(&third, &facts, &mut || self.now(600)).unwrap();
+        pending.finish(&facts, &mut || self.now(800)).unwrap()
+    }
+
     fn initiator(&self) -> Handshake {
         let host = SignedBundle::from_wire(&self.host.identity).unwrap();
         let consumer = self.consumer.public_bundle();
@@ -477,5 +493,54 @@ fn an_early_peer_renewal_does_not_extend_the_original_admission_deadline() {
                 .finish(&renewed_facts, &mut || fixture.now(5_002))
                 .is_err()
         );
+    });
+}
+
+#[test]
+fn established_operation_response_uses_refreshed_peer_proof() {
+    with_ready_auth(|auth, config| {
+        let mut fixture = Fixture::new(auth, config, 30);
+        let mut refreshed = fixture.established_connection(auth);
+        let mut unrefreshed = fixture.established_connection(auth);
+        fixture.renew_heartbeat(4_000);
+        let facts = fixture.facts();
+
+        refreshed
+            .refresh_peer(fixture.peer(4_000), &facts, &mut || fixture.now(4_500))
+            .unwrap();
+
+        let grant = &fixture.context.grant;
+        let workspace = WorkspaceContext {
+            workspace_id: WorkspaceId::from_bytes(grant.workspace_id).unwrap(),
+            workspace_epoch: WorkspaceEpoch::from_bytes(grant.workspace_epoch).unwrap(),
+            runtime_id: RuntimeId::from_bytes(grant.runtime_id).unwrap(),
+            runtime_generation: DecimalU64(grant.runtime_generation),
+            host_access_epoch: DecimalU64(grant.access_epoch),
+            grant_revision: DecimalU64(grant.grant_revision),
+        };
+        let request = RpcRequest {
+            v: ApplicationMajor,
+            r#type: RequestKind::Request,
+            request_id: "refresh-test".to_owned().try_into().unwrap(),
+            timeout_ms: TimeoutMs::new(10_000).unwrap(),
+            call: RpcCall::OperationStatus(OperationStatusParams {
+                context: workspace,
+                operation_id: OperationId::from_bytes([42; 16]).unwrap(),
+            }),
+        };
+
+        assert!(
+            refreshed
+                .cached_operation_response(&request, None, &facts, &mut || fixture.now(5_100))
+                .is_ok()
+        );
+        assert!(!refreshed.core.disposed);
+
+        assert_eq!(
+            unrefreshed
+                .cached_operation_response(&request, None, &facts, &mut || fixture.now(5_100)),
+            Err(GateError::Disposed)
+        );
+        assert!(unrefreshed.core.disposed);
     });
 }

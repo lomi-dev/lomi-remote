@@ -3517,10 +3517,13 @@ impl<'cancel> Connection<'cancel> {
                         .map_err(invalid_at!())?,
                     1 if self.workspace_stream.is_some() => {
                         let state = {
-                            let turn = runtime
-                                .owner
-                                .try_remote_workspace_turn(&evidence, current, &self.workspace)
-                                .map_err(owner_error_at!())?;
+                            let turn = peer::owner_turn(runtime, || {
+                                runtime.owner.try_remote_workspace_turn(
+                                    &evidence,
+                                    current,
+                                    &self.workspace,
+                                )
+                            })?;
                             turn.workspace_stream_state(crypto).map_err(invalid_at!())?
                         };
                         self.workspace_stream
@@ -3739,14 +3742,20 @@ impl<'cancel> Connection<'cancel> {
                     request_runtime.remote_worker_evidence(auth, eligibility)
                 )?;
                 {
-                    let turn = runtime
-                        .owner
-                        .try_remote_workspace_turn(
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
                             &response_evidence,
                             &response_current,
                             &self.workspace,
                         )
-                        .map_err(owner_error_at!())?;
+                    })?;
+                    let Crypto::Established(crypto) = &mut self.crypto else {
+                        return Err(peer::PeerError::Invalid);
+                    };
+                    if response_current.observed_at() > self.applied_observation {
+                        turn.refresh_peer(crypto).map_err(invalid_at!())?;
+                        self.applied_observation = response_current.observed_at();
+                    }
                     turn.cached_operation_response(
                         crypto,
                         &ready_request,
