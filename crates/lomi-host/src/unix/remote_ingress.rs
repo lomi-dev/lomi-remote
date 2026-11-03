@@ -905,10 +905,11 @@ impl<'cancel> Driver<'cancel> {
         )?;
         let evidence = runtime.remote_worker_evidence(auth, eligibility)?;
         let (pending, endpoint) = {
-            let turn = runtime
-                .owner
-                .try_remote_workspace_turn(&evidence, &current, &workspace)
-                .map_err(owner_error_at!())?;
+            let turn = peer::owner_turn(runtime, || {
+                runtime
+                    .owner
+                    .try_remote_workspace_turn(&evidence, &current, &workspace)
+            })?;
             let endpoint = turn
                 .relay_endpoint()
                 .map_err(|_| peer::PeerError::Invalid)?;
@@ -2336,10 +2337,13 @@ impl<'cancel> Connection<'cancel> {
             )?;
             let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
             {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &pending.context)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &pending.context,
+                    )
+                })?;
                 let Crypto::Established(crypto) = &mut self.crypto else {
                     return Err(peer::PeerError::Invalid);
                 };
@@ -2869,10 +2873,13 @@ impl<'cancel> Connection<'cancel> {
                     };
                     let eligibility = eligibility.ok_or(peer::PeerError::Invalid)?;
                     let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
-                    let turn = runtime
-                        .owner
-                        .try_remote_workspace_turn(&evidence, current_peer, &pending.context)
-                        .map_err(owner_error_at!())?;
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            current_peer,
+                            &pending.context,
+                        )
+                    })?;
                     turn.check_response(crypto, &pending.request)
                         .map_err(invalid_at!())?;
                     drop(turn);
@@ -2916,10 +2923,13 @@ impl<'cancel> Connection<'cancel> {
                     };
                     let eligibility = eligibility.ok_or(peer::PeerError::Invalid)?;
                     let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
-                    let turn = runtime
-                        .owner
-                        .try_remote_workspace_turn(&evidence, current_peer, &pending.context)
-                        .map_err(owner_error_at!())?;
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            current_peer,
+                            &pending.context,
+                        )
+                    })?;
                     turn.check_response(crypto, &pending.request)
                         .map_err(invalid_at!())?;
                     drop(turn);
@@ -3061,10 +3071,13 @@ impl<'cancel> Connection<'cancel> {
             )?;
             let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
             {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 let Crypto::Established(crypto) = &mut self.crypto else {
                     return Err(peer::PeerError::Invalid);
                 };
@@ -3130,10 +3143,13 @@ impl<'cancel> Connection<'cancel> {
                 request_runtime.remote_worker_evidence(auth, eligibility)
             )?;
             let frame = {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 let Crypto::Established(crypto) = &mut self.crypto else {
                     return Err(peer::PeerError::Invalid);
                 };
@@ -3231,10 +3247,13 @@ impl<'cancel> Connection<'cancel> {
                 return Err(peer::PeerError::Invalid);
             };
             {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(stream_runtime, || {
+                    stream_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 if current.observed_at() > self.applied_observation {
                     turn.refresh_peer(crypto).map_err(invalid_at!())?;
                     self.applied_observation = current.observed_at();
@@ -3252,10 +3271,13 @@ impl<'cancel> Connection<'cancel> {
                     .map_err(invalid_at!())?;
             }
             let ciphertext = {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(stream_runtime, || {
+                    stream_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 let frame = self
                     .encoder
                     .next_frame()
@@ -3347,10 +3369,11 @@ impl<'cancel> Connection<'cancel> {
             | Crypto::WriteSecond(pending)
             | Crypto::ReadThird(pending) = &mut self.crypto
         {
-            let turn = runtime
-                .owner
-                .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                .map_err(owner_error_at!())?;
+            let turn = peer::owner_turn(runtime, || {
+                runtime
+                    .owner
+                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
+            })?;
             turn.refresh_pending_peer(pending).map_err(invalid_at!())?;
             self.applied_observation = current.observed_at();
         }
@@ -3360,10 +3383,13 @@ impl<'cancel> Connection<'cancel> {
         match stage {
             Crypto::WriteSecond(mut pending) => {
                 let bytes = {
-                    let turn = runtime
-                        .owner
-                        .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                        .map_err(owner_error_at!())?;
+                    let turn = peer::owner_turn(runtime, || {
+                        runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            &current,
+                            &self.workspace,
+                        )
+                    })?;
                     turn.handshake_write(&mut pending).map_err(invalid_at!())?
                 };
                 self.socket
@@ -3382,10 +3408,13 @@ impl<'cancel> Connection<'cancel> {
                 };
                 match (other, frame) {
                     (Crypto::Established(mut crypto), Poll::Pending) => {
-                        let turn = runtime
-                            .owner
-                            .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                            .map_err(owner_error_at!())?;
+                        let turn = peer::owner_turn(runtime, || {
+                            runtime.owner.try_remote_workspace_turn(
+                                &evidence,
+                                &current,
+                                &self.workspace,
+                            )
+                        })?;
                         if current.observed_at() > self.applied_observation {
                             turn.refresh_peer(&mut crypto).map_err(invalid_at!())?;
                             self.applied_observation = current.observed_at();
@@ -3394,20 +3423,26 @@ impl<'cancel> Connection<'cancel> {
                     }
                     (stage, Poll::Pending) => self.crypto = stage,
                     (Crypto::ReadFirst(mut pending), Poll::Ready(bytes)) => {
-                        let turn = runtime
-                            .owner
-                            .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                            .map_err(owner_error_at!())?;
+                        let turn = peer::owner_turn(runtime, || {
+                            runtime.owner.try_remote_workspace_turn(
+                                &evidence,
+                                &current,
+                                &self.workspace,
+                            )
+                        })?;
                         turn.handshake_read(&mut pending, &bytes)
                             .map_err(invalid_at!())?;
                         self.crypto = Crypto::WriteSecond(pending);
                         advanced = true;
                     }
                     (Crypto::ReadThird(mut pending), Poll::Ready(bytes)) => {
-                        let turn = runtime
-                            .owner
-                            .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                            .map_err(owner_error_at!())?;
+                        let turn = peer::owner_turn(runtime, || {
+                            runtime.owner.try_remote_workspace_turn(
+                                &evidence,
+                                &current,
+                                &self.workspace,
+                            )
+                        })?;
                         turn.handshake_read(&mut pending, &bytes)
                             .map_err(invalid_at!())?;
                         let established = turn.finish_connection(pending).map_err(invalid_at!())?;
@@ -3423,10 +3458,13 @@ impl<'cancel> Connection<'cancel> {
                     }
                     (Crypto::Established(mut crypto), Poll::Ready(bytes)) => {
                         let plain = {
-                            let turn = runtime
-                                .owner
-                                .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                                .map_err(owner_error_at!())?;
+                            let turn = peer::owner_turn(runtime, || {
+                                runtime.owner.try_remote_workspace_turn(
+                                    &evidence,
+                                    &current,
+                                    &self.workspace,
+                                )
+                            })?;
                             if current.observed_at() > self.applied_observation {
                                 turn.refresh_peer(&mut crypto).map_err(invalid_at!())?;
                                 self.applied_observation = current.observed_at();
@@ -3619,10 +3657,13 @@ impl<'cancel> Connection<'cancel> {
                 return Err(peer::PeerError::Invalid);
             };
             let (queued, workspace_result, workspace_subscription, workspace_capabilities) = {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 if current.observed_at() > self.applied_observation {
                     turn.refresh_peer(crypto).map_err(invalid_at!())?;
                     self.applied_observation = current.observed_at();
@@ -3671,10 +3712,13 @@ impl<'cancel> Connection<'cancel> {
                 let actor_guard =
                     super::super::rpc::actor_lock(&actor, &operation).map_err(invalid_at!())?;
                 let ready = {
-                    let turn = runtime
-                        .owner
-                        .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                        .map_err(owner_error_at!())?;
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            &current,
+                            &self.workspace,
+                        )
+                    })?;
                     turn.after_operation_wait(
                         crypto,
                         &queued,
@@ -3894,10 +3938,13 @@ impl<'cancel> Connection<'cancel> {
                     | RpcCall::FilesSearchNames(_)
                     | RpcCall::FilesWatch(_)
             ) {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 let (_, target) = turn
                     .files_after_wait(crypto, &queued)
                     .map_err(invalid_at!())?;
@@ -3946,10 +3993,13 @@ impl<'cancel> Connection<'cancel> {
                     | RpcCall::GitLog(_)
                     | RpcCall::GitShow(_)
             ) {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 let target = turn
                     .git_read_after_wait(crypto, &queued)
                     .map_err(invalid_at!())?;
@@ -4057,10 +4107,13 @@ impl<'cancel> Connection<'cancel> {
                     .ok_or(peer::PeerError::Invalid)?
                     .execute(crypto, &evidence, &current, &request, &queued)
             } else {
-                let turn = runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
-                    .map_err(owner_error_at!())?;
+                let turn = peer::owner_turn(request_runtime, || {
+                    request_runtime.owner.try_remote_workspace_turn(
+                        &evidence,
+                        &current,
+                        &self.workspace,
+                    )
+                })?;
                 turn.finish_unsupported_after_wait(crypto, &queued)
                     .map_err(invalid_at!())?;
                 Err(unsupported())
