@@ -2253,15 +2253,18 @@ impl<'cancel> Connection<'cancel> {
         Ok(true)
     }
 
-    /// Retain the current worker unit only while an established connection is
-    /// inside the pre-expiry refresh window. The existing cutoff remains
-    /// absolute; failure to refresh before it expires still closes the channel.
+    /// Retain the current worker unit while a pending handshake or established
+    /// connection is inside the pre-expiry refresh window. The existing cutoff
+    /// remains absolute; failure to refresh before it expires closes the channel.
     fn peer_refresh_deadline(&self, now: Instant) -> Option<Instant> {
-        if !matches!(&self.crypto, Crypto::Established(_)) || self.peer_cutoff <= now {
-            return None;
-        }
-        (self.peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN)
-            .then_some(self.peer_cutoff)
+        let refreshable = matches!(
+            &self.crypto,
+            Crypto::ReadFirst(_)
+                | Crypto::WriteSecond(_)
+                | Crypto::ReadThird(_)
+                | Crypto::Established(_)
+        );
+        peer_refresh_deadline_for(refreshable, self.peer_cutoff, now)
     }
 
     fn poll_git_mutation(
@@ -4235,5 +4238,35 @@ impl Drop for Connection<'_> {
         if let Some(mut terminal) = self.terminal.take() {
             terminal.disconnect();
         }
+    }
+}
+
+fn peer_refresh_deadline_for(
+    refreshable: bool,
+    peer_cutoff: Instant,
+    now: Instant,
+) -> Option<Instant> {
+    if !refreshable || peer_cutoff <= now {
+        return None;
+    }
+    (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
+}
+
+#[cfg(test)]
+mod peer_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn peer_refresh_deadline_is_bounded_to_live_margin_and_skips_vacant() {
+        let now = Instant::now();
+        let cutoff = now + PEER_REFRESH_MARGIN;
+
+        assert_eq!(peer_refresh_deadline_for(true, cutoff, now), Some(cutoff));
+        assert_eq!(
+            peer_refresh_deadline_for(true, cutoff + Duration::from_nanos(1), now),
+            None
+        );
+        assert_eq!(peer_refresh_deadline_for(false, cutoff, now), None);
+        assert_eq!(peer_refresh_deadline_for(true, now, now), None);
     }
 }

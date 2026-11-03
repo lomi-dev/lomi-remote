@@ -360,9 +360,10 @@ impl<'cancel> Registry<'cancel> {
         None
     }
 
-    /// Refresh the established connection with the earliest impending peer
-    /// cutoff before ordinary round-robin work. Each successful refresh leaves
-    /// this window; a failed or expired refresh closes and prunes that channel.
+    /// Refresh the pending or established connection with the earliest
+    /// impending peer cutoff before ordinary round-robin work. Each successful
+    /// refresh leaves this window; a failed or expired refresh closes and
+    /// prunes that channel.
     fn next_peer_refresh(&mut self, now: Instant) -> Option<ChannelId> {
         let round_robin = &self.round_robin;
         let entries = &self.entries;
@@ -409,4 +410,26 @@ fn earliest_peer_refresh(
         .filter_map(|channel_id| cutoff(*channel_id).map(|deadline| (*channel_id, deadline)))
         .min_by_key(|(_, deadline)| *deadline)
         .map(|(channel_id, _)| channel_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_handshake_refresh_precedes_later_established_refresh() {
+        let pending = ChannelId::from_bytes([1; 16]).unwrap();
+        let established = ChannelId::from_bytes([2; 16]).unwrap();
+        let pending_cutoff = Instant::now() + Duration::from_secs(1);
+        let established_cutoff = pending_cutoff + Duration::from_secs(1);
+        let round_robin = VecDeque::from([established, pending]);
+
+        let selected = earliest_peer_refresh(&round_robin, |channel_id| match channel_id {
+            id if id == pending => Some(pending_cutoff),
+            id if id == established => Some(established_cutoff),
+            _ => None,
+        });
+
+        assert_eq!(selected, Some(pending));
+    }
 }
