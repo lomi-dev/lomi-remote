@@ -1767,17 +1767,22 @@ fn run_with_apis_inner(
                         channel.discard_retained_operation();
                         ingress.discard();
                         auth.prepare_rotation(now)?;
-                    } else if peer.has_retained_operation() {
-                        let eligibility = cloud.cached_eligibility().ok_or(StepError::Stale)?;
-                        peer.step(auth, config, runtime, eligibility, apis.pairing)?;
-                    } else if channel.has_retained_operation() {
-                        let eligibility = cloud.cached_eligibility().ok_or(StepError::Stale)?;
-                        channel.step(auth, config, runtime, eligibility, apis.channel)?;
-                        ingress.after_channel_step(&mut channel, auth, runtime, eligibility);
                     } else {
+                        // Recheck heartbeat eligibility every Ready turn, even
+                        // while a peer or channel operation is retained.
                         let outcome = cloud.step(auth, config, runtime, fence.generation)?;
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
-                            if apis.enabled {
+                            if peer.has_retained_operation() {
+                                peer.step(auth, config, runtime, &eligibility, apis.pairing)?;
+                            } else if channel.has_retained_operation() {
+                                channel.step(auth, config, runtime, &eligibility, apis.channel)?;
+                                ingress.after_channel_step(
+                                    &mut channel,
+                                    auth,
+                                    runtime,
+                                    &eligibility,
+                                );
+                            } else if apis.enabled {
                                 // Defer discovery only for an in-flight handshake setup.
                                 let defer_discovery = ingress.has_pending_setup();
                                 if let Some(select_channel) =
