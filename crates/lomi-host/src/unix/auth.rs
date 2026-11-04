@@ -438,7 +438,7 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainError, IdleScheduler, OwnerError, OwnerOperation, await_explicit_retry,
+        DomainError, IdleScheduler, OwnerError, OwnerOperation, WorkClass, await_explicit_retry,
         read_owner_status_with_busy_retry, read_owner_status_with_busy_retry_and_wait,
     };
     use std::{
@@ -452,30 +452,176 @@ mod tests {
     fn idle_scheduler_defers_without_changing_class_alternation() {
         let mut idle = IdleScheduler::default();
 
-        assert_eq!(idle.select_channel(true, true), None);
-        assert_eq!(idle.select_channel(true, false), Some(false));
-        assert_eq!(idle.select_channel(true, true), None);
-        assert_eq!(idle.select_channel(true, false), Some(true));
+        assert_eq!(
+            idle.select_class(false, false, false, false, false, true),
+            None
+        );
+        let class = idle
+            .select_class(false, false, false, false, true, true)
+            .unwrap();
+        assert_eq!(class, WorkClass::Peer);
+        assert!(idle.after_step(class, false, false, false));
+        assert_eq!(
+            idle.select_class(false, false, false, false, false, true),
+            None
+        );
+        let class = idle
+            .select_class(false, false, false, false, true, true)
+            .unwrap();
+        assert_eq!(class, WorkClass::Channel);
+        assert!(idle.after_step(class, false, false, false));
     }
 
     #[test]
     fn established_ingress_work_does_not_suppress_pair_channel_alternation() {
         let mut idle = IdleScheduler::default();
 
-        assert_eq!(idle.select_channel(true, false), Some(false));
-        assert_eq!(idle.select_channel(true, false), Some(true));
-        assert_eq!(idle.select_channel(true, false), Some(false));
-        assert_eq!(idle.select_channel(true, false), Some(true));
+        for expected in [
+            WorkClass::Peer,
+            WorkClass::Channel,
+            WorkClass::Peer,
+            WorkClass::Channel,
+        ] {
+            let class = idle
+                .select_class(false, false, false, false, true, true)
+                .unwrap();
+            assert_eq!(class, expected);
+            assert!(idle.after_step(class, false, false, false));
+        }
     }
 
     #[test]
     fn idle_scheduler_keeps_peer_only_when_channels_are_disabled() {
         let mut idle = IdleScheduler::default();
 
-        assert_eq!(idle.select_channel(false, false), Some(false));
-        assert_eq!(idle.select_channel(false, false), Some(false));
-        assert_eq!(idle.select_channel(true, false), Some(false));
-        assert_eq!(idle.select_channel(true, false), Some(true));
+        for _ in 0..2 {
+            let class = idle
+                .select_class(false, false, false, false, true, false)
+                .unwrap();
+            assert_eq!(class, WorkClass::Peer);
+            assert!(idle.after_step(class, false, false, false));
+        }
+        assert_eq!(
+            idle.select_class(false, false, false, false, true, true),
+            Some(WorkClass::Channel)
+        );
+        assert!(idle.after_step(WorkClass::Channel, false, false, false));
+        assert_eq!(
+            idle.select_class(false, false, false, false, true, true),
+            Some(WorkClass::Peer)
+        );
+        assert!(idle.after_step(WorkClass::Peer, false, false, false));
+    }
+
+    #[test]
+    fn reserved_work_runs_poll_prepare_and_send_before_yielding() {
+        let mut idle = IdleScheduler::default();
+        let mut authority_revision = 0;
+        let channel_cached_revision = authority_revision;
+
+        let selected = idle
+            .select_class(false, false, false, false, true, true)
+            .unwrap();
+        assert_eq!(selected, WorkClass::Peer);
+        assert!(!idle.after_step(selected, false, true, false)); // poll loaded cache
+        assert_eq!(
+            idle.select_class(false, true, false, false, true, true),
+            Some(selected)
+        );
+        authority_revision += 1; // peer journal prepare advances its own continuation
+        assert!(!idle.after_step(selected, true, true, true)); // prepare created intent
+        assert_eq!(
+            idle.select_class(true, true, false, false, true, true),
+            Some(selected)
+        );
+        authority_revision += 1; // peer send/ack advances authority again
+        assert!(idle.after_step(selected, false, true, true)); // send settled
+
+        // The sibling may have cached an observation before the peer journal
+        // writes. Its stale item consumes one turn, then the next reservation
+        // polls under the new owner revision before preparing/sending.
+        assert_ne!(channel_cached_revision, authority_revision);
+        let selected = idle
+            .select_class(false, false, false, true, true, true)
+            .unwrap();
+        assert_eq!(selected, WorkClass::Channel);
+        let stale_channel_work = channel_cached_revision != authority_revision;
+        assert!(stale_channel_work);
+        assert!(idle.after_step(selected, false, false, stale_channel_work)); // stale cache dropped
+        assert_eq!(
+            idle.select_class(false, false, false, false, true, true),
+            Some(WorkClass::Peer)
+        );
+        assert!(!idle.after_step(WorkClass::Peer, false, true, false));
+        authority_revision += 1;
+        assert!(!idle.after_step(WorkClass::Peer, true, true, true));
+        authority_revision += 1;
+        assert!(idle.after_step(WorkClass::Peer, false, true, true));
+        assert_eq!(
+            idle.select_class(false, false, false, false, true, true),
+            Some(WorkClass::Channel)
+        );
+        let fresh_channel_observation = authority_revision;
+        assert!(!idle.after_step(WorkClass::Channel, false, true, false)); // fresh poll
+        assert_eq!(fresh_channel_observation, authority_revision);
+        authority_revision += 1;
+        assert!(!idle.after_step(WorkClass::Channel, true, true, true)); // prepare
+        authority_revision += 1;
+        assert!(idle.after_step(WorkClass::Channel, false, true, true)); // send
+        assert!(authority_revision > fresh_channel_observation);
+    }
+
+    #[test]
+    fn pending_setup_and_disabled_apis_still_run_retained_classes() {
+        let mut idle = IdleScheduler::default();
+
+        // Pending setup blocks new discovery, but retained classes still
+        // alternate. Retained channels also remain runnable when disabled.
+        assert_eq!(
+            idle.select_class(true, false, true, false, false, false),
+            Some(WorkClass::Peer)
+        );
+        assert!(!idle.after_step(WorkClass::Peer, true, false, true));
+        assert_eq!(
+            idle.select_class(true, false, true, false, false, false),
+            Some(WorkClass::Peer)
+        );
+        assert!(idle.after_step(WorkClass::Peer, false, false, true));
+        assert_eq!(
+            idle.select_class(false, false, true, false, false, false),
+            Some(WorkClass::Channel)
+        );
+        assert!(!idle.after_step(WorkClass::Channel, true, false, true));
+        assert_eq!(
+            idle.select_class(false, false, false, false, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_setup_and_disabled_apis_keep_cached_items_runnable() {
+        let mut idle = IdleScheduler::default();
+
+        assert_eq!(
+            idle.select_class(false, true, false, false, false, false),
+            Some(WorkClass::Peer)
+        );
+        assert!(!idle.after_step(WorkClass::Peer, false, true, false));
+        assert_eq!(
+            idle.select_class(false, true, false, false, false, false),
+            Some(WorkClass::Peer)
+        );
+        assert!(idle.after_step(WorkClass::Peer, false, true, true));
+        assert_eq!(
+            idle.select_class(false, false, false, true, false, false),
+            Some(WorkClass::Channel)
+        );
+        assert!(!idle.after_step(WorkClass::Channel, false, true, false));
+        assert_eq!(
+            idle.select_class(false, false, false, true, false, false),
+            Some(WorkClass::Channel)
+        );
+        assert!(idle.after_step(WorkClass::Channel, false, true, true));
     }
 
     #[test]
@@ -1247,21 +1393,117 @@ struct InjectedApis<'a> {
     enabled: bool,
     channels_enabled: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkClass {
+    Peer,
+    Channel,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkPhase {
+    Poll,
+    CachedFirst,
+    Active,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkReservation {
+    class: WorkClass,
+    phase: WorkPhase,
+}
 #[derive(Default)]
 struct IdleScheduler {
     channel_next: bool,
+    reservation: Option<WorkReservation>,
 }
 impl IdleScheduler {
-    fn select_channel(&mut self, channels_enabled: bool, defer_discovery: bool) -> Option<bool> {
-        if defer_discovery {
-            return None;
+    fn reset_reservation(&mut self) {
+        self.reservation = None;
+    }
+    fn select_class(
+        &mut self,
+        peer_active: bool,
+        peer_cached: bool,
+        channel_active: bool,
+        channel_cached: bool,
+        discovery_allowed: bool,
+        channels_enabled: bool,
+    ) -> Option<WorkClass> {
+        if let Some(reservation) = self.reservation {
+            let (active, cached, discovery) = match reservation.class {
+                WorkClass::Peer => (peer_active, peer_cached, discovery_allowed),
+                WorkClass::Channel => (
+                    channel_active,
+                    channel_cached,
+                    discovery_allowed && channels_enabled,
+                ),
+            };
+            if active || cached || (reservation.phase == WorkPhase::Poll && discovery) {
+                return Some(reservation.class);
+            }
+            self.reservation = None;
         }
-        if !channels_enabled {
-            return Some(false);
+        let peer_runnable = peer_active || peer_cached || discovery_allowed;
+        let channel_runnable =
+            channel_active || channel_cached || (discovery_allowed && channels_enabled);
+        let class = match (peer_runnable, channel_runnable) {
+            (false, false) => return None,
+            (true, false) => WorkClass::Peer,
+            (false, true) => WorkClass::Channel,
+            (true, true) if self.channel_next => WorkClass::Channel,
+            (true, true) => WorkClass::Peer,
+        };
+        self.reservation = Some(WorkReservation {
+            class,
+            phase: WorkPhase::Poll,
+        });
+        Some(class)
+    }
+    fn after_step(
+        &mut self,
+        class: WorkClass,
+        active: bool,
+        cached: bool,
+        consumed_work: bool,
+    ) -> bool {
+        let Some(mut reservation) = self.reservation else {
+            return false;
+        };
+        if reservation.class != class {
+            return false;
         }
-        let selected = self.channel_next;
-        self.channel_next = !self.channel_next;
-        Some(selected)
+        let release = match reservation.phase {
+            WorkPhase::Poll => {
+                if active {
+                    reservation.phase = WorkPhase::Active;
+                    false
+                } else if consumed_work {
+                    true
+                } else if cached {
+                    reservation.phase = WorkPhase::CachedFirst;
+                    false
+                } else {
+                    true
+                }
+            }
+            WorkPhase::CachedFirst => {
+                if active {
+                    reservation.phase = WorkPhase::Active;
+                    false
+                } else if consumed_work || !cached {
+                    true
+                } else {
+                    false
+                }
+            }
+            WorkPhase::Active => !active,
+        };
+        if release {
+            self.reservation = None;
+            self.channel_next = class == WorkClass::Peer;
+            true
+        } else {
+            self.reservation = Some(reservation);
+            false
+        }
     }
 }
 // Retain the former publication wait behavior only for its cancellation tests.
@@ -1373,6 +1615,7 @@ fn run_with_apis_inner(
             || ingress.has_retained_operation();
         if units.started && !retained {
             cloud.finish_operation();
+            idle.reset_reservation();
             units.admit_after_settlement(stopping);
         }
         units.started = true;
@@ -1425,6 +1668,7 @@ fn run_with_apis_inner(
             cloud.finish_operation();
             peer.discard_retained_operation();
             channel.discard_retained_operation();
+            idle.reset_reservation();
             ingress.discard();
             gate.store(true, Ordering::Release);
             continue;
@@ -1471,6 +1715,7 @@ fn run_with_apis_inner(
                 cloud.finish_operation();
                 peer.discard_retained_operation();
                 channel.discard_retained_operation();
+                idle.reset_reservation();
                 ingress.discard();
                 gate.store(true, Ordering::Release);
                 continue;
@@ -1519,6 +1764,7 @@ fn run_with_apis_inner(
                 cloud.finish_operation();
                 peer.discard_retained_operation();
                 channel.discard_retained_operation();
+                idle.reset_reservation();
                 ingress.discard();
             }
             verified_generation = Some(fence.generation);
@@ -1531,6 +1777,7 @@ fn run_with_apis_inner(
             cloud.finish_operation();
             peer.discard_retained_operation();
             channel.discard_retained_operation();
+            idle.reset_reservation();
             ingress.discard();
             gate.store(true, Ordering::Release);
             let outcome = owner
@@ -1597,6 +1844,7 @@ fn run_with_apis_inner(
             if fence.pending_cloud_revoke {
                 ingress.discard();
                 channel.discard_retained_operation();
+                idle.reset_reservation();
                 if cloud.logout_epoch_step(auth, config, runtime, fence.generation)? {
                     return Ok(false);
                 }
@@ -1749,6 +1997,7 @@ fn run_with_apis_inner(
                     {
                         ingress.discard();
                         channel.discard_retained_operation();
+                        idle.reset_reservation();
                         now = trusted_now(runtime)?;
                         let handoff = runtime.with_clock_floor(now);
                         if !retained {
@@ -1765,6 +2014,7 @@ fn run_with_apis_inner(
                         cloud.finish_operation();
                         peer.discard_retained_operation();
                         channel.discard_retained_operation();
+                        idle.reset_reservation();
                         ingress.discard();
                         auth.prepare_rotation(now)?;
                     } else {
@@ -1772,44 +2022,65 @@ fn run_with_apis_inner(
                         // while a peer or channel operation is retained.
                         let outcome = cloud.step(auth, config, runtime, fence.generation)?;
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
-                            if peer.has_retained_operation() {
-                                peer.step(auth, config, runtime, &eligibility, apis.pairing)?;
-                            } else if channel.has_retained_operation() {
-                                channel.step(auth, config, runtime, &eligibility, apis.channel)?;
-                                ingress.after_channel_step(
-                                    &mut channel,
-                                    auth,
-                                    runtime,
-                                    &eligibility,
-                                );
-                            } else if apis.enabled {
-                                // Defer discovery only for an in-flight handshake setup.
-                                let defer_discovery = ingress.has_pending_setup();
-                                if let Some(select_channel) =
-                                    idle.select_channel(apis.channels_enabled, defer_discovery)
-                                {
-                                    if select_channel {
-                                        channel.step(
+                            let peer_active = peer.has_active_work();
+                            let peer_cached = peer.has_cached_work();
+                            let channel_active = channel.has_active_work();
+                            let channel_cached = channel.has_cached_work();
+                            let discovery_allowed = apis.enabled && !ingress.has_pending_setup();
+                            if let Some(class) = idle.select_class(
+                                peer_active,
+                                peer_cached,
+                                channel_active,
+                                channel_cached,
+                                discovery_allowed,
+                                apis.channels_enabled,
+                            ) {
+                                match class {
+                                    WorkClass::Channel => {
+                                        let result = channel.step(
                                             auth,
                                             config,
                                             runtime,
                                             &eligibility,
                                             apis.channel,
-                                        )?;
-                                        ingress.after_channel_step(
-                                            &mut channel,
-                                            auth,
-                                            runtime,
-                                            &eligibility,
                                         );
-                                    } else {
-                                        peer.step(
+                                        if result.is_ok() {
+                                            ingress.after_channel_step(
+                                                &mut channel,
+                                                auth,
+                                                runtime,
+                                                &eligibility,
+                                            );
+                                        }
+                                        let released = idle.after_step(
+                                            class,
+                                            channel.has_active_work(),
+                                            channel.has_cached_work(),
+                                            channel.scheduled_item_consumed(),
+                                        );
+                                        if released {
+                                            channel.discard_cached_work();
+                                        }
+                                        result?;
+                                    }
+                                    WorkClass::Peer => {
+                                        let result = peer.step(
                                             auth,
                                             config,
                                             runtime,
                                             &eligibility,
                                             apis.pairing,
-                                        )?;
+                                        );
+                                        let released = idle.after_step(
+                                            class,
+                                            peer.has_active_work(),
+                                            peer.has_cached_work(),
+                                            peer.scheduled_item_consumed(),
+                                        );
+                                        if released {
+                                            peer.discard_cached_work();
+                                        }
+                                        result?;
                                     }
                                 }
                             }
@@ -1823,6 +2094,7 @@ fn run_with_apis_inner(
                 Status::Rotating => {
                     ingress.discard();
                     channel.discard_retained_operation();
+                    idle.reset_reservation();
                     now = trusted_now(runtime)?;
                     let handoff = runtime.with_clock_floor(now);
                     if !retained {

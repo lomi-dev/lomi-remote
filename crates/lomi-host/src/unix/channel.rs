@@ -244,18 +244,34 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     prefer_recovery: bool,
     capacity_blocked: bool,
+    scheduled_item_consumed: bool,
+    cached_first_due: bool,
 }
 impl Worker {
     pub(super) fn discard_retained_operation(&mut self) {
         self.active = None;
         self.cache.clear();
         self.pending_handoff = None;
+        self.cached_first_due = false;
+    }
+    pub(super) fn discard_cached_work(&mut self) {
+        self.cache.clear();
+        self.cached_first_due = false;
     }
     pub(super) fn take_admitted(&mut self) -> Option<AdmittedChannelHandoff> {
         self.pending_handoff.take()
     }
     pub(super) fn has_retained_operation(&self) -> bool {
         self.active.is_some() || !self.cache.is_empty() || self.pending_handoff.is_some()
+    }
+    pub(super) fn has_active_work(&self) -> bool {
+        self.active.is_some() || self.pending_handoff.is_some()
+    }
+    pub(super) fn has_cached_work(&self) -> bool {
+        !self.cache.is_empty()
+    }
+    pub(super) fn scheduled_item_consumed(&self) -> bool {
+        self.scheduled_item_consumed
     }
 
     pub(super) fn step(
@@ -266,6 +282,7 @@ impl Worker {
         eligibility: &PeerEligibility,
         injected: Option<&dyn ChannelApi>,
     ) -> Result<(), StepError> {
+        self.scheduled_item_consumed = false;
         if let Some(api) = injected {
             return self.step_using(auth, config, runtime, eligibility, api);
         }
@@ -320,6 +337,7 @@ impl Worker {
         eligibility: &PeerEligibility,
         api: &dyn ChannelApi,
     ) -> Result<(), StepError> {
+        self.scheduled_item_consumed = false;
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.scope = Some(eligibility.binding.scope.clone());
             self.cache.clear();
@@ -331,6 +349,7 @@ impl Worker {
             self.proposal_cursor = None;
             self.prefer_recovery = false;
             self.failures = 0;
+            self.cached_first_due = false;
             // Preserve the nondecreasing policy clock across scope changes.
         }
         if let Some(handoff) = &self.pending_handoff {
@@ -356,6 +375,7 @@ impl Worker {
                     })?;
                 self.active = None;
                 self.backoff();
+                self.scheduled_item_consumed = true;
                 Ok(())
             }
         }
@@ -388,10 +408,8 @@ impl Worker {
         self.parked
             .retain(|token, _| pending.iter().any(|p| &p.token == token));
         self.turns_since_poll = self.turns_since_poll.saturating_add(1);
-        if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
-            return self.poll(auth, runtime, eligibility, api, &pending);
-        }
         if let Some(work) = self.active.take() {
+            self.scheduled_item_consumed = true;
             if !work.observation.current(eligibility)
                 || !work.observation.current_operation(runtime)
             {
@@ -399,13 +417,40 @@ impl Worker {
             }
             return self.send(auth, config, runtime, eligibility, api, work);
         }
+        if self.cached_first_due {
+            if self.prefer_recovery
+                && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
+            {
+                self.cached_first_due = false;
+                self.prefer_recovery = false;
+                self.scheduled_item_consumed = true;
+                return Ok(());
+            }
+            self.cached_first_due = false;
+            if let Some(work) = self.cache.pop_front() {
+                self.scheduled_item_consumed = true;
+                self.prefer_recovery = true;
+                self.proposal_cursor = Some(work.id);
+                if work.observation.current(eligibility)
+                    && work.observation.current_operation(runtime)
+                {
+                    return self.prepare(auth, config, runtime, eligibility, work);
+                }
+                return Ok(());
+            }
+        }
+        if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
+            return self.poll(auth, runtime, eligibility, api, &pending);
+        }
         if self.prefer_recovery
             && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
         {
             self.prefer_recovery = false;
+            self.scheduled_item_consumed = true;
             return Ok(());
         }
         if let Some(work) = self.cache.pop_front() {
+            self.scheduled_item_consumed = true;
             self.prefer_recovery = true;
             self.proposal_cursor = Some(work.id);
             if work.observation.current(eligibility) && work.observation.current_operation(runtime)
@@ -415,6 +460,7 @@ impl Worker {
             return Ok(());
         }
         if self.recover_one(auth, config, runtime, eligibility, api, &pending)? {
+            self.scheduled_item_consumed = true;
             self.prefer_recovery = false;
             return Ok(());
         }
@@ -489,6 +535,7 @@ impl Worker {
                 intent: None,
             });
         }
+        self.cached_first_due = !self.cache.is_empty();
         self.failures = 0;
         Ok(())
     }

@@ -172,6 +172,8 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     proposal_cursor: Option<PairingId>,
     prefer_recovery: bool,
+    scheduled_item_consumed: bool,
+    cached_first_due: bool,
 }
 pub(super) enum PeerError {
     Invalid,
@@ -286,9 +288,23 @@ impl Worker {
     pub(super) fn discard_retained_operation(&mut self) {
         self.active = None;
         self.cache.clear();
+        self.cached_first_due = false;
+    }
+    pub(super) fn discard_cached_work(&mut self) {
+        self.cache.clear();
+        self.cached_first_due = false;
     }
     pub(super) fn has_retained_operation(&self) -> bool {
         self.active.is_some() || !self.cache.is_empty()
+    }
+    pub(super) fn has_active_work(&self) -> bool {
+        self.active.is_some()
+    }
+    pub(super) fn has_cached_work(&self) -> bool {
+        !self.cache.is_empty()
+    }
+    pub(super) fn scheduled_item_consumed(&self) -> bool {
+        self.scheduled_item_consumed
     }
 
     pub(super) fn step(
@@ -299,6 +315,7 @@ impl Worker {
         eligibility: &PeerEligibility,
         injected: Option<&dyn PeerApi>,
     ) -> Result<(), StepError> {
+        self.scheduled_item_consumed = false;
         if let Some(api) = injected {
             return self.step_using(auth, config, runtime, eligibility, api);
         }
@@ -355,6 +372,7 @@ impl Worker {
         eligibility: &PeerEligibility,
         api: &dyn PeerApi,
     ) -> Result<(), StepError> {
+        self.scheduled_item_consumed = false;
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.scope = Some(eligibility.binding.scope.clone());
             self.cache.clear();
@@ -365,6 +383,7 @@ impl Worker {
             self.proposal_cursor = None;
             self.prefer_recovery = false;
             self.failures = 0;
+            self.cached_first_due = false;
         }
         let result = self.turn(auth, config, runtime, eligibility, api);
         match result {
@@ -383,6 +402,7 @@ impl Worker {
                         PeerError::Invalid => StepError::Stale,
                     })?;
                 self.active = None;
+                self.scheduled_item_consumed = true;
                 self.backoff();
                 Ok(())
             }
@@ -446,12 +466,8 @@ impl Worker {
         self.parked
             .retain(|token, _| pending.iter().any(|intent| &intent.token == token));
         self.turns_since_poll = self.turns_since_poll.saturating_add(1);
-        // Resource-local unknowns must not monopolize every idle turn. Honor
-        // outage backoff, then reserve every fourth eligible turn for a due poll.
-        if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
-            return self.poll(auth, runtime, eligibility, api, &pending);
-        }
         if let Some(work) = self.active.take() {
+            self.scheduled_item_consumed = true;
             if !work.observation.current(eligibility)
                 || !work.observation.current_operation(runtime)
             {
@@ -463,15 +479,44 @@ impl Worker {
                 self.prepare(auth, config, runtime, eligibility, work)
             };
         }
+        if self.cached_first_due {
+            if self.prefer_recovery
+                && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
+            {
+                self.cached_first_due = false;
+                self.prefer_recovery = false;
+                self.scheduled_item_consumed = true;
+                return Ok(());
+            }
+            self.cached_first_due = false;
+            if let Some(work) = self.cache.pop_front() {
+                self.scheduled_item_consumed = true;
+                self.prefer_recovery = true;
+                self.proposal_cursor = Some(work.pairing);
+                if work.observation.current(eligibility)
+                    && work.observation.current_operation(runtime)
+                {
+                    return self.prepare(auth, config, runtime, eligibility, work);
+                }
+                return Ok(());
+            }
+        }
+        // Resource-local unknowns must not monopolize every idle turn. Honor
+        // outage backoff, then reserve every fourth eligible turn for a due poll.
+        if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
+            return self.poll(auth, runtime, eligibility, api, &pending);
+        }
         // Polls do not reset this class. Replenished valid caches and durable
         // unknown outcomes each receive a bounded share of non-poll idle turns.
         if self.prefer_recovery
             && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
         {
             self.prefer_recovery = false;
+            self.scheduled_item_consumed = true;
             return Ok(());
         }
         if let Some(work) = self.cache.pop_front() {
+            self.scheduled_item_consumed = true;
             self.prefer_recovery = true;
             self.proposal_cursor = Some(work.pairing);
             if work.observation.current(eligibility) && work.observation.current_operation(runtime)
@@ -481,6 +526,7 @@ impl Worker {
             return Ok(());
         }
         if self.recover_one(auth, config, runtime, eligibility, api, &pending)? {
+            self.scheduled_item_consumed = true;
             self.prefer_recovery = false;
             return Ok(());
         }
@@ -605,6 +651,7 @@ impl Worker {
                 intent: None,
             });
         }
+        self.cached_first_due = !self.cache.is_empty();
         self.failures = 0;
         Ok(())
     }
