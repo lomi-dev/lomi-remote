@@ -32,6 +32,10 @@ pub(in super::super) struct PeerEligibility {
     pub(in super::super) publication: HostAcknowledgedPublication,
     pub(in super::super) heartbeat: HeartbeatObservation,
 }
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+fn next_heartbeat_at(completed_at: Instant) -> Option<Instant> {
+    completed_at.checked_add(HEARTBEAT_INTERVAL)
+}
 #[derive(Default)]
 enum Action {
     #[default]
@@ -1064,7 +1068,6 @@ impl<'w> NormalPublicationDriver<'w> {
             request_started.checked_add(Duration::from_millis(heartbeat.lease_ms));
         self.worker.fresh_until =
             request_started.checked_add(Duration::from_millis(heartbeat.freshness_ms));
-        self.worker.heartbeat_at = request_started.checked_add(Duration::from_secs(1));
         self.worker.heartbeat_observation = Some(heartbeat.clone());
         self.worker.publication_turn = true;
         self.worker.normal_publication_origin = Some(NormalConfiguredOrigin {
@@ -1272,8 +1275,32 @@ impl NormalPublicationObservation<'_, '_> {
     ) -> Result<(), NormalPublicationOriginError> {
         self.check_local(now)?;
         self.worker.action = Action::Online;
+        self.worker.heartbeat_at = next_heartbeat_at(Instant::now());
         self.completed = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_heartbeat_at;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn heartbeat_cadence_leaves_an_eligibility_turn_after_completion() {
+        let origin = Instant::now();
+
+        let slow_request_started = origin;
+        let slow_completion = slow_request_started + Duration::from_millis(1_100);
+        let fast_next_turn = slow_completion + Duration::from_millis(1);
+        assert!(slow_completion >= slow_request_started + Duration::from_secs(1));
+        assert!(fast_next_turn < next_heartbeat_at(slow_completion).unwrap());
+
+        let request_started = origin + Duration::from_secs(10);
+        let response_completed = request_started + Duration::from_millis(900);
+        let after_actor_wait = response_completed + Duration::from_millis(250);
+        assert!(after_actor_wait >= request_started + Duration::from_secs(1));
+        assert!(after_actor_wait < next_heartbeat_at(response_completed).unwrap());
     }
 }
 #[cfg(any(unix, windows))]
@@ -1299,6 +1326,7 @@ impl NormalPublicationObservation<'_, '_> {
     ) -> Result<(), NormalPublicationOriginError> {
         self.check_local(now)?;
         self.worker.action = Action::Online;
+        self.worker.heartbeat_at = next_heartbeat_at(Instant::now());
         self.completed = true;
         Ok(())
     }
