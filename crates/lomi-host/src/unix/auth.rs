@@ -438,8 +438,10 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainError, IdleScheduler, OwnerError, OwnerOperation, WorkClass, await_explicit_retry,
+        DomainError, IdleScheduler, OwnerError, OwnerOperation, StepError, WorkClass,
+        await_explicit_retry, cloud, cloud_step_requests_immediate_pass,
         read_owner_status_with_busy_retry, read_owner_status_with_busy_retry_and_wait,
+        remote_ingress,
     };
     use std::{
         sync::atomic::{AtomicBool, Ordering},
@@ -447,6 +449,58 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn actor_wait_tracks_cloud_and_reserved_stage_progress() {
+        use cloud::StepOutcome;
+
+        assert_eq!(
+            remote_ingress::actor_wait_duration(cloud_step_requests_immediate_pass(&Ok(
+                StepOutcome::Network
+            ))),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remote_ingress::actor_wait_duration(cloud_step_requests_immediate_pass(&Ok(
+                StepOutcome::Deferred
+            ))),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            remote_ingress::actor_wait_duration(cloud_step_requests_immediate_pass(&Err(
+                StepError::Stale
+            ))),
+            Duration::from_millis(250)
+        );
+
+        let mut idle = IdleScheduler::default();
+        let class = idle
+            .select_class(false, false, false, false, true, true)
+            .unwrap();
+        assert!(!idle.after_step(class, false, true, false));
+        let immediate = idle.should_wake_after_step(class, false, true, true);
+        assert_eq!(
+            remote_ingress::actor_wait_duration(immediate),
+            Duration::ZERO
+        );
+
+        // Errors and idle/backoff turns keep the reservation's ordinary wait.
+        assert_eq!(
+            remote_ingress::actor_wait_duration(
+                idle.should_wake_after_step(class, false, true, false)
+            ),
+            Duration::from_millis(250)
+        );
+
+        assert!(idle.after_step(class, false, false, true));
+        assert!(!idle.should_wake_after_step(class, false, false, true));
+        assert_eq!(
+            remote_ingress::actor_wait_duration(
+                idle.should_wake_after_step(class, false, false, true)
+            ),
+            Duration::from_millis(250)
+        );
+    }
 
     #[test]
     fn idle_scheduler_defers_without_changing_class_alternation() {
@@ -1505,6 +1559,23 @@ impl IdleScheduler {
             false
         }
     }
+    fn should_wake_after_step(
+        &self,
+        class: WorkClass,
+        active: bool,
+        cached: bool,
+        succeeded: bool,
+    ) -> bool {
+        succeeded
+            && (active || cached)
+            && self
+                .reservation
+                .is_some_and(|reservation| reservation.class == class)
+    }
+}
+
+fn cloud_step_requests_immediate_pass(outcome: &Result<cloud::StepOutcome, StepError>) -> bool {
+    matches!(outcome, Ok(cloud::StepOutcome::Network))
 }
 // Retain the former publication wait behavior only for its cancellation tests.
 // Production publication scheduling is owned by the Cloud worker.
@@ -1987,7 +2058,7 @@ fn run_with_apis_inner(
                             // The retained Git writer owns the Domain ticket.
                             // Advance its finalization but defer Cloud/peer/
                             // channel readers until that ticket is released.
-                            requested_immediate_ingress_pass =
+                            requested_immediate_ingress_pass |=
                                 ingress.advance(auth, runtime, cloud.cached_eligibility());
                             return Ok(requested_immediate_ingress_pass);
                         }
@@ -2020,7 +2091,10 @@ fn run_with_apis_inner(
                     } else {
                         // Recheck heartbeat eligibility every Ready turn, even
                         // while a peer or channel operation is retained.
-                        let outcome = cloud.step(auth, config, runtime, fence.generation)?;
+                        let cloud_result = cloud.step(auth, config, runtime, fence.generation);
+                        requested_immediate_ingress_pass |=
+                            cloud_step_requests_immediate_pass(&cloud_result);
+                        let outcome = cloud_result?;
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
                             let peer_active = peer.has_active_work();
                             let peer_cached = peer.has_cached_work();
@@ -2061,6 +2135,13 @@ fn run_with_apis_inner(
                                         if released {
                                             channel.discard_cached_work();
                                         }
+                                        requested_immediate_ingress_pass |= idle
+                                            .should_wake_after_step(
+                                                class,
+                                                channel.has_active_work(),
+                                                channel.has_cached_work(),
+                                                result.is_ok(),
+                                            );
                                         result?;
                                     }
                                     WorkClass::Peer => {
@@ -2080,6 +2161,13 @@ fn run_with_apis_inner(
                                         if released {
                                             peer.discard_cached_work();
                                         }
+                                        requested_immediate_ingress_pass |= idle
+                                            .should_wake_after_step(
+                                                class,
+                                                peer.has_active_work(),
+                                                peer.has_cached_work(),
+                                                result.is_ok(),
+                                            );
                                         result?;
                                     }
                                 }
@@ -2088,7 +2176,7 @@ fn run_with_apis_inner(
                     }
                     // Heartbeat/refresh/configuration work above keeps priority.
                     // The driver owns only socket/crypto/codecs and request state.
-                    requested_immediate_ingress_pass =
+                    requested_immediate_ingress_pass |=
                         ingress.advance(auth, runtime, cloud.cached_eligibility());
                 }
                 Status::Rotating => {

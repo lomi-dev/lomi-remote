@@ -29,10 +29,9 @@ use std::{
 mod registry;
 pub(super) use registry::Registry;
 
-/// Keep the actor's ordinary idle wait unless a successful ingress stage left
-/// output that can be sent without waiting for another peer frame.
-pub(super) const fn actor_wait_duration(immediate_output: bool) -> Duration {
-    if immediate_output {
+/// Keep the ordinary idle wait unless a successful stage left work for the next pass.
+pub(super) const fn actor_wait_duration(immediate_pass: bool) -> Duration {
+    if immediate_pass {
         Duration::ZERO
     } else {
         Duration::from_millis(250)
@@ -628,9 +627,12 @@ impl<'cancel> Driver<'cancel> {
             .and_then(|connection| connection.peer_refresh_deadline(now))
     }
     pub(super) fn has_immediate_output(&self) -> bool {
-        self.connection
-            .as_ref()
-            .is_some_and(|connection| connection.has_immediate_output())
+        self.candidate.is_some()
+            || self.ticketed.is_some()
+            || self
+                .connection
+                .as_ref()
+                .is_some_and(|connection| connection.has_immediate_output())
     }
     /// Empty means no candidate, ticket, or live transport. A live transport
     /// can outlast its maintenance operation and must remain in the registry.
