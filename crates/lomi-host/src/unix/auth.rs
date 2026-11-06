@@ -2095,6 +2095,12 @@ fn run_with_apis_inner(
                         requested_immediate_ingress_pass |=
                             cloud_step_requests_immediate_pass(&cloud_result);
                         let outcome = cloud_result?;
+                        // A network step may replace the heartbeat before its
+                        // cached eligibility is revalidated on the next pass.
+                        if matches!(&outcome, cloud::StepOutcome::Network) {
+                            debug_assert!(requested_immediate_ingress_pass);
+                            return Ok(true);
+                        }
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
                             let peer_active = peer.has_active_work();
                             let peer_cached = peer.has_cached_work();
