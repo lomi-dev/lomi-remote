@@ -436,4 +436,60 @@ mod tests {
 
         assert_eq!(selected, Some(pending));
     }
+
+    #[test]
+    fn candidate_and_ticket_deadlines_precede_later_parent_refreshes() {
+        let parent = ChannelId::from_bytes([3; 16]).unwrap();
+        let ticketed = ChannelId::from_bytes([4; 16]).unwrap();
+        let candidate = ChannelId::from_bytes([5; 16]).unwrap();
+        let now = Instant::now();
+        let parent_cutoff = now + Duration::from_millis(2_500);
+        let ticket_cutoff = now + Duration::from_millis(1_500);
+        let candidate_cutoff = now + Duration::from_millis(500);
+        let round_robin = VecDeque::from([parent, ticketed, candidate]);
+
+        let selected = earliest_peer_refresh(&round_robin, |channel_id| match channel_id {
+            id if id == parent => Some(parent_cutoff),
+            id if id == ticketed => Some(ticket_cutoff),
+            id if id == candidate => Some(candidate_cutoff),
+            _ => None,
+        });
+
+        assert_eq!(selected, Some(candidate));
+    }
+
+    #[test]
+    fn earlier_parent_cutoff_still_precedes_candidate_and_ticket() {
+        let parent = ChannelId::from_bytes([6; 16]).unwrap();
+        let candidate = ChannelId::from_bytes([7; 16]).unwrap();
+        let ticketed = ChannelId::from_bytes([8; 16]).unwrap();
+        let now = Instant::now();
+        let parent_cutoff = now + Duration::from_millis(250);
+        let candidate_cutoff = now + Duration::from_millis(500);
+        let ticket_cutoff = now + Duration::from_millis(750);
+        let round_robin = VecDeque::from([candidate, ticketed, parent]);
+
+        let selected = earliest_peer_refresh(&round_robin, |channel_id| match channel_id {
+            id if id == parent => Some(parent_cutoff),
+            id if id == candidate => Some(candidate_cutoff),
+            id if id == ticketed => Some(ticket_cutoff),
+            _ => None,
+        });
+
+        assert_eq!(selected, Some(parent));
+    }
+
+    #[test]
+    fn equal_cutoffs_keep_round_robin_order_and_empty_cutoffs_select_none() {
+        let first = ChannelId::from_bytes([9; 16]).unwrap();
+        let second = ChannelId::from_bytes([10; 16]).unwrap();
+        let cutoff = Instant::now() + Duration::from_millis(500);
+        let round_robin = VecDeque::from([first, second]);
+
+        assert_eq!(
+            earliest_peer_refresh(&round_robin, |_| Some(cutoff)),
+            Some(first)
+        );
+        assert_eq!(earliest_peer_refresh(&round_robin, |_| None), None);
+    }
 }

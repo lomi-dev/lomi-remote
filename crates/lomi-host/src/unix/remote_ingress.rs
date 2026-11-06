@@ -121,6 +121,13 @@ impl TicketedAdmission {
         )
     }
 
+    fn peer_refresh_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.bounds_current_at(now) {
+            return None;
+        }
+        handoff_peer_refresh_deadline(&self.handoff, Some(self.expires_at), now)
+    }
+
     // Registry polling only decides whether to retain this one-shot ticket.
     // Keep the original operation, handoff, observation, scope, and trusted
     // configuration current without recapturing provider or Store evidence.
@@ -666,9 +673,22 @@ impl<'cancel> Driver<'cancel> {
     }
 
     pub(super) fn peer_refresh_deadline(&self, now: Instant) -> Option<Instant> {
-        self.connection
+        let candidate = self
+            .candidate
             .as_ref()
-            .and_then(|connection| connection.peer_refresh_deadline(now))
+            .and_then(|handoff| handoff_peer_refresh_deadline(handoff, None, now));
+        let ticketed = self
+            .ticketed
+            .as_ref()
+            .and_then(|ticketed| ticketed.peer_refresh_deadline(now));
+        let connection = self
+            .connection
+            .as_ref()
+            .and_then(|connection| connection.peer_refresh_deadline(now));
+        [candidate, ticketed, connection]
+            .into_iter()
+            .flatten()
+            .min()
     }
     pub(super) fn has_immediate_output(&self) -> bool {
         self.candidate.is_some()
@@ -4378,6 +4398,18 @@ fn peer_refresh_deadline_for(
         return None;
     }
     (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
+}
+
+fn handoff_peer_refresh_deadline(
+    handoff: &channel::AdmittedChannelHandoff,
+    ticket_expires_at: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    let mut cutoff = handoff.observation().fresh_until().min(handoff.deadline());
+    if let Some(ticket_expires_at) = ticket_expires_at {
+        cutoff = cutoff.min(ticket_expires_at);
+    }
+    peer_refresh_deadline_for(true, cutoff, now)
 }
 
 #[cfg(test)]

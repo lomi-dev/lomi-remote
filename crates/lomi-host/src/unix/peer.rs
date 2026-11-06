@@ -85,16 +85,19 @@ impl Observation {
             .peer_original_boundary(runtime.operation, &self.continuation)
             .is_ok()
     }
+    pub(in super::super) fn fresh_until(&self) -> Instant {
+        (self.started + Duration::from_secs(5))
+            .min(
+                self.heartbeat.request_started + Duration::from_millis(self.heartbeat.freshness_ms),
+            )
+            .min(self.heartbeat.request_started + Duration::from_millis(self.heartbeat.lease_ms))
+    }
     pub(in super::super) fn current(&self, eligibility: &PeerEligibility) -> bool {
         let now = Instant::now();
         self.host == eligibility.identity
             && self.heartbeat.scope == eligibility.binding.scope
             && self.heartbeat.runtime == eligibility.binding.server_runtime
-            && now < self.started + Duration::from_secs(5)
-            && now
-                < self.heartbeat.request_started
-                    + Duration::from_millis(self.heartbeat.freshness_ms)
-            && now < self.heartbeat.request_started + Duration::from_millis(self.heartbeat.lease_ms)
+            && now < self.fresh_until()
     }
 }
 /// Complete provider evidence captured before acquiring Store. This value is
@@ -1396,15 +1399,7 @@ impl VerifiedCurrentPeer {
         self.observation.started
     }
     pub(in crate::unix) fn fresh_until(&self) -> Instant {
-        (self.observation.started + Duration::from_secs(5))
-            .min(
-                self.observation.heartbeat.request_started
-                    + Duration::from_millis(self.observation.heartbeat.freshness_ms),
-            )
-            .min(
-                self.observation.heartbeat.request_started
-                    + Duration::from_millis(self.observation.heartbeat.lease_ms),
-            )
+        self.observation.fresh_until()
     }
     pub(in super::super) fn source(&self) -> &lomi_host_store::AcknowledgedWorkspaceGrant {
         &self.source
