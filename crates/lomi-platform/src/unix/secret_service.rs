@@ -123,7 +123,10 @@ impl<'a> SecretService<'a> {
         if default.get_property::<bool>("Locked").map_err(read_error)? {
             return Err(Error::Locked);
         }
-        let collection_created: u64 = default.get_property("Created").map_err(read_error)?;
+        let collection_created = collection_created_anchor(
+            || default.get_property("Created").map_err(read_error),
+            || default.get_property("Modified").map_err(read_error),
+        )?;
         let (output, session): (OwnedValue, OwnedObjectPath) = service
             .call("OpenSession", &("plain", Value::from("")))
             .map_err(read_error)?;
@@ -157,6 +160,7 @@ impl<'a> SecretService<'a> {
         .into_bytes();
         guard.check()?;
         let marker_identity = read_marker_identity(profile, MARKER, &marker)?;
+        validate_marker_anchor(marker_identity, collection_created)?;
         guard.check()?;
         drop(default);
         drop(service);
@@ -227,18 +231,20 @@ impl<'a> SecretService<'a> {
         if alias != self.collection {
             return Err(Error::InvalidStorage);
         }
-        let created = self
-            .collection()?
-            .get_property::<u64>("Created")
-            .map_err(read_error)?;
+        let collection = self.collection()?;
+        let created = collection_created_anchor(
+            || collection.get_property("Created").map_err(read_error),
+            || collection.get_property("Modified").map_err(read_error),
+        )?;
 
         let alias_after: OwnedObjectPath = service
             .call("ReadAlias", &("default",))
             .map_err(read_error)?;
-        let created_after = self
-            .collection()?
-            .get_property::<u64>("Created")
-            .map_err(read_error)?;
+        let collection = self.collection()?;
+        let created_after = collection_created_anchor(
+            || collection.get_property("Created").map_err(read_error),
+            || collection.get_property("Modified").map_err(read_error),
+        )?;
         let owner_after: String = bus.call("GetNameOwner", &(SERVICE,)).map_err(read_error)?;
         if alias_after != self.collection || created_after != created || owner_after != self.owner {
             return Err(Error::InvalidStorage);
@@ -585,6 +591,28 @@ fn created_after_write(pinned: u64, observed: u64) -> Result<Option<u64>, Error>
     }
 }
 
+fn collection_created_anchor(
+    read_created: impl FnOnce() -> Result<u64, Error>,
+    read_modified: impl FnOnce() -> Result<u64, Error>,
+) -> Result<u64, Error> {
+    let created = read_created()?;
+    if created != 0 {
+        return Ok(created);
+    }
+    // GNOME Keyring can swap these timestamps after a save.
+    read_modified()
+}
+
+fn validate_marker_anchor(
+    marker_identity: Option<Object>,
+    collection_created: u64,
+) -> Result<(), Error> {
+    if marker_identity.is_some() && collection_created == 0 {
+        return Err(Error::InvalidStorage);
+    }
+    Ok(())
+}
+
 fn replace_marker_cas(
     profile: &PrivateProfile,
     guard: &ProtectedFile<'_>,
@@ -832,8 +860,9 @@ mod tests {
     use super::super::{PrivateProfile, object, secrets::ProtectedFile};
     use super::{
         CONTENT_TYPE, Error, GNOME_KEYRING_CONTENT_TYPE, MARKER, MAX_XDG_SCHEMA_BYTES,
-        created_after_write, item_attributes_match, marker_entry, marker_with_created,
-        read_marker_identity, replace_marker_cas, supported_content_type,
+        collection_created_anchor, created_after_write, item_attributes_match, marker_entry,
+        marker_with_created, read_marker_identity, replace_marker_cas, supported_content_type,
+        validate_marker_anchor,
     };
     use std::{
         collections::HashMap,
@@ -953,12 +982,88 @@ mod tests {
     }
 
     #[test]
+    fn collection_anchor_uses_modified_only_when_created_is_zero() {
+        assert_eq!(collection_created_anchor(|| Ok(0), || Ok(123)), Ok(123));
+        assert_eq!(collection_created_anchor(|| Ok(123), || Ok(0)), Ok(123));
+        assert_eq!(collection_created_anchor(|| Ok(0), || Ok(0)), Ok(0));
+
+        let modified_was_read = std::cell::Cell::new(false);
+        assert_eq!(
+            collection_created_anchor(
+                || Ok(123),
+                || {
+                    modified_was_read.set(true);
+                    Ok(456)
+                }
+            ),
+            Ok(123)
+        );
+        assert!(!modified_was_read.get());
+        assert_eq!(
+            collection_created_anchor(|| Err(Error::Locked), || panic!("unexpected fallback")),
+            Err(Error::Locked)
+        );
+        assert_eq!(
+            collection_created_anchor(|| Ok(0), || Err(Error::Unavailable)),
+            Err(Error::Unavailable)
+        );
+    }
+
+    #[test]
+    fn positive_marker_remains_exact_when_zero_timestamp_fields_swap() {
+        let (_directory, profile) = private_profile();
+        let (_file, original) = write_marker(&profile, &marker(123));
+        for (created, modified) in [(0, 123), (123, 0)] {
+            let observed = collection_created_anchor(|| Ok(created), || Ok(modified)).unwrap();
+            let identity = read_marker_identity(&profile, MARKER, &marker(observed)).unwrap();
+            assert_eq!(identity, Some(original));
+            assert_eq!(validate_marker_anchor(identity, observed), Ok(()));
+        }
+    }
+
+    #[test]
     fn rejects_legacy_zero_marker_on_positive_created_reopen() {
         let (_directory, profile) = private_profile();
         let (_file, _) = write_marker(&profile, &marker(0));
+        for (created, modified) in [(123, 0), (0, 123)] {
+            let observed = collection_created_anchor(|| Ok(created), || Ok(modified)).unwrap();
+            assert_eq!(
+                read_marker_identity(&profile, MARKER, &marker(observed)),
+                Err(Error::InvalidStorage)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_existing_marker_when_collection_anchor_is_zero() {
+        let (_directory, profile) = private_profile();
+        let (_file, _) = write_marker(&profile, &marker(0));
+        let identity = read_marker_identity(&profile, MARKER, &marker(0)).unwrap();
+
+        assert!(identity.is_some());
+        assert_eq!(
+            validate_marker_anchor(identity, 0),
+            Err(Error::InvalidStorage)
+        );
+    }
+
+    #[test]
+    fn allows_absent_marker_when_collection_anchor_is_zero() {
+        let (_directory, profile) = private_profile();
+        let identity = read_marker_identity(&profile, MARKER, &marker(0)).unwrap();
+
+        assert_eq!(identity, None);
+        assert_eq!(validate_marker_anchor(identity, 0), Ok(()));
+    }
+
+    #[test]
+    fn rejects_changed_positive_created_even_when_modified_matches_marker() {
+        let (_directory, profile) = private_profile();
+        let (_file, _) = write_marker(&profile, &marker(123));
+        let observed = collection_created_anchor(|| Ok(456), || Ok(123)).unwrap();
 
         assert_eq!(
-            read_marker_identity(&profile, MARKER, &marker(123)),
+            read_marker_identity(&profile, MARKER, &marker(observed)),
             Err(Error::InvalidStorage)
         );
     }
