@@ -153,6 +153,32 @@ fn macos_identity_failure(code: &'static str) -> Failure {
 
 struct IpcBackend<'a>(&'a Path, lomi_remote_protocol::HostId);
 impl ui::Backend for IpcBackend<'_> {
+    fn request_async(
+        &mut self,
+        call: LocalCall,
+    ) -> Result<std::sync::mpsc::Receiver<Result<LocalResult, &'static str>>, &'static str> {
+        let profile = self.0.to_path_buf();
+        let host_id = self.1;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("login-ipc-request".to_owned())
+            .spawn(move || {
+                let result = request_with_host(&profile, Some(host_id), call)
+                    .map_err(|failure| failure.code)
+                    .and_then(|response| response.result.map_err(|_| "LOCAL_REQUEST_REJECTED"));
+                let _ = sender.send(result);
+            })
+            .map_err(|_| "LOCAL_REQUEST_THREAD_FAILED")?;
+        Ok(receiver)
+    }
+
+    fn open_browser_url(
+        &mut self,
+        url: &str,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), &'static str>>, &'static str> {
+        lomiremote::browser::open(url)
+    }
+
     fn doctor_report(&mut self) -> Result<lomiremote::diagnostics::DiagnosticReport, &'static str> {
         let profile = self.0;
         Ok(lomiremote::diagnostics::collect(Some(profile), |call| {

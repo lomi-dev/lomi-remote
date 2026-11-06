@@ -25,7 +25,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::{cell::Cell, io, path::Path, time::Duration};
+use std::{
+    cell::Cell,
+    io,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 mod directory_picker;
 pub(crate) mod interaction;
@@ -33,10 +38,12 @@ pub(crate) mod interaction;
 mod navigation_tests;
 pub mod operations;
 pub(crate) mod pointer;
+mod session;
 mod sharing_dialog;
 #[cfg(test)]
 mod sharing_tests;
 mod shortcuts;
+mod sign_in;
 pub(crate) mod theme;
 mod workspace_form;
 #[cfg(test)]
@@ -60,6 +67,28 @@ const WORKSPACE_SEARCH_MAX_BYTES: usize = 255;
 
 pub trait Backend {
     fn request(&mut self, call: LocalCall) -> Result<LocalResult, &'static str>;
+
+    /// Start a local IPC request without waiting for its response. Production
+    /// backends must override this; the immediate default keeps lightweight
+    /// in-memory backends simple.
+    fn request_async(
+        &mut self,
+        call: LocalCall,
+    ) -> Result<std::sync::mpsc::Receiver<Result<LocalResult, &'static str>>, &'static str> {
+        let result = self.request(call);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let _ = sender.send(result);
+        Ok(receiver)
+    }
+
+    /// Launch only an explicitly requested, validated login presentation.
+    /// Completion is asynchronous so desktop helpers cannot block the dialog.
+    fn open_browser_url(
+        &mut self,
+        _url: &str,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), &'static str>>, &'static str> {
+        Err("BROWSER_UNAVAILABLE")
+    }
 
     /// Typed native service adapter. Implementations must report observed state
     /// and must not shell out to parse display-oriented status text.
@@ -1977,14 +2006,15 @@ fn run_dashboard(backend: &mut impl Backend, state: Dashboard) -> io::Result<()>
 fn run_loop<B: TerminalBackend>(
     terminal: &mut Terminal<B>,
     backend: &mut impl Backend,
-    mut state: Dashboard,
+    state: Dashboard,
 ) -> io::Result<()>
 where
     B::Error: Into<io::Error>,
 {
-    state.refresh(backend);
+    let mut state = session::Session::new(state);
     let mut pointer = PointerTracker::new();
     let mut changed = true;
+    let mut next_poll = Instant::now();
     loop {
         if changed {
             terminal
@@ -1995,6 +2025,15 @@ where
                 .map_err(Into::into)?;
             pointer.refresh(|column, row| state.hoverable(column, row));
             changed = false;
+        }
+        // Paint the welcome screen before the first IPC call. Poll on a timer,
+        // including during continuous input, without redrawing an idle frame.
+        if Instant::now() >= next_poll {
+            changed |= state.poll(backend);
+            next_poll = Instant::now() + Duration::from_secs(1);
+            if changed {
+                continue;
+            }
         }
         // One thread owns polling and reading. Idle does not redraw continuously.
         if !event::poll(Duration::from_millis(250))? {

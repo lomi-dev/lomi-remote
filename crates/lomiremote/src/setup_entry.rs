@@ -20,7 +20,7 @@ use lomi_remote_protocol::{
     rpc::BoundedList,
 };
 use std::{
-    io,
+    io::{self, IsTerminal},
     path::{Component, Path, PathBuf},
 };
 
@@ -44,6 +44,7 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
     validate_optional_account_arg(args, &account)?;
 
     let non_interactive = args.is_some_and(|matches| matches.get_flag("non-interactive"));
+    let dashboard_entry = args.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
     let requested_mode = parse_optional_mode(args)?;
     let executable_hint = current_executable_hint()?;
     let mut view = SetupView::new();
@@ -72,17 +73,21 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
                 if requested_mode.is_some_and(|requested| requested != actual_mode) {
                     return Err(setup::SetupError::BindingMismatch);
                 }
-                if let Some(routed) =
-                    route_existing_dashboard(setup_binding(discovered.clone()), requested_mode)?
-                {
+                if let Some(routed) = route_existing_dashboard(
+                    setup_binding(discovered.clone()),
+                    requested_mode,
+                    dashboard_entry,
+                )? {
                     return Ok(routed);
                 }
                 (actual_mode, Some(discovered))
             }
             native::RegistrationState::Missing => {
-                if let Some(routed) =
-                    route_existing_dashboard(setup_binding(discovered.clone()), requested_mode)?
-                {
+                if let Some(routed) = route_existing_dashboard(
+                    setup_binding(discovered.clone()),
+                    requested_mode,
+                    dashboard_entry,
+                )? {
                     return Ok(routed);
                 }
                 let selected = select_mode(requested_mode, non_interactive, &mut view)?;
@@ -144,7 +149,9 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
     }
 
     let binding = setup_binding(native_binding);
-    if let Some(routed) = route_existing_dashboard(binding.clone(), requested_mode)? {
+    if let Some(routed) =
+        route_existing_dashboard(binding.clone(), requested_mode, dashboard_entry)?
+    {
         return Ok(routed);
     }
     let mut host = setup_runtime::LocalSetupHost::new(binding.clone());
@@ -185,6 +192,7 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
 fn route_existing_dashboard(
     binding: setup::ServiceBinding,
     requested_mode: Option<LocalStartMode>,
+    dashboard_entry: bool,
 ) -> Result<Option<EntryOutcome>, setup::SetupError> {
     let requested_mode_mismatch = requested_mode.is_some_and(|mode| mode != binding.mode);
     let mut service = setup_runtime::NativeSetupService;
@@ -211,7 +219,12 @@ fn route_existing_dashboard(
     let has_journal = SetupJournalStore::read_existing(&binding.profile_path)
         .map_err(|_| setup::SetupError::JournalUnavailable)?
         .is_some();
-    if !has_journal && preflight.existing_configuration {
+    // An installed/initialized Host can present the authentication landing
+    // screen even if first-run setup has a pending login. Explicit `setup`
+    // keeps its resumable coordinator and all consent ordering unchanged.
+    if (dashboard_entry && preflight.existing_host_id.is_some())
+        || (!has_journal && preflight.existing_configuration)
+    {
         if requested_mode_mismatch {
             return Err(setup::SetupError::BindingMismatch);
         }

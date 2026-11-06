@@ -1,5 +1,6 @@
 pub mod attach;
 pub mod bootstrap;
+pub mod browser;
 pub mod cli;
 pub mod diagnostics;
 pub mod git_credentials;
