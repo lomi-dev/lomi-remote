@@ -6673,17 +6673,24 @@ struct PeerRemoteRows {
     channels: Vec<ChannelAdmissionIntent>,
     admissions: Vec<AcknowledgedChannelAdmission>,
 }
-impl PeerRemoteRows {
+struct PeerEligibilityRows {
+    configuration: Option<LocalAuthConfiguration>,
+    binding: Option<lomi_host_store::CloudRuntimeState>,
+    publication: Option<lomi_host_store::HostAcknowledgedPublication>,
+    host_pending: Option<lomi_host_store::HostPublicationIntent>,
+    outbox: Vec<lomi_host_store::Publication>,
+}
+impl PeerEligibilityRows {
     fn read(store: &HostStore) -> Result<Self, StoreError> {
         let configuration = store.auth_configuration()?;
-        let state = store.authorization_state()?;
+        let authorization = store.authorization_state()?;
         let origin = configuration
             .as_ref()
             .and_then(|config| config.remote_api_origin.as_ref())
             .ok_or(StoreError::Fenced)?
             .as_str()
             .to_owned();
-        let scope = store.cloud_runtime_scope(state.generation, origin)?;
+        let scope = store.cloud_runtime_scope(authorization.generation, origin)?;
         let binding = store.cloud_runtime_state(&scope)?;
         let publication = match &binding {
             Some(binding) => store.acknowledged_host_publication(binding)?,
@@ -6695,6 +6702,62 @@ impl PeerRemoteRows {
             publication,
             host_pending: store.pending_host_publication()?,
             outbox: store.pending_publications()?,
+        })
+    }
+
+    fn eligible(&self, eligibility: &super::auth::cloud::PeerEligibility) -> Result<(), Error> {
+        peer_eligibility_current(
+            self.binding.as_ref(),
+            self.publication.as_ref(),
+            self.host_pending.is_some(),
+            !self.outbox.is_empty(),
+            &eligibility.binding,
+            &eligibility.publication,
+            &eligibility.heartbeat,
+            std::time::Instant::now(),
+        )
+    }
+}
+fn peer_eligibility_current(
+    binding: Option<&lomi_host_store::CloudRuntimeState>,
+    publication: Option<&lomi_host_store::HostAcknowledgedPublication>,
+    host_pending: bool,
+    has_outbox: bool,
+    eligibility_binding: &lomi_host_store::CloudRuntimeState,
+    eligibility_publication: &lomi_host_store::HostAcknowledgedPublication,
+    heartbeat: &super::auth::cloud::HeartbeatObservation,
+    now: std::time::Instant,
+) -> Result<(), Error> {
+    if binding != Some(eligibility_binding)
+        || publication != Some(eligibility_publication)
+        || host_pending
+        || has_outbox
+        || heartbeat.scope != eligibility_binding.scope
+        || heartbeat.runtime != eligibility_binding.server_runtime
+        || now
+            >= heartbeat.request_started + std::time::Duration::from_millis(heartbeat.freshness_ms)
+        || now >= heartbeat.request_started + std::time::Duration::from_millis(heartbeat.lease_ms)
+    {
+        return Err(Error::Domain(domain::Error::Stale));
+    }
+    Ok(())
+}
+fn peer_time_at(now: u64, clock_floor: u64) -> Result<u64, StoreError> {
+    if now < clock_floor {
+        Err(StoreError::Fenced)
+    } else {
+        Ok(now)
+    }
+}
+impl PeerRemoteRows {
+    fn read(store: &HostStore) -> Result<Self, StoreError> {
+        let current = PeerEligibilityRows::read(store)?;
+        Ok(Self {
+            configuration: current.configuration,
+            binding: current.binding,
+            publication: current.publication,
+            host_pending: current.host_pending,
+            outbox: current.outbox,
             pairings: store.pending_pairing_decisions()?,
             grants: store.acknowledged_workspace_grants()?,
             channels: store.pending_channel_admissions()?,
@@ -6702,23 +6765,16 @@ impl PeerRemoteRows {
         })
     }
     fn eligible(&self, eligibility: &super::auth::cloud::PeerEligibility) -> Result<(), Error> {
-        let now = std::time::Instant::now();
-        if self.binding.as_ref() != Some(&eligibility.binding)
-            || self.publication.as_ref() != Some(&eligibility.publication)
-            || self.host_pending.is_some()
-            || !self.outbox.is_empty()
-            || eligibility.heartbeat.scope != eligibility.binding.scope
-            || eligibility.heartbeat.runtime != eligibility.binding.server_runtime
-            || now
-                >= eligibility.heartbeat.request_started
-                    + std::time::Duration::from_millis(eligibility.heartbeat.freshness_ms)
-            || now
-                >= eligibility.heartbeat.request_started
-                    + std::time::Duration::from_millis(eligibility.heartbeat.lease_ms)
-        {
-            return Err(Error::Domain(domain::Error::Stale));
-        }
-        Ok(())
+        peer_eligibility_current(
+            self.binding.as_ref(),
+            self.publication.as_ref(),
+            self.host_pending.is_some(),
+            !self.outbox.is_empty(),
+            &eligibility.binding,
+            &eligibility.publication,
+            &eligibility.heartbeat,
+            std::time::Instant::now(),
+        )
     }
 }
 impl SharedOwner {
@@ -6750,6 +6806,34 @@ impl SharedOwner {
             .map_err(peer_store_step)?;
         Ok(result)
     }
+    fn read_peer_eligibility<T>(
+        &self,
+        operation: &Operation<'_>,
+        eligibility: &super::auth::cloud::PeerEligibility,
+        read: impl FnOnce(&HostStore, &PeerEligibilityRows) -> Result<T, StoreError>,
+    ) -> Result<T, Error> {
+        let guard = self.domain.try_read(operation).map_err(Error::Domain)?;
+        let store = self.try_store()?;
+        let cap = guard
+            .prepare_peer_continuation(&store)
+            .map_err(peer_store_step)?;
+        let rows = PeerEligibilityRows::read(&store).map_err(|error| {
+            self.domain.cloud_uncertain();
+            Error::UncertainStore(error)
+        })?;
+        rows.eligible(eligibility)?;
+        let result = read(&store, &rows).map_err(|error| match error {
+            StoreError::NotFound | StoreError::Fenced => Error::Store(error),
+            _ => {
+                self.domain.cloud_uncertain();
+                Error::UncertainStore(error)
+            }
+        })?;
+        guard
+            .check_peer_effect(&cap, &store)
+            .map_err(peer_store_step)?;
+        Ok(result)
+    }
     pub(super) fn peer_original_boundary(
         &self,
         operation: &Operation<'_>,
@@ -6766,12 +6850,9 @@ impl SharedOwner {
         base: u64,
         anchor: std::time::Instant,
     ) -> Result<u64, Error> {
-        self.read_peer(operation, eligibility, |store, _| {
+        self.read_peer_eligibility(operation, eligibility, |store, _| {
             let now = base.saturating_add(anchor.elapsed().as_secs());
-            if now < store.authorization_state()?.clock_floor {
-                return Err(StoreError::Fenced);
-            }
-            Ok(now)
+            peer_time_at(now, store.authorization_state()?.clock_floor)
         })
     }
     pub(super) fn validate_peer_eligibility(
@@ -6779,7 +6860,7 @@ impl SharedOwner {
         operation: &Operation<'_>,
         eligibility: &super::auth::cloud::PeerEligibility,
     ) -> Result<(), Error> {
-        self.read_peer(operation, eligibility, |_, _| Ok(()))
+        self.read_peer_eligibility(operation, eligibility, |_, _| Ok(()))
     }
     pub(super) fn peer_pending_pairings(
         &self,
@@ -11049,5 +11130,164 @@ fn collect_running_panes(
             panes.extend(collect_running_panes(second));
             panes
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_eligibility_tests {
+    use super::*;
+    use lomi_host_store::{CloudRuntimeScope, CloudRuntimeState, HostAcknowledgedPublication};
+    use lomi_remote_protocol::http::{PublicationWorkspaces, RuntimeBinding};
+    use lomi_remote_protocol::{DecimalU64, HostId, RuntimeId};
+
+    fn current_peer() -> (
+        CloudRuntimeState,
+        HostAcknowledgedPublication,
+        super::super::auth::cloud::HeartbeatObservation,
+        std::time::Instant,
+    ) {
+        let runtime = RuntimeBinding {
+            runtime_id: RuntimeId::from_bytes([2; 16]).unwrap(),
+            runtime_generation: DecimalU64(4),
+            host_access_epoch: DecimalU64(5),
+        };
+        let scope = CloudRuntimeScope {
+            authorization_generation: 3,
+            remote_api_origin: "https://remote.example".to_owned(),
+            host_id: HostId::from_bytes([1; 16]).unwrap(),
+            owner_runtime_id: RuntimeId::from_bytes([6; 16]).unwrap(),
+            owner_generation: 7,
+        };
+        let binding = CloudRuntimeState {
+            scope: scope.clone(),
+            server_runtime: runtime.clone(),
+            acknowledged_publication_seq: DecimalU64(8),
+        };
+        let publication = HostAcknowledgedPublication {
+            state: binding.clone(),
+            workspaces: PublicationWorkspaces::try_from(Vec::new()).unwrap(),
+        };
+        let now = std::time::Instant::now();
+        let heartbeat = super::super::auth::cloud::HeartbeatObservation {
+            scope,
+            runtime,
+            request_started: now,
+            wall_at_request_start: 10,
+            lease_ms: 2_000,
+            freshness_ms: 1_000,
+        };
+        (binding, publication, heartbeat, now)
+    }
+
+    fn current_rows_are_eligible(
+        binding: &CloudRuntimeState,
+        publication: &HostAcknowledgedPublication,
+        heartbeat: &super::super::auth::cloud::HeartbeatObservation,
+        now: std::time::Instant,
+    ) -> Result<(), Error> {
+        peer_eligibility_current(
+            Some(binding),
+            Some(publication),
+            false,
+            false,
+            binding,
+            publication,
+            heartbeat,
+            now,
+        )
+    }
+
+    #[test]
+    fn peer_eligibility_requires_exact_current_authority_and_clear_journals() {
+        let (binding, publication, heartbeat, now) = current_peer();
+        assert_eq!(
+            current_rows_are_eligible(&binding, &publication, &heartbeat, now),
+            Ok(())
+        );
+
+        let mut changed_binding = binding.clone();
+        changed_binding.acknowledged_publication_seq = DecimalU64(9);
+        assert_eq!(
+            peer_eligibility_current(
+                Some(&changed_binding),
+                Some(&publication),
+                false,
+                false,
+                &binding,
+                &publication,
+                &heartbeat,
+                now,
+            ),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+
+        let mut changed_publication = publication.clone();
+        changed_publication.state.acknowledged_publication_seq = DecimalU64(9);
+        assert_eq!(
+            peer_eligibility_current(
+                Some(&binding),
+                Some(&changed_publication),
+                false,
+                false,
+                &binding,
+                &publication,
+                &heartbeat,
+                now,
+            ),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+
+        for (host_pending, has_outbox) in [(true, false), (false, true)] {
+            assert_eq!(
+                peer_eligibility_current(
+                    Some(&binding),
+                    Some(&publication),
+                    host_pending,
+                    has_outbox,
+                    &binding,
+                    &publication,
+                    &heartbeat,
+                    now,
+                ),
+                Err(Error::Domain(domain::Error::Stale))
+            );
+        }
+    }
+
+    #[test]
+    fn peer_eligibility_rejects_heartbeat_scope_runtime_and_expiry_boundaries() {
+        let (binding, publication, heartbeat, now) = current_peer();
+
+        let mut wrong_scope = heartbeat.clone();
+        wrong_scope.scope.authorization_generation += 1;
+        assert_eq!(
+            current_rows_are_eligible(&binding, &publication, &wrong_scope, now),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+
+        let mut wrong_runtime = heartbeat.clone();
+        wrong_runtime.runtime.host_access_epoch = DecimalU64(6);
+        assert_eq!(
+            current_rows_are_eligible(&binding, &publication, &wrong_runtime, now),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+
+        let freshness_expiry = heartbeat.request_started + std::time::Duration::from_millis(1_000);
+        assert_eq!(
+            current_rows_are_eligible(&binding, &publication, &heartbeat, freshness_expiry),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+
+        let lease_expiry = heartbeat.request_started + std::time::Duration::from_millis(2_000);
+        assert_eq!(
+            current_rows_are_eligible(&binding, &publication, &heartbeat, lease_expiry),
+            Err(Error::Domain(domain::Error::Stale))
+        );
+    }
+
+    #[test]
+    fn peer_time_respects_the_authorization_clock_floor() {
+        assert_eq!(peer_time_at(10, 10), Ok(10));
+        assert_eq!(peer_time_at(9, 10), Err(StoreError::Fenced));
     }
 }
