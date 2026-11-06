@@ -38,6 +38,7 @@ const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
 const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
 const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
 const CONTENT_TYPE: &str = "application/vnd.lomi.host-secrets.v1";
+const GNOME_KEYRING_CONTENT_TYPE: &str = "text/plain";
 const MARKER: &CStr = c"host-secrets.secret-service";
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_XDG_SCHEMA_BYTES: usize = 255;
@@ -378,7 +379,7 @@ impl SecretStorage for SecretService<'_> {
             .map_err(read_error)?;
         if secret.session != self.session
             || !secret.parameters.is_empty()
-            || secret.content_type != CONTENT_TYPE
+            || !supported_content_type(&secret.content_type)
         {
             return Err(Error::InvalidBundle);
         }
@@ -822,12 +823,17 @@ fn valid_xdg_schema(value: &str) -> bool {
             .all(|character| !character.is_control() && !character.is_whitespace())
 }
 
+fn supported_content_type(content_type: &str) -> bool {
+    content_type == CONTENT_TYPE || content_type == GNOME_KEYRING_CONTENT_TYPE
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{PrivateProfile, object, secrets::ProtectedFile};
     use super::{
-        Error, MARKER, MAX_XDG_SCHEMA_BYTES, created_after_write, item_attributes_match,
-        marker_entry, marker_with_created, read_marker_identity, replace_marker_cas,
+        CONTENT_TYPE, Error, GNOME_KEYRING_CONTENT_TYPE, MARKER, MAX_XDG_SCHEMA_BYTES,
+        created_after_write, item_attributes_match, marker_entry, marker_with_created,
+        read_marker_identity, replace_marker_cas, supported_content_type,
     };
     use std::{
         collections::HashMap,
@@ -922,6 +928,16 @@ mod tests {
             invalid_schema.insert("xdg:schema".into(), schema);
             assert!(!item_attributes_match(&expected, &invalid_schema));
         }
+    }
+
+    #[test]
+    fn accepts_only_lomi_and_gnome_keyring_content_types() {
+        assert!(supported_content_type(CONTENT_TYPE));
+        assert!(supported_content_type(GNOME_KEYRING_CONTENT_TYPE));
+        assert!(!supported_content_type("text/html"));
+        assert!(!supported_content_type(
+            "application/vnd.lomi.host-secrets.v2"
+        ));
     }
 
     #[test]
