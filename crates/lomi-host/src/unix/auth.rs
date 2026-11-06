@@ -694,6 +694,50 @@ mod tests {
     }
 
     #[test]
+    fn staged_output_defers_retained_class_until_message_drains_then_yields_to_idle() {
+        let mut idle = IdleScheduler::default();
+        let class = idle
+            .select_class_for_ready_turn(false, false, false, false, true, false, true)
+            .unwrap();
+        assert_eq!(class, WorkClass::Channel);
+        assert!(!idle.after_step(class, false, true, false));
+        let cached_reservation = idle.reservation;
+
+        // A finite queued message can have multiple fragments. Keep the same
+        // idle reservation while each staged fragment is sent.
+        assert_eq!(
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, cached_reservation);
+        assert_eq!(
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, cached_reservation);
+
+        // The last fragment drains the staged message. A terminal producer may
+        // still have another event ready, but that next message is not staged
+        // until ingress advances after this normal idle opportunity.
+        let terminal_producer_has_next_event = true;
+        let staged_output_pending = false;
+        assert!(terminal_producer_has_next_event);
+        assert_eq!(
+            idle.select_class_for_ready_turn(
+                staged_output_pending,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+            ),
+            Some(class)
+        );
+        assert_eq!(idle.reservation, cached_reservation);
+    }
+
+    #[test]
     fn status_read_retries_typed_domain_busy_under_the_same_operation() {
         let cancelled = AtomicBool::new(false);
         let operation = OwnerOperation::new(Instant::now() + Duration::from_secs(1), &cancelled);
@@ -1489,7 +1533,7 @@ impl IdleScheduler {
     }
     fn select_class_for_ready_turn(
         &mut self,
-        setup_pending: bool,
+        priority_ingress_pending: bool,
         peer_active: bool,
         peer_cached: bool,
         channel_active: bool,
@@ -1497,7 +1541,7 @@ impl IdleScheduler {
         discovery_allowed: bool,
         channels_enabled: bool,
     ) -> Option<WorkClass> {
-        if setup_pending {
+        if priority_ingress_pending {
             return None;
         }
         self.select_class(
@@ -2144,14 +2188,20 @@ fn run_with_apis_inner(
                             let channel_active = channel.has_active_work();
                             let channel_cached = channel.has_cached_work();
                             let setup_pending = ingress.has_pending_setup();
+                            let staged_output_pending =
+                                ingress.has_staged_output(runtime, Some(&eligibility));
+                            let priority_ingress_pending =
+                                ingress.idle_priority_pending(setup_pending, staged_output_pending);
                             let discovery_allowed = apis.enabled && !setup_pending;
-                            // Cloud retains priority above. While ingress has a
-                            // bounded setup in flight, let its driver advance
-                            // before unrelated retained peer/channel work. Keep
-                            // the idle reservation so ordinary fairness resumes
-                            // if the setup settles or expires.
+                            // Cloud retains priority above. Advance an in-flight
+                            // setup or already-staged finite output before idle
+                            // Peer/Channel work. A message settlement grants
+                            // one global idle turn across all channels, even
+                            // while sibling messages remain staged. Keep the
+                            // reservation; producer-only readiness never blocks
+                            // the gap after a finite message drains.
                             if let Some(class) = idle.select_class_for_ready_turn(
-                                setup_pending,
+                                priority_ingress_pending,
                                 peer_active,
                                 peer_cached,
                                 channel_active,

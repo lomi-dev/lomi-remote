@@ -15,6 +15,23 @@ use std::{
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
 
+fn output_eligibility_is_live(
+    runtime: RuntimeWithOperation<'_, '_>,
+    eligibility: &PeerEligibility,
+    now: Instant,
+) -> bool {
+    let heartbeat = &eligibility.heartbeat;
+    let fresh_until = heartbeat
+        .request_started
+        .checked_add(Duration::from_millis(heartbeat.freshness_ms));
+    let lease_until = heartbeat
+        .request_started
+        .checked_add(Duration::from_millis(heartbeat.lease_ms));
+    runtime.ingress_can_advance()
+        && fresh_until.is_some_and(|until| now < until)
+        && lease_until.is_some_and(|until| now < until)
+}
+
 /// Owns one independent ingress Driver per admitted channel, all sharing the
 /// auth worker's Coordinator and stop signal.
 pub(in crate::unix::auth) struct Registry<'cancel> {
@@ -22,6 +39,7 @@ pub(in crate::unix::auth) struct Registry<'cancel> {
     coordinator: Weak<Coordinator>,
     entries: BTreeMap<ChannelId, Driver<'cancel>>,
     round_robin: VecDeque<ChannelId>,
+    idle_yield_pending: bool,
 }
 
 impl<'cancel> Registry<'cancel> {
@@ -51,7 +69,28 @@ impl<'cancel> Registry<'cancel> {
             coordinator,
             entries: BTreeMap::new(),
             round_robin: VecDeque::new(),
+            idle_yield_pending: false,
         }
+    }
+
+    fn note_staged_message_transition(&mut self, was_staged: bool, is_staged: bool) {
+        if was_staged && !is_staged {
+            self.idle_yield_pending = true;
+        }
+    }
+
+    /// Preserve setup priority; otherwise consume one global idle opportunity
+    /// recorded when any channel's finite staged message settled.
+    pub(in crate::unix::auth) fn idle_priority_pending(
+        &mut self,
+        setup_pending: bool,
+        staged_output_pending: bool,
+    ) -> bool {
+        if setup_pending {
+            return true;
+        }
+        let idle_yield = std::mem::take(&mut self.idle_yield_pending);
+        staged_output_pending && !idle_yield
     }
 
     pub(in crate::unix::auth) fn has_retained_operation(&self) -> bool {
@@ -234,17 +273,21 @@ impl<'cancel> Registry<'cancel> {
             return false;
         };
         let now = Instant::now();
-        let heartbeat = &eligibility.heartbeat;
-        let fresh_until = heartbeat
-            .request_started
-            .checked_add(Duration::from_millis(heartbeat.freshness_ms));
-        let lease_until = heartbeat
-            .request_started
-            .checked_add(Duration::from_millis(heartbeat.lease_ms));
-        runtime.ingress_can_advance()
-            && fresh_until.is_some_and(|until| now < until)
-            && lease_until.is_some_and(|until| now < until)
+        output_eligibility_is_live(runtime, eligibility, now)
             && self.entries.values().any(Driver::has_immediate_output)
+    }
+
+    pub(in crate::unix::auth) fn has_staged_output(
+        &self,
+        runtime: RuntimeWithOperation<'cancel, '_>,
+        eligibility: Option<&PeerEligibility>,
+    ) -> bool {
+        let Some(eligibility) = eligibility else {
+            return false;
+        };
+        let now = Instant::now();
+        output_eligibility_is_live(runtime, eligibility, now)
+            && self.entries.values().any(Driver::has_staged_output)
     }
 
     pub(in crate::unix::auth) fn poll(
@@ -255,8 +298,15 @@ impl<'cancel> Registry<'cancel> {
     ) {
         let channel_ids: Vec<_> = self.round_robin.iter().copied().collect();
         for channel_id in channel_ids {
-            if let Some(driver) = self.entries.get_mut(&channel_id) {
+            let staged_settled = if let Some(driver) = self.entries.get_mut(&channel_id) {
+                let staged_before = driver.has_staged_message();
                 let _ = driver.poll(auth, runtime, eligibility);
+                staged_before && !driver.has_staged_message()
+            } else {
+                false
+            };
+            if staged_settled {
+                self.note_staged_message_transition(true, false);
             }
             self.prune_empty(channel_id);
         }
@@ -314,8 +364,15 @@ impl<'cancel> Registry<'cancel> {
         let Some(channel_id) = due.or_else(|| self.next_round_robin()) else {
             return false;
         };
-        if let Some(driver) = self.entries.get_mut(&channel_id) {
+        let staged_settled = if let Some(driver) = self.entries.get_mut(&channel_id) {
+            let staged_before = driver.has_staged_message();
             let _ = driver.advance_registry_stage(auth, runtime, eligibility);
+            staged_before && !driver.has_staged_message()
+        } else {
+            false
+        };
+        if staged_settled {
+            self.note_staged_message_transition(true, false);
         }
         self.prune_empty(channel_id);
         self.sync_started_git_terminal_continuation();
@@ -330,6 +387,7 @@ impl<'cancel> Registry<'cancel> {
         }
         self.entries.clear();
         self.round_robin.clear();
+        self.idle_yield_pending = false;
         if let Some(coordinator) = self.coordinator.upgrade() {
             let _ = coordinator.set_started_git_terminal_continuation(None);
         }
@@ -418,6 +476,7 @@ fn earliest_peer_refresh(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::{IdleScheduler, WorkClass};
     use super::*;
 
     #[test]
@@ -491,5 +550,80 @@ mod tests {
             Some(first)
         );
         assert_eq!(earliest_peer_refresh(&round_robin, |_| None), None);
+    }
+
+    #[test]
+    fn sibling_message_completions_grant_global_idle_yields() {
+        let cancelled = AtomicBool::new(false);
+        let mut registry = Registry::with_coordinator(&cancelled, Weak::new());
+        let mut idle = IdleScheduler::default();
+        let reserved_class = idle
+            .select_class_for_ready_turn(false, false, false, false, true, false, true)
+            .expect("cached Channel reservation");
+        assert_eq!(reserved_class, WorkClass::Channel);
+        assert!(!idle.after_step(reserved_class, false, true, false));
+        let retained_reservation = idle.reservation;
+        let mut staged = [true, false, true];
+        let events = [
+            (0, false), // Flush A
+            (1, true),  // Stage B
+            (2, false), // Flush C
+            (0, true),  // Stage A
+            (1, false), // Flush B
+            (2, true),  // Stage C
+            (0, false), // Flush A
+            (1, true),  // Stage B
+            (2, false), // Flush C
+            (0, true),  // Stage A
+            (1, false), // Flush B
+            (2, true),  // Stage C
+        ];
+        let mut idle_turns = 0;
+
+        for (channel, is_staged_after) in events {
+            let any_staged = staged.iter().any(|is_staged| *is_staged);
+            let priority_ingress_pending = registry.idle_priority_pending(false, any_staged);
+            let reservation_before = idle.reservation;
+            let selected = idle.select_class_for_ready_turn(
+                priority_ingress_pending,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+            );
+            if priority_ingress_pending {
+                assert_eq!(selected, None);
+                assert_eq!(idle.reservation, retained_reservation);
+                assert_eq!(idle.reservation, reservation_before);
+            } else {
+                let class = selected.expect("one idle opportunity after message completion");
+                assert_eq!(class, reserved_class);
+                idle_turns += 1;
+                assert!(!idle.after_step(class, false, true, false));
+                assert_eq!(idle.reservation, retained_reservation);
+            }
+
+            let was_staged = staged[channel];
+            assert_ne!(was_staged, is_staged_after);
+            staged[channel] = is_staged_after;
+            registry.note_staged_message_transition(was_staged, is_staged_after);
+        }
+
+        assert_eq!(idle_turns, 6);
+        assert_eq!(staged, [true, false, true]);
+        assert_eq!(idle.reservation, retained_reservation);
+    }
+
+    #[test]
+    fn setup_keeps_global_idle_yield_pending_until_setup_finishes() {
+        let cancelled = AtomicBool::new(false);
+        let mut registry = Registry::with_coordinator(&cancelled, Weak::new());
+        registry.note_staged_message_transition(true, false);
+
+        assert!(registry.idle_priority_pending(true, true));
+        assert!(!registry.idle_priority_pending(false, true));
+        assert!(registry.idle_priority_pending(false, true));
     }
 }

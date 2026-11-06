@@ -698,6 +698,19 @@ impl<'cancel> Driver<'cancel> {
                 .as_ref()
                 .is_some_and(|connection| connection.has_immediate_output())
     }
+    /// True only for a finite response/stream message already staged for send.
+    /// A terminal producer with another event ready is deliberately excluded;
+    /// its next message is created after the scheduler's normal idle opportunity.
+    pub(super) fn has_staged_output(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_some_and(Connection::has_staged_output)
+    }
+    pub(super) fn has_staged_message(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_some_and(Connection::has_staged_message)
+    }
     /// Empty means no candidate, ticket, or live transport. A live transport
     /// can outlast its maintenance operation and must remain in the registry.
     pub(super) fn is_empty(&self) -> bool {
@@ -3085,6 +3098,49 @@ impl<'cancel> Connection<'cancel> {
             .is_some_and(|terminal| terminal.has_immediate_output())
     }
 
+    fn has_staged_output(&self) -> bool {
+        let now = Instant::now();
+        let response_ready = self.response.as_ref().is_some_and(|response| {
+            staged_message_is_live(
+                now,
+                self.peer_cutoff,
+                self.suspended,
+                response.remaining,
+                response.aborted.get(),
+                response
+                    .operation
+                    .cancellation_latch()
+                    .load(Ordering::Acquire),
+                response.operation.deadline(),
+            )
+        });
+        let stream_ready = self.stream.as_ref().is_some_and(|stream| {
+            staged_message_is_live(
+                now,
+                self.peer_cutoff,
+                self.suspended,
+                stream.remaining,
+                stream.aborted.get(),
+                stream
+                    .operation
+                    .cancellation_latch()
+                    .load(Ordering::Acquire),
+                stream.operation.deadline(),
+            )
+        });
+        response_ready || stream_ready
+    }
+
+    fn has_staged_message(&self) -> bool {
+        self.response
+            .as_ref()
+            .is_some_and(|response| response.remaining > 0)
+            || self
+                .stream
+                .as_ref()
+                .is_some_and(|stream| stream.remaining > 0)
+    }
+
     fn turn(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -4400,6 +4456,23 @@ fn peer_refresh_deadline_for(
     (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
 }
 
+fn staged_message_is_live(
+    now: Instant,
+    peer_cutoff: Instant,
+    suspended: bool,
+    remaining: usize,
+    aborted: bool,
+    cancelled: bool,
+    operation_deadline: Instant,
+) -> bool {
+    !suspended
+        && now < peer_cutoff
+        && remaining > 0
+        && !aborted
+        && !cancelled
+        && now < operation_deadline
+}
+
 fn handoff_peer_refresh_deadline(
     handoff: &channel::AdmittedChannelHandoff,
     ticket_expires_at: Option<Instant>,
@@ -4428,6 +4501,84 @@ mod peer_refresh_tests {
         );
         assert_eq!(peer_refresh_deadline_for(false, cutoff, now), None);
         assert_eq!(peer_refresh_deadline_for(true, now, now), None);
+    }
+}
+
+#[cfg(test)]
+mod staged_output_tests {
+    use super::*;
+
+    #[test]
+    fn staged_output_priority_tracks_only_live_queued_message_fragments() {
+        let now = Instant::now();
+        let peer_cutoff = now + Duration::from_secs(5);
+        let operation_deadline = now + Duration::from_secs(10);
+
+        assert!(staged_message_is_live(
+            now,
+            peer_cutoff,
+            false,
+            2,
+            false,
+            false,
+            operation_deadline,
+        ));
+        // After the last fragment, a producer may still have another event
+        // ready, but there is no queued message to hold the idle reservation.
+        assert!(!staged_message_is_live(
+            now,
+            peer_cutoff,
+            false,
+            0,
+            false,
+            false,
+            operation_deadline,
+        ));
+        assert!(!staged_message_is_live(
+            now,
+            peer_cutoff,
+            false,
+            2,
+            true,
+            false,
+            operation_deadline,
+        ));
+        assert!(!staged_message_is_live(
+            now,
+            peer_cutoff,
+            false,
+            2,
+            false,
+            true,
+            operation_deadline,
+        ));
+        assert!(!staged_message_is_live(
+            peer_cutoff,
+            peer_cutoff,
+            false,
+            2,
+            false,
+            false,
+            operation_deadline,
+        ));
+        assert!(!staged_message_is_live(
+            now,
+            peer_cutoff,
+            false,
+            2,
+            false,
+            false,
+            now,
+        ));
+        assert!(!staged_message_is_live(
+            now,
+            peer_cutoff,
+            true,
+            2,
+            false,
+            false,
+            operation_deadline,
+        ));
     }
 }
 
