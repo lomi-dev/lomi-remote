@@ -396,6 +396,18 @@ impl Fixture {
     }
 }
 
+#[cfg(test)]
+pub(super) fn with_established_connections(
+    test: impl FnOnce(RemoteConnectionState, RemoteConnectionState),
+) {
+    with_ready_auth(|auth, config| {
+        let fixture = Fixture::new(auth, config, 30);
+        let first = fixture.established_connection(auth);
+        let second = fixture.established_connection(auth);
+        test(first, second);
+    });
+}
+
 #[test]
 fn pending_noise_refresh_before_expiry_survives_a_late_third_message() {
     with_ready_auth(|auth, config| {

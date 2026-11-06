@@ -1946,6 +1946,40 @@ mod publication_barrier_tests {
         assert!(units.operation().is_same_admission(&identity));
         assert_eq!(units.operation().deadline(), deadline);
     }
+
+    #[test]
+    fn finite_ingress_work_keeps_its_original_deadline_and_cancellation() {
+        let cancelled = AtomicBool::new(false);
+        let expired_deadline = Instant::now() - Duration::from_secs(1);
+        let original = OwnerOperation::new(expired_deadline, &cancelled);
+        let identity = original.retained_identity();
+        let aborted = std::cell::Cell::new(false);
+        let stopping = AtomicBool::new(false);
+        let mut units = WorkerOperationUnits::new(&original, &aborted);
+        units.started = true;
+        let barrier = PublicationBarrier::default();
+
+        assert!(worker_unit_retained(false, false, false, true, &barrier));
+        assert_eq!(units.operation().check(), Err(DomainError::Deadline));
+        assert!(units.operation().is_same_admission(&identity));
+        assert_eq!(units.operation().deadline(), expired_deadline);
+
+        // After the actor's existing expiry cleanup discards ingress, only then
+        // may settlement admit a successor operation.
+        assert!(!worker_unit_retained(false, false, false, false, &barrier));
+        units.admit_after_settlement(&stopping);
+        assert!(!units.operation().is_same_admission(&identity));
+        assert!(units.operation().deadline() > Instant::now());
+
+        let cancelled = AtomicBool::new(false);
+        let cancelled_deadline = Instant::now() + Duration::from_secs(30);
+        let cancelled_operation = OwnerOperation::new(cancelled_deadline, &cancelled);
+        let cancelled_identity = cancelled_operation.retained_identity();
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(cancelled_operation.check(), Err(DomainError::Cancelled));
+        assert!(cancelled_operation.is_same_admission(&cancelled_identity));
+        assert_eq!(cancelled_operation.deadline(), cancelled_deadline);
+    }
 }
 
 // Retain the former publication wait behavior only for its cancellation tests.

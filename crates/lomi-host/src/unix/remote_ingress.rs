@@ -1290,6 +1290,10 @@ impl<'cancel> Connection<'cancel> {
             || self.git_mutation.is_some()
             || !matches!(&self.crypto, Crypto::Established(_))
             || self.peer_refresh_deadline(Instant::now()).is_some()
+            || self
+                .terminal
+                .as_ref()
+                .is_some_and(RemoteTerminalState::has_immediate_output)
     }
 
     fn has_pending_setup(&self) -> bool {

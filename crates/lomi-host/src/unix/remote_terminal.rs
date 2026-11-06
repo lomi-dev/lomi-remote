@@ -1064,3 +1064,89 @@ impl RemoteTerminalState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod finite_emission_retention_tests {
+    use super::*;
+    use lomi_terminal::{SpawnProfile, TerminalService};
+    use std::path::PathBuf;
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+    fn multi_chunk_snapshot_emission_stays_work_until_final_delivery() {
+        auth::remote_connection::with_test_established_connections(|connection, other| {
+            let service = TerminalService::new();
+            let session_id = TerminalSessionId::from_bytes([31; 16]).unwrap();
+            let session_epoch = SessionEpoch::from_bytes([32; 16]).unwrap();
+            let profile = SpawnProfile {
+                executable: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_owned(), "exec /bin/sleep 5".to_owned()],
+                cwd: std::env::current_dir().unwrap(),
+                environment: Vec::new(),
+                shell_integration: None,
+                rows: 24,
+                cols: 80,
+                history: 0,
+            };
+            service.spawn(session_id, session_epoch, &profile).unwrap();
+
+            let mut terminal = RemoteTerminalState::new(Weak::new(), &connection).unwrap();
+            let attachment = service
+                .attach(session_id, session_epoch, &terminal.principal)
+                .unwrap();
+
+            let context = TerminalContext {
+                workspace: WorkspaceContext {
+                    workspace_id: WorkspaceId::from_bytes([33; 16]).unwrap(),
+                    workspace_epoch: WorkspaceEpoch::from_bytes([34; 16]).unwrap(),
+                    runtime_id: RuntimeId::from_bytes([35; 16]).unwrap(),
+                    runtime_generation: DecimalU64(1),
+                    host_access_epoch: DecimalU64(1),
+                    grant_revision: DecimalU64(1),
+                },
+                pane_id: PaneId::from_bytes([36; 16]).unwrap(),
+                session_id,
+                session_epoch,
+                profile: TerminalProfile::ExperimentalRustGridV1,
+            };
+            let metadata = terminal.register(context.clone(), attachment).unwrap();
+            assert!(metadata.chunk_count.0 > 1);
+            assert!(terminal.has_immediate_output());
+
+            let subscription = String::from(metadata.subscription_id);
+            let mut chunks = 0;
+            loop {
+                let frame = terminal.emit(&subscription).unwrap();
+                let complete = matches!(frame.frame(), TerminalStreamFrame::SnapshotComplete(_));
+                assert!(matches!(
+                    frame.frame(),
+                    TerminalStreamFrame::SnapshotChunk(_)
+                        | TerminalStreamFrame::SnapshotComplete(_)
+                ));
+                terminal.complete_delivery(&connection, frame).unwrap();
+                chunks += 1;
+                assert_eq!(terminal.has_immediate_output(), !complete);
+                if complete {
+                    break;
+                }
+            }
+            assert!(chunks >= 2);
+            // The idle subscription remains registered, but no longer retains work.
+            assert!(!terminal.has_immediate_output());
+
+            let mut other_terminal = RemoteTerminalState::new(Weak::new(), &other).unwrap();
+            let other_attachment = service
+                .attach(session_id, session_epoch, &other_terminal.principal)
+                .unwrap();
+            let other_metadata = other_terminal.register(context, other_attachment).unwrap();
+            let other_subscription = String::from(other_metadata.subscription_id);
+            let frame = other_terminal.emit(&other_subscription).unwrap();
+            assert!(
+                other_terminal
+                    .complete_delivery(&connection, frame)
+                    .is_err()
+            );
+            assert!(other_terminal.has_immediate_output());
+        });
+    }
+}

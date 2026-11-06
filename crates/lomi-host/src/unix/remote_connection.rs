@@ -2352,3 +2352,10 @@ impl SealedRemoteGitStartedReceipt<'_, '_> {
 #[cfg(test)]
 #[path = "remote_connection_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::unix) fn with_test_established_connections(
+    test: impl FnOnce(RemoteConnectionState, RemoteConnectionState),
+) {
+    tests::with_established_connections(test);
+}
