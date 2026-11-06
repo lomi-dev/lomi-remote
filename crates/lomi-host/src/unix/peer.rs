@@ -1903,7 +1903,8 @@ pub(super) fn refresh_established_started_git_pairing(
     {
         shared_owner::CloudPublicationFenceObservation::Clear => {}
         shared_owner::CloudPublicationFenceObservation::Defer => return Ok(None),
-        shared_owner::CloudPublicationFenceObservation::CloseIngress => {
+        shared_owner::CloudPublicationFenceObservation::CloseIngress
+        | shared_owner::CloudPublicationFenceObservation::PauseIngress(_) => {
             return Err(StepError::Stale);
         }
     }
@@ -1992,7 +1993,8 @@ pub(super) fn refresh_established_started_git_pairing(
     {
         shared_owner::CloudPublicationFenceObservation::Clear => {}
         shared_owner::CloudPublicationFenceObservation::Defer => return Ok(None),
-        shared_owner::CloudPublicationFenceObservation::CloseIngress => {
+        shared_owner::CloudPublicationFenceObservation::CloseIngress
+        | shared_owner::CloudPublicationFenceObservation::PauseIngress(_) => {
             return Err(StepError::Stale);
         }
     }

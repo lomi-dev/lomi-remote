@@ -1658,6 +1658,296 @@ impl IdleScheduler {
 fn cloud_step_requests_immediate_pass(outcome: &Result<cloud::StepOutcome, StepError>) -> bool {
     matches!(outcome, Ok(cloud::StepOutcome::Network))
 }
+
+#[derive(Default)]
+enum PublicationBarrier {
+    #[default]
+    Open,
+    Publishing(lomi_host_store::CloudRuntimeScope),
+    Revalidating(lomi_host_store::CloudRuntimeScope),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationBarrierObservation {
+    Close,
+    Suspend,
+    Continue,
+    Defer,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloudOutcomeKind {
+    Network,
+    Deferred,
+    PeerEligible,
+}
+impl PublicationBarrier {
+    fn is_active(&self) -> bool {
+        !matches!(self, Self::Open)
+    }
+    fn expected_scope(&self) -> Option<&lomi_host_store::CloudRuntimeScope> {
+        match self {
+            Self::Open => None,
+            Self::Publishing(scope) | Self::Revalidating(scope) => Some(scope),
+        }
+    }
+    fn is_publishing(&self) -> bool {
+        matches!(self, Self::Publishing(_))
+    }
+    fn is_revalidating(&self) -> bool {
+        matches!(self, Self::Revalidating(_))
+    }
+    fn pause(&mut self, scope: lomi_host_store::CloudRuntimeScope) -> bool {
+        if self
+            .expected_scope()
+            .is_some_and(|expected| expected != &scope)
+        {
+            return false;
+        }
+        *self = Self::Publishing(scope);
+        true
+    }
+    fn begin_revalidation(&mut self) -> bool {
+        let Self::Publishing(scope) = self else {
+            return false;
+        };
+        *self = Self::Revalidating(scope.clone());
+        true
+    }
+    fn reset(&mut self) {
+        *self = Self::Open;
+    }
+    fn retains_operation(&self) -> bool {
+        self.is_active()
+    }
+    fn observe(
+        &mut self,
+        observation: super::shared_owner::CloudPublicationFenceObservation,
+        cloud: &mut cloud::Worker,
+    ) -> PublicationBarrierObservation {
+        use super::shared_owner::CloudPublicationFenceObservation as Observation;
+        match observation {
+            Observation::CloseIngress => {
+                self.reset();
+                PublicationBarrierObservation::Close
+            }
+            Observation::PauseIngress(scope) => {
+                if self.pause(scope) {
+                    PublicationBarrierObservation::Suspend
+                } else {
+                    self.reset();
+                    PublicationBarrierObservation::Close
+                }
+            }
+            Observation::Clear => {
+                if self.is_publishing()
+                    && !self
+                        .expected_scope()
+                        .is_some_and(|scope| cloud.require_fresh_runtime_read(scope))
+                {
+                    self.reset();
+                    return PublicationBarrierObservation::Close;
+                }
+                if self.is_publishing() && !self.begin_revalidation() {
+                    self.reset();
+                    return PublicationBarrierObservation::Close;
+                }
+                if self.is_active() {
+                    PublicationBarrierObservation::Suspend
+                } else {
+                    PublicationBarrierObservation::Continue
+                }
+            }
+            Observation::Defer => PublicationBarrierObservation::Defer,
+        }
+    }
+    fn release_ingress_for(&mut self, outcome: CloudOutcomeKind) -> bool {
+        if self.is_active() && outcome == CloudOutcomeKind::PeerEligible && self.is_revalidating() {
+            self.reset();
+        }
+        self.allows_ingress_io()
+    }
+    fn allows_ingress_io(&self) -> bool {
+        !self.is_active()
+    }
+}
+
+fn worker_unit_retained(
+    cloud: bool,
+    peer: bool,
+    channel: bool,
+    ingress: bool,
+    publication_barrier: &PublicationBarrier,
+) -> bool {
+    cloud || peer || channel || ingress || publication_barrier.retains_operation()
+}
+
+#[cfg(test)]
+mod publication_barrier_tests {
+    use super::*;
+    use lomi_remote_protocol::{HostId, RuntimeId};
+    use std::sync::atomic::AtomicBool;
+
+    fn make_scope(generation: u64) -> lomi_host_store::CloudRuntimeScope {
+        lomi_host_store::CloudRuntimeScope {
+            authorization_generation: generation,
+            remote_api_origin: "https://remote.example".to_owned(),
+            host_id: HostId::from_bytes([1; 16]).unwrap(),
+            owner_runtime_id: RuntimeId::from_bytes([2; 16]).unwrap(),
+            owner_generation: 3,
+        }
+    }
+
+    #[test]
+    fn production_gate_suspends_every_outcome_until_fresh_revalidation() {
+        let scope = make_scope(7);
+        let mut barrier = PublicationBarrier::default();
+        let mut cloud = cloud::Worker::default();
+
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    scope.clone()
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert!(barrier.retains_operation());
+        assert!(!barrier.allows_ingress_io());
+        for outcome in [
+            CloudOutcomeKind::Network,
+            CloudOutcomeKind::Deferred,
+            CloudOutcomeKind::PeerEligible,
+        ] {
+            assert!(!barrier.release_ingress_for(outcome));
+        }
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::Defer,
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Defer
+        );
+        assert!(barrier.is_publishing());
+        assert!(!barrier.allows_ingress_io());
+
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::Clear,
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert!(barrier.is_revalidating());
+        assert!(cloud.fresh_runtime_read_is_retained_get());
+        // Simulated Network outcomes test the production gate only; no HTTP is run here.
+        assert!(!barrier.release_ingress_for(CloudOutcomeKind::Network));
+        assert!(!barrier.release_ingress_for(CloudOutcomeKind::Network));
+        assert!(!barrier.release_ingress_for(CloudOutcomeKind::Deferred));
+        assert!(barrier.release_ingress_for(CloudOutcomeKind::PeerEligible));
+        assert!(!barrier.is_active());
+        assert!(barrier.allows_ingress_io());
+    }
+
+    #[test]
+    fn new_debt_reuses_the_pinned_scope_and_restarts_revalidation() {
+        let scope = make_scope(7);
+        let mut barrier = PublicationBarrier::default();
+        let mut cloud = cloud::Worker::default();
+
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    scope.clone()
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::Clear,
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    scope.clone()
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert!(!barrier.release_ingress_for(CloudOutcomeKind::PeerEligible));
+        assert!(barrier.is_publishing());
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    make_scope(8)
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Close
+        );
+        assert!(!barrier.is_active());
+
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    scope.clone()
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert!(barrier.is_publishing());
+        assert!(!barrier.release_ingress_for(CloudOutcomeKind::PeerEligible));
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::Clear,
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        assert!(barrier.is_revalidating());
+        assert!(cloud.fresh_runtime_read_is_retained_get());
+        assert_eq!(barrier.expected_scope(), Some(&scope));
+    }
+
+    #[test]
+    fn publication_barrier_retains_original_operation_and_deadline() {
+        let cancelled = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let original = OwnerOperation::new(deadline, &cancelled);
+        let identity = original.retained_identity();
+        let aborted = std::cell::Cell::new(false);
+        let stopping = AtomicBool::new(false);
+        let mut units = WorkerOperationUnits::new(&original, &aborted);
+        units.started = true;
+        let mut barrier = PublicationBarrier::default();
+        let mut cloud = cloud::Worker::default();
+
+        assert_eq!(
+            barrier.observe(
+                super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                    make_scope(7)
+                ),
+                &mut cloud,
+            ),
+            PublicationBarrierObservation::Suspend
+        );
+        let retained = worker_unit_retained(false, false, false, false, &barrier);
+        if units.started && !retained {
+            units.admit_after_settlement(&stopping);
+        }
+
+        assert!(retained);
+        assert!(units.operation().is_same_admission(&identity));
+        assert_eq!(units.operation().deadline(), deadline);
+    }
+}
+
 // Retain the former publication wait behavior only for its cancellation tests.
 // Production publication scheduling is owned by the Cloud worker.
 
@@ -1754,6 +2044,7 @@ fn run_with_apis_inner(
     };
     let mut verified_generation = None;
     let mut cloud = cloud::Worker::default();
+    let mut publication_barrier = PublicationBarrier::default();
     let mut peer = peer::Worker::default();
     let mut channel = channel::Worker::default();
     let mut idle = IdleScheduler::default();
@@ -1761,10 +2052,13 @@ fn run_with_apis_inner(
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
-        let retained = cloud.has_retained_operation()
-            || peer.has_retained_operation()
-            || channel.has_retained_operation()
-            || ingress.has_retained_operation();
+        let retained = worker_unit_retained(
+            cloud.has_retained_operation(),
+            peer.has_retained_operation(),
+            channel.has_retained_operation(),
+            ingress.has_retained_operation(),
+            &publication_barrier,
+        );
         if units.started && !retained {
             cloud.finish_operation();
             idle.reset_reservation();
@@ -1782,6 +2076,7 @@ fn run_with_apis_inner(
             Ok(Command::Logout | Command::Configure) | Err(_) => {}
         }
         if stopping.load(Ordering::Acquire) {
+            publication_barrier.reset();
             if ingress.has_active_git_writer() {
                 ingress.cancel_started_git();
                 let _ = ingress.advance_started_git(auth, runtime);
@@ -1790,6 +2085,7 @@ fn run_with_apis_inner(
             break;
         }
         if paused.load(Ordering::Acquire) {
+            publication_barrier.reset();
             if ingress.has_active_git_writer() {
                 ingress.cancel_started_git();
                 let _ = ingress.advance_started_git(auth, runtime);
@@ -1821,6 +2117,7 @@ fn run_with_apis_inner(
             peer.discard_retained_operation();
             channel.discard_retained_operation();
             idle.reset_reservation();
+            publication_barrier.reset();
             ingress.discard();
             gate.store(true, Ordering::Release);
             continue;
@@ -1831,6 +2128,7 @@ fn run_with_apis_inner(
                 immediate_ingress_pass = ingress.advance_started_git(auth, runtime);
                 continue;
             }
+            publication_barrier.reset();
             return;
         }
         // Retained effect scopes have their OWN fixed clock checkpoints. A
@@ -1868,6 +2166,7 @@ fn run_with_apis_inner(
                 peer.discard_retained_operation();
                 channel.discard_retained_operation();
                 idle.reset_reservation();
+                publication_barrier.reset();
                 ingress.discard();
                 gate.store(true, Ordering::Release);
                 continue;
@@ -1875,12 +2174,21 @@ fn run_with_apis_inner(
             if let Ok(mut turn) = owner.begin_seal_authorization(operation) {
                 let _ = commit_worker_turn!(turn, runtime);
             }
+            publication_barrier.reset();
             set_failed(state, LocalAuthStorage::Unavailable, gate);
             return;
         };
         let fence = snapshot.authorization;
         let intent = snapshot.intent;
         let deferred_intent = snapshot.deferred_intent;
+        if publication_barrier.is_active() && fence.pending_cloud_revoke {
+            publication_barrier.reset();
+            ingress.discard();
+        }
+        if publication_barrier.is_active() && auth.status() != Status::Ready {
+            publication_barrier.reset();
+            ingress.discard();
+        }
         if ingress.has_active_git_writer() {
             let Some(continuation) = ingress.started_git_continuation() else {
                 ingress.cancel_started_git();
@@ -1917,6 +2225,7 @@ fn run_with_apis_inner(
                 peer.discard_retained_operation();
                 channel.discard_retained_operation();
                 idle.reset_reservation();
+                publication_barrier.reset();
                 ingress.discard();
             }
             verified_generation = Some(fence.generation);
@@ -1930,6 +2239,7 @@ fn run_with_apis_inner(
             peer.discard_retained_operation();
             channel.discard_retained_operation();
             idle.reset_reservation();
+            publication_barrier.reset();
             ingress.discard();
             gate.store(true, Ordering::Release);
             let outcome = owner
@@ -1994,6 +2304,7 @@ fn run_with_apis_inner(
         let result: Result<bool, StepError> = (|| {
             runtime.check()?;
             if fence.pending_cloud_revoke {
+                publication_barrier.reset();
                 ingress.discard();
                 channel.discard_retained_operation();
                 idle.reset_reservation();
@@ -2103,35 +2414,46 @@ fn run_with_apis_inner(
                         || gate.load(Ordering::Acquire)
                         || auth.credential_deadlines()?.refresh_at <= now
                     {
+                        publication_barrier.reset();
                         ingress.discard();
                     } else {
-                        // Preparation never pauses normal cloud/peer/channel
-                        // priority. A later writer may stale this candidate;
-                        // the next poll discards it without renewing provenance.
-                        let expected_scope = cloud
-                            .cached_eligibility()
-                            .map(|eligibility| &eligibility.binding.scope);
+                        let expected_scope = publication_barrier.expected_scope().or_else(|| {
+                            cloud
+                                .cached_eligibility()
+                                .map(|eligibility| &eligibility.binding.scope)
+                        });
                         let observation = runtime.owner.cloud_publication_fence_observation(
                             runtime.operation,
                             fence.generation,
                             expected_scope,
                         )?;
-                        match observation {
-                            super::shared_owner::CloudPublicationFenceObservation::CloseIngress => {
-                                // A durable publication intent or a proven
-                                // binding invalidation fences every live remote
-                                // connection. A clear observation grants no
-                                // eligibility; ordinary request gates remain
-                                // authoritative below.
+                        let observation = if ingress.has_active_git_writer() {
+                            match observation {
+                                super::shared_owner::CloudPublicationFenceObservation::PauseIngress(
+                                    _,
+                                ) => super::shared_owner::CloudPublicationFenceObservation::CloseIngress,
+                                other => other,
+                            }
+                        } else {
+                            observation
+                        };
+                        match publication_barrier.observe(observation, &mut cloud) {
+                            PublicationBarrierObservation::Close => {
                                 ingress.discard();
                             }
-                            super::shared_owner::CloudPublicationFenceObservation::Clear => {
+                            PublicationBarrierObservation::Suspend => {
+                                ingress.poll(auth, runtime, None);
+                            }
+                            PublicationBarrierObservation::Continue => {
                                 ingress.poll(auth, runtime, cloud.cached_eligibility());
                             }
-                            super::shared_owner::CloudPublicationFenceObservation::Defer => {
+                            PublicationBarrierObservation::Defer => {
                                 // Store contention is a bounded pause. In
                                 // particular, do not run Cloud's strict Domain
                                 // observer while an ingress writer owns it.
+                                if publication_barrier.is_active() {
+                                    ingress.poll(auth, runtime, None);
+                                }
                                 return Ok(false);
                             }
                         }
@@ -2175,13 +2497,51 @@ fn run_with_apis_inner(
                         let cloud_result = cloud.step(auth, config, runtime, fence.generation);
                         requested_immediate_ingress_pass |=
                             cloud_step_requests_immediate_pass(&cloud_result);
-                        let outcome = cloud_result?;
+                        let outcome = match cloud_result {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                if publication_barrier.is_active() && cloud.is_blocked() {
+                                    publication_barrier.reset();
+                                    ingress.discard();
+                                }
+                                return Err(error);
+                            }
+                        };
+                        if cloud.take_rejected_fresh_runtime_read() {
+                            publication_barrier.reset();
+                            ingress.discard();
+                            return Ok(false);
+                        }
+                        let outcome_kind = match &outcome {
+                            cloud::StepOutcome::Network => CloudOutcomeKind::Network,
+                            cloud::StepOutcome::Deferred => CloudOutcomeKind::Deferred,
+                            cloud::StepOutcome::PeerEligible(_) => CloudOutcomeKind::PeerEligible,
+                        };
+                        if !publication_barrier.release_ingress_for(outcome_kind) {
+                            match outcome {
+                                cloud::StepOutcome::Network => {
+                                    debug_assert!(requested_immediate_ingress_pass);
+                                    return Ok(true);
+                                }
+                                cloud::StepOutcome::Deferred => {
+                                    if cloud.is_blocked() {
+                                        publication_barrier.reset();
+                                        ingress.discard();
+                                    }
+                                    return Ok(false);
+                                }
+                                cloud::StepOutcome::PeerEligible(_) => return Ok(false),
+                            }
+                        }
                         // A network step may replace the heartbeat before its
                         // cached eligibility is revalidated on the next pass.
-                        if matches!(&outcome, cloud::StepOutcome::Network) {
-                            debug_assert!(requested_immediate_ingress_pass);
-                            return Ok(true);
-                        }
+                        let outcome = match outcome {
+                            cloud::StepOutcome::Network => {
+                                debug_assert!(requested_immediate_ingress_pass);
+                                return Ok(true);
+                            }
+                            outcome => outcome,
+                        };
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
                             let peer_active = peer.has_active_work();
                             let peer_cached = peer.has_cached_work();
@@ -2276,8 +2636,10 @@ fn run_with_apis_inner(
                     }
                     // Heartbeat/refresh/configuration work above keeps priority.
                     // The driver owns only socket/crypto/codecs and request state.
-                    requested_immediate_ingress_pass |=
-                        ingress.advance(auth, runtime, cloud.cached_eligibility());
+                    if publication_barrier.allows_ingress_io() {
+                        requested_immediate_ingress_pass |=
+                            ingress.advance(auth, runtime, cloud.cached_eligibility());
+                    }
                 }
                 Status::Rotating => {
                     ingress.discard();
@@ -2306,6 +2668,10 @@ fn run_with_apis_inner(
                 network(state, LocalAuthNetwork::Available);
             }
             Err(error) if global_credential_auth_required(&error) => {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 immediate_ingress_pass = false;
                 // A failure during logout is never a revoke acknowledgement and
                 // must preserve the exact logout generation/recovery material.
@@ -2385,6 +2751,10 @@ fn run_with_apis_inner(
                 ))
                 | StepError::Rejected,
             ) => {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 immediate_ingress_pass = false;
                 // Workspace/contract rejection keeps the existing generic
                 // fence semantics; it is not credential-specific proof.
@@ -2412,6 +2782,10 @@ fn run_with_apis_inner(
                 network(state, LocalAuthNetwork::Unavailable);
             }
             Err(StepError::ExpiredEnrollment) => {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 let now = match trusted_now(runtime) {
                     Ok(now) => now,
                     Err(StepError::Stale) => continue,
@@ -2481,6 +2855,10 @@ fn run_with_apis_inner(
             Err(StepError::ExpiredRotation)
                 if fence.pending_cloud_revoke && auth.status() == Status::Rotating =>
             {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 network(state, LocalAuthNetwork::Unavailable);
                 let Some(selected_configuration) = selected_configuration else {
                     set_failed(state, LocalAuthStorage::Unavailable, gate);
@@ -2507,6 +2885,10 @@ fn run_with_apis_inner(
                     && auth.status() == Status::Rotating
                     && selected_configuration.is_some() =>
             {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 let selected_configuration = selected_configuration.expect("guard checked config");
                 gate.store(true, Ordering::Release);
                 let outcome = owner
@@ -2533,6 +2915,10 @@ fn run_with_apis_inner(
                 }
             }
             Err(StepError::ExpiredRotation) => {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 suspend(runtime);
                 auth_failed(state, lomi_host_auth::Error::Expired, gate);
                 return;
@@ -2563,6 +2949,10 @@ fn run_with_apis_inner(
                 }
             }
             Err(StepError::Auth(error)) => {
+                if publication_barrier.is_active() {
+                    publication_barrier.reset();
+                    ingress.discard();
+                }
                 suspend(runtime);
                 auth_failed(state, error, gate);
                 return;

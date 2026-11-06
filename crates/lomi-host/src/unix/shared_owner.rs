@@ -5032,7 +5032,27 @@ pub(super) struct CloudWorkerSnapshot {
 pub(super) enum CloudPublicationFenceObservation {
     Clear,
     CloseIngress,
+    PauseIngress(lomi_host_store::CloudRuntimeScope),
     Defer,
+}
+
+fn cloud_publication_fence_outcome(
+    scope: &lomi_host_store::CloudRuntimeScope,
+    binding: &lomi_host_store::CloudRuntimeState,
+    acknowledged: Option<&lomi_host_store::HostAcknowledgedPublication>,
+    local_publication_debt: bool,
+    workspace_revocation_pending: bool,
+) -> CloudPublicationFenceObservation {
+    if binding.acknowledged_publication_seq.0 == 0
+        || acknowledged.is_none_or(|publication| &publication.state != binding)
+        || workspace_revocation_pending
+    {
+        CloudPublicationFenceObservation::CloseIngress
+    } else if local_publication_debt {
+        CloudPublicationFenceObservation::PauseIngress(scope.clone())
+    } else {
+        CloudPublicationFenceObservation::Clear
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -5194,19 +5214,45 @@ impl SharedOwner {
             }
             Err(error) => return Err(Error::UncertainStore(error)),
         };
-        let needs_publication = binding.acknowledged_publication_seq.0 == 0
-            || acknowledged.is_none()
-            || acknowledged
-                .as_ref()
-                .is_some_and(|publication| publication.state != binding)
-            || pending_host_publication.is_some()
-            || !pending_publications.is_empty();
-        operation.check().map_err(Error::Domain)?;
-        Ok(if needs_publication {
-            CloudPublicationFenceObservation::CloseIngress
+        let acknowledged_workspace_epoch_changed = if let Some(acknowledged) = &acknowledged {
+            let projects = match store.list_projects() {
+                Ok(projects) => projects,
+                Err(StoreError::Busy) => {
+                    operation.check().map_err(Error::Domain)?;
+                    return Ok(CloudPublicationFenceObservation::Defer);
+                }
+                Err(error) => return Err(Error::UncertainStore(error)),
+            };
+            acknowledged.workspaces.as_slice().iter().any(|published| {
+                !projects.iter().any(|project| {
+                    project.consent
+                        && project.state.context.workspace_id == published.workspace_id
+                        && project.state.context.workspace_epoch == published.workspace_epoch
+                })
+            })
         } else {
-            CloudPublicationFenceObservation::Clear
-        })
+            false
+        };
+        let local_publication_debt =
+            pending_host_publication.is_some() || !pending_publications.is_empty();
+        let workspace_revocation_pending = pending_publications
+            .iter()
+            .any(|publication| !publication.enabled)
+            || acknowledged_workspace_epoch_changed
+            || pending_host_publication.as_ref().is_some_and(|intent| {
+                intent
+                    .workspace_publications
+                    .iter()
+                    .any(|publication| !publication.enabled)
+            });
+        operation.check().map_err(Error::Domain)?;
+        Ok(cloud_publication_fence_outcome(
+            &scope,
+            &binding,
+            acknowledged.as_ref(),
+            local_publication_debt,
+            workspace_revocation_pending,
+        ))
     }
 
     /// Same negative-only publication observation, bound to the exact active
@@ -5226,7 +5272,12 @@ impl SharedOwner {
         if !continuation.is_current(operation) {
             return Ok(CloudPublicationFenceObservation::CloseIngress);
         }
-        Ok(observation)
+        Ok(match observation {
+            CloudPublicationFenceObservation::PauseIngress(_) => {
+                CloudPublicationFenceObservation::CloseIngress
+            }
+            other => other,
+        })
     }
 
     /// Recheck only the locally acknowledged source grant for an already
@@ -11328,5 +11379,286 @@ mod peer_eligibility_tests {
     fn peer_time_respects_the_authorization_clock_floor() {
         assert_eq!(peer_time_at(10, 10), Ok(10));
         assert_eq!(peer_time_at(9, 10), Err(StoreError::Fenced));
+    }
+}
+
+#[cfg(test)]
+mod cloud_publication_fence_tests {
+    use super::*;
+    use lomi_host_store::{
+        AuthorizationFenceReason, CloudRuntimeScope, CloudRuntimeState,
+        HostAcknowledgedPublication, HostStore, Limits,
+    };
+    use lomi_remote_protocol::{
+        DecimalU64, HostId, RuntimeId,
+        http::{PublicationResult, PublicationWorkspaces, RuntimeBinding},
+        ipc::{
+            LocalAuthConfiguration, LocalAuthOrigin, LocalAuthProvider, LocalFileAcknowledgement,
+        },
+    };
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::AtomicBool,
+        time::{Duration, Instant},
+    };
+
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "lomi-publication-fence-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(path)
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Debt {
+        Clear,
+        HostPublication,
+        EnabledWorkspaceOutbox,
+        Unshare,
+        FrozenUnshareAfterReshare,
+        UnshareReshareWithoutCapturedIntent,
+        Revoke,
+    }
+
+    fn fixture(
+        debt: Debt,
+    ) -> (
+        TestDirectory,
+        std::sync::Arc<SharedOwner>,
+        CloudRuntimeScope,
+    ) {
+        let directory = TestDirectory::new();
+        let mut store =
+            HostStore::open(&directory.0.join("host.sqlite3"), Limits::default()).unwrap();
+        let remote_origin: LocalAuthOrigin =
+            "https://remote.example".to_owned().try_into().unwrap();
+        let configuration = LocalAuthConfiguration {
+            version: 1,
+            origin: "https://identity.example".to_owned().try_into().unwrap(),
+            remote_api_origin: Some(remote_origin.clone()),
+            relay_endpoint: None,
+            client_id: "host".to_owned().try_into().unwrap(),
+            provider: LocalAuthProvider::ProtectedFile,
+            keychain_path: None,
+            protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
+        };
+        store.configure_auth(&configuration).unwrap();
+        store.enable_authorization(0).unwrap();
+
+        let workspace_root = directory.0.join("workspace");
+        fs::create_dir(&workspace_root).unwrap();
+        let project = store
+            .add_project(
+                &workspace_root,
+                "publication test".to_owned().try_into().unwrap(),
+            )
+            .unwrap();
+        store
+            .share(project.state.context.workspace_id, project.fence)
+            .unwrap();
+        let project = store.workspace(project.state.context.workspace_id).unwrap();
+        let scope = store
+            .cloud_runtime_scope(0, remote_origin.as_str().to_owned())
+            .unwrap();
+        let runtime = RuntimeBinding {
+            runtime_id: store.runtime_id(),
+            runtime_generation: project.state.context.runtime_generation,
+            host_access_epoch: DecimalU64(12),
+        };
+        let binding = store
+            .compare_and_set_cloud_runtime(&scope, None, runtime.clone(), DecimalU64(0))
+            .unwrap();
+        let intent = store.prepare_host_publication(&binding).unwrap();
+        let binding = store
+            .acknowledge_host_publication(
+                &intent,
+                &PublicationResult {
+                    runtime,
+                    publication_seq: intent.params.publication_seq,
+                },
+            )
+            .unwrap();
+
+        match debt {
+            Debt::Clear => {}
+            Debt::HostPublication => {
+                store.prepare_host_publication(&binding).unwrap();
+            }
+            Debt::EnabledWorkspaceOutbox => {
+                let second_root = directory.0.join("workspace-two");
+                fs::create_dir(&second_root).unwrap();
+                let second = store
+                    .add_project(
+                        &second_root,
+                        "second workspace".to_owned().try_into().unwrap(),
+                    )
+                    .unwrap();
+                store
+                    .share(second.state.context.workspace_id, second.fence)
+                    .unwrap();
+            }
+            Debt::Unshare => {
+                store.unshare(project.state.context.workspace_id).unwrap();
+            }
+            Debt::FrozenUnshareAfterReshare => {
+                store.unshare(project.state.context.workspace_id).unwrap();
+                store.prepare_host_publication(&binding).unwrap();
+                let project = store.workspace(project.state.context.workspace_id).unwrap();
+                store
+                    .share(project.state.context.workspace_id, project.fence)
+                    .unwrap();
+            }
+            Debt::UnshareReshareWithoutCapturedIntent => {
+                store.unshare(project.state.context.workspace_id).unwrap();
+                let project = store.workspace(project.state.context.workspace_id).unwrap();
+                store
+                    .share(project.state.context.workspace_id, project.fence)
+                    .unwrap();
+            }
+            Debt::Revoke => {
+                store
+                    .fence_authorization(AuthorizationFenceReason::LocalLogout)
+                    .unwrap();
+            }
+        }
+
+        (directory, SharedOwner::new(store).unwrap(), scope)
+    }
+
+    fn observe(
+        owner: &SharedOwner,
+        generation: u64,
+        scope: Option<&CloudRuntimeScope>,
+    ) -> CloudPublicationFenceObservation {
+        let cancelled = AtomicBool::new(false);
+        let operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        owner
+            .cloud_publication_fence_observation(&operation, generation, scope)
+            .unwrap()
+    }
+
+    fn current_publication() -> (
+        CloudRuntimeScope,
+        CloudRuntimeState,
+        HostAcknowledgedPublication,
+    ) {
+        let scope = CloudRuntimeScope {
+            authorization_generation: 3,
+            remote_api_origin: "https://remote.example".to_owned(),
+            host_id: HostId::from_bytes([1; 16]).unwrap(),
+            owner_runtime_id: RuntimeId::from_bytes([6; 16]).unwrap(),
+            owner_generation: 7,
+        };
+        let binding = CloudRuntimeState {
+            scope: scope.clone(),
+            server_runtime: lomi_remote_protocol::http::RuntimeBinding {
+                runtime_id: RuntimeId::from_bytes([2; 16]).unwrap(),
+                runtime_generation: DecimalU64(4),
+                host_access_epoch: DecimalU64(5),
+            },
+            acknowledged_publication_seq: DecimalU64(8),
+        };
+        let acknowledged = HostAcknowledgedPublication {
+            state: binding.clone(),
+            workspaces: PublicationWorkspaces::try_from(Vec::new()).unwrap(),
+        };
+        (scope, binding, acknowledged)
+    }
+
+    #[test]
+    fn only_exact_acknowledged_runtime_state_can_pause_for_local_debt() {
+        let (scope, binding, acknowledged) = current_publication();
+        assert!(matches!(
+            cloud_publication_fence_outcome(&scope, &binding, Some(&acknowledged), false, false),
+            CloudPublicationFenceObservation::Clear
+        ));
+        assert!(matches!(
+            cloud_publication_fence_outcome(&scope, &binding, Some(&acknowledged), true, false),
+            CloudPublicationFenceObservation::PauseIngress(actual) if actual == scope
+        ));
+        assert!(matches!(
+            cloud_publication_fence_outcome(&scope, &binding, None, true, false),
+            CloudPublicationFenceObservation::CloseIngress
+        ));
+
+        let mut mismatched_ack = acknowledged.clone();
+        mismatched_ack.state.acknowledged_publication_seq = DecimalU64(9);
+        assert!(matches!(
+            cloud_publication_fence_outcome(&scope, &binding, Some(&mismatched_ack), true, false),
+            CloudPublicationFenceObservation::CloseIngress
+        ));
+
+        let mut zero_sequence = binding.clone();
+        zero_sequence.acknowledged_publication_seq = DecimalU64(0);
+        assert!(matches!(
+            cloud_publication_fence_outcome(
+                &scope,
+                &zero_sequence,
+                Some(&acknowledged),
+                true,
+                false
+            ),
+            CloudPublicationFenceObservation::CloseIngress
+        ));
+        assert!(matches!(
+            cloud_publication_fence_outcome(&scope, &binding, Some(&acknowledged), true, true),
+            CloudPublicationFenceObservation::CloseIngress
+        ));
+    }
+
+    #[test]
+    fn shared_owner_observation_separates_publication_debt_from_revocation() {
+        for (debt, expected) in [
+            (Debt::Clear, 0),
+            (Debt::HostPublication, 1),
+            (Debt::EnabledWorkspaceOutbox, 1),
+            (Debt::Unshare, 2),
+            (Debt::FrozenUnshareAfterReshare, 2),
+            (Debt::UnshareReshareWithoutCapturedIntent, 2),
+            (Debt::Revoke, 2),
+        ] {
+            let (_directory, owner, scope) = fixture(debt);
+            let observation = observe(&owner, 0, Some(&scope));
+            match expected {
+                0 => assert!(matches!(
+                    observation,
+                    CloudPublicationFenceObservation::Clear
+                )),
+                1 => assert!(matches!(
+                    observation,
+                    CloudPublicationFenceObservation::PauseIngress(actual) if actual == scope
+                )),
+                _ => assert!(matches!(
+                    observation,
+                    CloudPublicationFenceObservation::CloseIngress
+                )),
+            }
+        }
+
+        let (_directory, owner, scope) = fixture(Debt::Clear);
+        let mut wrong_scope = scope.clone();
+        wrong_scope.owner_generation += 1;
+        assert!(matches!(
+            observe(&owner, 0, Some(&wrong_scope)),
+            CloudPublicationFenceObservation::CloseIngress
+        ));
     }
 }

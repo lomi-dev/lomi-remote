@@ -182,6 +182,7 @@ impl<'cancel> Registry<'cancel> {
                 return false;
             }
             Ok(super::super::shared_owner::CloudPublicationFenceObservation::CloseIngress)
+            | Ok(super::super::shared_owner::CloudPublicationFenceObservation::PauseIngress(_))
             | Err(()) => {
                 self.discard_other_ingress_for_started_git();
                 self.cancel_started_git();

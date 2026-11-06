@@ -55,6 +55,9 @@ pub(super) struct Worker {
     lease_until: Option<Instant>,
     fresh_until: Option<Instant>,
     heartbeat_at: Option<Instant>,
+    fresh_runtime_read_pending: bool,
+    fresh_runtime_read_rejected: bool,
+    fresh_runtime_scope: Option<CloudRuntimeScope>,
     publication_turn: bool,
     heartbeat_observation: Option<HeartbeatObservation>,
     logout_epoch_attempt: Option<(u64, [u8; 32])>,
@@ -104,6 +107,31 @@ impl Worker {
     pub(super) fn cached_eligibility(&self) -> Option<&PeerEligibility> {
         self.eligibility.as_deref()
     }
+    pub(super) fn require_fresh_runtime_read(&mut self, scope: &CloudRuntimeScope) -> bool {
+        if matches!(&self.action, Action::Blocked | Action::Claim(_))
+            || self.claim.is_some()
+            || self.awaiting_claim_get
+        {
+            return false;
+        }
+        self.clear_observations();
+        self.action = Action::Get;
+        self.unit_pending = true;
+        self.fresh_runtime_read_pending = true;
+        self.fresh_runtime_read_rejected = false;
+        self.fresh_runtime_scope = Some(scope.clone());
+        true
+    }
+    pub(super) fn take_rejected_fresh_runtime_read(&mut self) -> bool {
+        std::mem::take(&mut self.fresh_runtime_read_rejected)
+    }
+    pub(super) fn is_blocked(&self) -> bool {
+        matches!(&self.action, Action::Blocked)
+    }
+    #[cfg(test)]
+    pub(super) fn fresh_runtime_read_is_retained_get(&self) -> bool {
+        self.fresh_runtime_read_pending && self.unit_pending && matches!(&self.action, Action::Get)
+    }
     pub(super) fn has_retained_operation(&self) -> bool {
         self.claim.is_some()
             || self.awaiting_claim_get
@@ -123,6 +151,9 @@ impl Worker {
         self.lease_until = None;
         self.fresh_until = None;
         self.heartbeat_at = None;
+        self.fresh_runtime_read_pending = false;
+        self.fresh_runtime_read_rejected = false;
+        self.fresh_runtime_scope = None;
         self.publication_turn = false;
         if !matches!(self.action, Action::Blocked) {
             self.action = Action::Get;
@@ -226,6 +257,19 @@ impl Worker {
             return Ok(StepOutcome::Deferred);
         };
 
+        if self
+            .fresh_runtime_scope
+            .as_ref()
+            .is_some_and(|expected| expected != &snapshot.scope)
+        {
+            self.fresh_runtime_read_pending = false;
+            self.fresh_runtime_read_rejected = true;
+            self.fresh_runtime_scope = None;
+            self.unit_pending = false;
+            self.clear_observations();
+            return Ok(StepOutcome::Deferred);
+        }
+
         if self.scope.as_ref() != Some(&snapshot.scope) {
             self.finish_operation();
             self.scope = Some(snapshot.scope.clone());
@@ -274,6 +318,14 @@ impl Worker {
                 match turn.take_decision().ok_or(StepError::Stale)? {
                     CloudGetDecision::Blocked => self.block(),
                     CloudGetDecision::Claim(expected_generation) => {
+                        if self.fresh_runtime_read_pending {
+                            self.fresh_runtime_read_pending = false;
+                            self.fresh_runtime_read_rejected = true;
+                            self.fresh_runtime_scope = None;
+                            self.unit_pending = false;
+                            self.action = Action::Get;
+                            return Ok(StepOutcome::Deferred);
+                        }
                         self.claim = turn.take_claim_admission();
                         if self.claim.is_some() {
                             self.action = Action::Claim(expected_generation);
@@ -294,6 +346,7 @@ impl Worker {
                         {
                             return Err(StepError::Stale);
                         }
+                        self.fresh_runtime_read_pending = false;
                         self.action = Action::Online;
                         self.lease_until = lease_until;
                         self.unit_pending = true;
@@ -539,6 +592,7 @@ impl Worker {
             heartbeat,
         });
         self.eligibility = Some(eligibility.clone());
+        self.fresh_runtime_scope = None;
         Ok(StepOutcome::PeerEligible(eligibility))
     }
     fn block<T>(&mut self) -> Result<T, StepError> {
@@ -546,6 +600,8 @@ impl Worker {
         self.claim = None;
         self.awaiting_claim_get = false;
         self.unit_pending = false;
+        self.fresh_runtime_read_pending = false;
+        self.fresh_runtime_scope = None;
         self.clear_observations();
         Err(lomi_host_http::Error::InvalidResponse.into())
     }
@@ -794,7 +850,7 @@ fn started_git_publication_clear(
     {
         Observation::Clear => Ok(true),
         Observation::Defer => Ok(false),
-        Observation::CloseIngress => Err(StepError::Stale),
+        Observation::CloseIngress | Observation::PauseIngress(_) => Err(StepError::Stale),
     }
 }
 
@@ -1283,8 +1339,76 @@ impl NormalPublicationObservation<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::next_heartbeat_at;
+    use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn publication_resume_forces_get_and_discards_old_heartbeat_state() {
+        let now = Instant::now();
+        let scope = CloudRuntimeScope {
+            authorization_generation: 3,
+            remote_api_origin: "https://remote.example".to_owned(),
+            host_id: lomi_remote_protocol::HostId::from_bytes([1; 16]).unwrap(),
+            owner_runtime_id: lomi_remote_protocol::RuntimeId::from_bytes([6; 16]).unwrap(),
+            owner_generation: 7,
+        };
+        let runtime = RuntimeBinding {
+            runtime_id: lomi_remote_protocol::RuntimeId::from_bytes([2; 16]).unwrap(),
+            runtime_generation: DecimalU64(4),
+            host_access_epoch: DecimalU64(5),
+        };
+        let read_scope = scope.clone();
+        let mut worker = Worker::default();
+        worker.heartbeat_observation = Some(HeartbeatObservation {
+            scope,
+            runtime,
+            request_started: now,
+            wall_at_request_start: 10,
+            lease_ms: 2_000,
+            freshness_ms: 1_000,
+        });
+        worker.lease_until = Some(now + Duration::from_secs(2));
+        worker.fresh_until = Some(now + Duration::from_secs(1));
+        worker.heartbeat_at = Some(now + Duration::from_secs(1));
+        worker.publication_turn = true;
+
+        assert!(worker.require_fresh_runtime_read(&read_scope));
+        assert!(matches!(&worker.action, Action::Get));
+        assert!(worker.unit_pending);
+        assert!(worker.heartbeat_observation.is_none());
+        assert!(worker.lease_until.is_none());
+        assert!(worker.fresh_until.is_none());
+        assert!(worker.heartbeat_at.is_none());
+        assert!(!worker.publication_turn);
+        assert!(worker.cached_eligibility().is_none());
+    }
+
+    #[test]
+    fn publication_resume_does_not_overwrite_blocked_or_claim_state() {
+        let mut worker = Worker::default();
+        worker.action = Action::Blocked;
+        let scope = CloudRuntimeScope {
+            authorization_generation: 3,
+            remote_api_origin: "https://remote.example".to_owned(),
+            host_id: lomi_remote_protocol::HostId::from_bytes([1; 16]).unwrap(),
+            owner_runtime_id: lomi_remote_protocol::RuntimeId::from_bytes([6; 16]).unwrap(),
+            owner_generation: 7,
+        };
+        assert!(!worker.require_fresh_runtime_read(&scope));
+        assert!(worker.is_blocked());
+        worker.finish_operation();
+        assert!(worker.is_blocked());
+
+        worker = Worker::default();
+        worker.action = Action::Claim(DecimalU64(4));
+        assert!(!worker.require_fresh_runtime_read(&scope));
+        assert!(matches!(&worker.action, Action::Claim(DecimalU64(4))));
+
+        worker = Worker::default();
+        worker.awaiting_claim_get = true;
+        assert!(!worker.require_fresh_runtime_read(&scope));
+        assert!(worker.awaiting_claim_get);
+    }
 
     #[test]
     fn heartbeat_cadence_leaves_an_eligibility_turn_after_completion() {

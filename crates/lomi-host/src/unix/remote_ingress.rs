@@ -791,7 +791,12 @@ impl<'cancel> Driver<'cancel> {
         if self.connection.is_some() {
             let now = Instant::now();
             if self.connection.as_ref().is_some_and(|connection| {
-                pending_noise_expired(connection.has_pending_setup(), connection.peer_cutoff, now)
+                peer_cutoff_requires_discard(
+                    connection.has_pending_setup(),
+                    eligibility.is_some(),
+                    connection.peer_cutoff,
+                    now,
+                )
             }) {
                 self.discard();
                 return false;
@@ -4463,8 +4468,17 @@ fn peer_refresh_deadline_for(
     (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
 }
 
-fn pending_noise_expired(pending_setup: bool, peer_cutoff: Instant, now: Instant) -> bool {
-    pending_setup && now >= peer_cutoff
+fn peer_cutoff_expired(peer_cutoff: Instant, now: Instant) -> bool {
+    now >= peer_cutoff
+}
+
+fn peer_cutoff_requires_discard(
+    pending_setup: bool,
+    has_eligibility: bool,
+    peer_cutoff: Instant,
+    now: Instant,
+) -> bool {
+    peer_cutoff_expired(peer_cutoff, now) && (pending_setup || !has_eligibility)
 }
 
 fn staged_message_is_live(
@@ -4515,30 +4529,45 @@ mod peer_refresh_tests {
     }
 
     #[test]
-    fn pending_noise_cleanup_uses_original_cutoff_and_keeps_live_stages() {
+    fn paused_connection_cleanup_uses_original_peer_cutoff() {
         let now = Instant::now();
         let original_cutoff = now + Duration::from_secs(1);
 
-        assert!(!pending_noise_expired(true, original_cutoff, now));
-        assert!(pending_noise_expired(
+        assert!(!peer_cutoff_requires_discard(
+            false,
+            false,
+            original_cutoff,
+            now
+        ));
+        assert!(peer_cutoff_requires_discard(
+            false,
+            false,
+            original_cutoff,
+            original_cutoff
+        ));
+        assert!(peer_cutoff_requires_discard(
+            false,
+            false,
+            original_cutoff,
+            original_cutoff + Duration::from_nanos(1),
+        ));
+        assert!(peer_cutoff_requires_discard(
+            true,
             true,
             original_cutoff,
             original_cutoff
         ));
-        assert!(pending_noise_expired(
+        assert!(!peer_cutoff_requires_discard(
+            false,
             true,
             original_cutoff,
-            original_cutoff + Duration::from_nanos(1),
+            original_cutoff
         ));
-        assert!(!pending_noise_expired(
-            true,
+        assert!(!peer_cutoff_requires_discard(
+            false,
+            false,
             now + Duration::from_secs(1),
             now
-        ));
-        assert!(!pending_noise_expired(
-            false,
-            now,
-            now + Duration::from_secs(1)
         ));
         assert_eq!(
             peer_refresh_deadline_for(true, original_cutoff, original_cutoff),
