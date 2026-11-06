@@ -102,6 +102,41 @@ impl SharedOwner {
         }))
     }
 
+    #[cfg(test)]
+    pub(super) fn seed_test_ready(
+        &self,
+        operation: &Operation<'_>,
+        auth: &lomi_host_auth::HostAuth<'_, dyn lomi_platform::secrets::SecretStorage + '_>,
+    ) -> Result<(), Error> {
+        if auth.status() != lomi_host_auth::Status::Ready {
+            return Err(Error::Domain(domain::Error::Denied));
+        }
+        let mut writer = self
+            .domain
+            .announce_worker_verification(operation)
+            .map_err(Error::Domain)?;
+        {
+            let mut guard = writer
+                .try_enter_worker_verification()
+                .map_err(Error::Domain)?;
+            let mut store = self.try_store()?;
+            let generation = store
+                .authorization_state()
+                .map_err(Error::Store)?
+                .generation;
+            let scope = guard
+                .prepare_worker_verification(generation, &store)
+                .map_err(Error::from)?;
+            guard
+                .commit_verified(scope, || {
+                    store.enable_authorization(generation)?;
+                    Ok::<_, StoreError>(((), StoreView::read(&store)?))
+                })
+                .map_err(Error::from)?;
+        }
+        writer.finish().map_err(Error::Domain)
+    }
+
     // These two helpers are private implementation details, never a public
     // callback/guard escape. Every caller enters Domain before trying Store.
     fn try_store(&self) -> Result<MutexGuard<'_, HostStore>, Error> {

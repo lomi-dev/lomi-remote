@@ -440,7 +440,7 @@ impl Worker {
             }
         }
         if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
-            return self.poll(auth, runtime, eligibility, api, &pending);
+            return self.poll(auth, config, runtime, eligibility, api, &pending);
         }
         if self.prefer_recovery
             && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
@@ -467,11 +467,12 @@ impl Worker {
         if self.poll_at.is_some_and(|at| Instant::now() < at) {
             return Ok(());
         }
-        self.poll(auth, runtime, eligibility, api, &pending)
+        self.poll(auth, config, runtime, eligibility, api, &pending)
     }
     fn poll(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        config: &Config,
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn ChannelApi,
@@ -537,6 +538,19 @@ impl Worker {
         }
         self.cached_first_due = !self.cache.is_empty();
         self.failures = 0;
+        if pending.is_empty() && !self.capacity_blocked {
+            if let Some(work) = self.cache.pop_front() {
+                self.cached_first_due = false;
+                self.scheduled_item_consumed = true;
+                self.prefer_recovery = true;
+                self.proposal_cursor = Some(work.id);
+                if work.observation.current(eligibility)
+                    && work.observation.current_operation(runtime)
+                {
+                    return self.prepare(auth, config, runtime, eligibility, work);
+                }
+            }
+        }
         Ok(())
     }
     // Fresh authenticated TLS inputs independently supply current identities,
@@ -1313,3 +1327,7 @@ fn verify_expired(
         context.expires_at.saturating_sub(1),
     )
 }
+
+#[cfg(test)]
+#[path = "channel_tests.rs"]
+mod tests;
