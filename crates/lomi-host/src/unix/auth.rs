@@ -626,56 +626,71 @@ mod tests {
     }
 
     #[test]
-    fn pending_setup_and_disabled_apis_still_run_retained_classes() {
+    fn pending_setup_defers_retained_classes_without_consuming_reservations() {
         let mut idle = IdleScheduler::default();
 
-        // Pending setup blocks new discovery, but retained classes still
-        // alternate. Retained channels also remain runnable when disabled.
+        // A cached Peer reservation is held while setup owns this turn.
         assert_eq!(
-            idle.select_class(true, false, true, false, false, false),
-            Some(WorkClass::Peer)
-        );
-        assert!(!idle.after_step(WorkClass::Peer, true, false, true));
-        assert_eq!(
-            idle.select_class(true, false, true, false, false, false),
-            Some(WorkClass::Peer)
-        );
-        assert!(idle.after_step(WorkClass::Peer, false, false, true));
-        assert_eq!(
-            idle.select_class(false, false, true, false, false, false),
-            Some(WorkClass::Channel)
-        );
-        assert!(!idle.after_step(WorkClass::Channel, true, false, true));
-        assert_eq!(
-            idle.select_class(false, false, false, false, false, true),
-            None
-        );
-    }
-
-    #[test]
-    fn pending_setup_and_disabled_apis_keep_cached_items_runnable() {
-        let mut idle = IdleScheduler::default();
-
-        assert_eq!(
-            idle.select_class(false, true, false, false, false, false),
+            idle.select_class_for_ready_turn(false, false, true, false, false, false, false),
             Some(WorkClass::Peer)
         );
         assert!(!idle.after_step(WorkClass::Peer, false, true, false));
+        let peer_cached_reservation = idle.reservation;
         assert_eq!(
-            idle.select_class(false, true, false, false, false, false),
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, peer_cached_reservation);
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, false, true, false, false, false, false),
             Some(WorkClass::Peer)
         );
-        assert!(idle.after_step(WorkClass::Peer, false, true, true));
+        assert!(!idle.after_step(WorkClass::Peer, true, true, false));
+        let peer_active_reservation = idle.reservation;
         assert_eq!(
-            idle.select_class(false, false, false, true, false, false),
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, peer_active_reservation);
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, true, true, true, true, false, false),
+            Some(WorkClass::Peer)
+        );
+        assert!(idle.after_step(WorkClass::Peer, false, false, true));
+
+        // Releasing Peer yields to cached Channel work. Its cached and active
+        // phases are paused the same way, then the next reservation is Peer.
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, false, false, false, true, false, false),
             Some(WorkClass::Channel)
         );
         assert!(!idle.after_step(WorkClass::Channel, false, true, false));
+        let channel_cached_reservation = idle.reservation;
         assert_eq!(
-            idle.select_class(false, false, false, true, false, false),
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, channel_cached_reservation);
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, false, false, false, true, false, false),
             Some(WorkClass::Channel)
         );
-        assert!(idle.after_step(WorkClass::Channel, false, true, true));
+        assert!(!idle.after_step(WorkClass::Channel, true, true, false));
+        let channel_active_reservation = idle.reservation;
+        assert_eq!(
+            idle.select_class_for_ready_turn(true, true, true, true, true, true, true),
+            None
+        );
+        assert_eq!(idle.reservation, channel_active_reservation);
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, false, false, true, true, false, false),
+            Some(WorkClass::Channel)
+        );
+        assert!(idle.after_step(WorkClass::Channel, false, false, true));
+        assert_eq!(
+            idle.select_class_for_ready_turn(false, false, true, false, false, true, true),
+            Some(WorkClass::Peer)
+        );
     }
 
     #[test]
@@ -1472,6 +1487,28 @@ impl IdleScheduler {
     fn reset_reservation(&mut self) {
         self.reservation = None;
     }
+    fn select_class_for_ready_turn(
+        &mut self,
+        setup_pending: bool,
+        peer_active: bool,
+        peer_cached: bool,
+        channel_active: bool,
+        channel_cached: bool,
+        discovery_allowed: bool,
+        channels_enabled: bool,
+    ) -> Option<WorkClass> {
+        if setup_pending {
+            return None;
+        }
+        self.select_class(
+            peer_active,
+            peer_cached,
+            channel_active,
+            channel_cached,
+            discovery_allowed,
+            channels_enabled,
+        )
+    }
     fn select_class(
         &mut self,
         peer_active: bool,
@@ -2106,8 +2143,15 @@ fn run_with_apis_inner(
                             let peer_cached = peer.has_cached_work();
                             let channel_active = channel.has_active_work();
                             let channel_cached = channel.has_cached_work();
-                            let discovery_allowed = apis.enabled && !ingress.has_pending_setup();
-                            if let Some(class) = idle.select_class(
+                            let setup_pending = ingress.has_pending_setup();
+                            let discovery_allowed = apis.enabled && !setup_pending;
+                            // Cloud retains priority above. While ingress has a
+                            // bounded setup in flight, let its driver advance
+                            // before unrelated retained peer/channel work. Keep
+                            // the idle reservation so ordinary fairness resumes
+                            // if the setup settles or expires.
+                            if let Some(class) = idle.select_class_for_ready_turn(
+                                setup_pending,
                                 peer_active,
                                 peer_cached,
                                 channel_active,
