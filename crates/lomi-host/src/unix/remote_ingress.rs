@@ -789,6 +789,13 @@ impl<'cancel> Driver<'cancel> {
         eligibility: Option<&PeerEligibility>,
     ) -> bool {
         if self.connection.is_some() {
+            let now = Instant::now();
+            if self.connection.as_ref().is_some_and(|connection| {
+                pending_noise_expired(connection.has_pending_setup(), connection.peer_cutoff, now)
+            }) {
+                self.discard();
+                return false;
+            }
             if peer::check_peer_runtime(runtime).is_err() {
                 self.discard();
                 return false;
@@ -4456,6 +4463,10 @@ fn peer_refresh_deadline_for(
     (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
 }
 
+fn pending_noise_expired(pending_setup: bool, peer_cutoff: Instant, now: Instant) -> bool {
+    pending_setup && now >= peer_cutoff
+}
+
 fn staged_message_is_live(
     now: Instant,
     peer_cutoff: Instant,
@@ -4501,6 +4512,38 @@ mod peer_refresh_tests {
         );
         assert_eq!(peer_refresh_deadline_for(false, cutoff, now), None);
         assert_eq!(peer_refresh_deadline_for(true, now, now), None);
+    }
+
+    #[test]
+    fn pending_noise_cleanup_uses_original_cutoff_and_keeps_live_stages() {
+        let now = Instant::now();
+        let original_cutoff = now + Duration::from_secs(1);
+
+        assert!(!pending_noise_expired(true, original_cutoff, now));
+        assert!(pending_noise_expired(
+            true,
+            original_cutoff,
+            original_cutoff
+        ));
+        assert!(pending_noise_expired(
+            true,
+            original_cutoff,
+            original_cutoff + Duration::from_nanos(1),
+        ));
+        assert!(!pending_noise_expired(
+            true,
+            now + Duration::from_secs(1),
+            now
+        ));
+        assert!(!pending_noise_expired(
+            false,
+            now,
+            now + Duration::from_secs(1)
+        ));
+        assert_eq!(
+            peer_refresh_deadline_for(true, original_cutoff, original_cutoff),
+            None
+        );
     }
 }
 
