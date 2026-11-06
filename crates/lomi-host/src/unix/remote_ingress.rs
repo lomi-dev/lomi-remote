@@ -88,7 +88,60 @@ fn ticket_grammar(ticket: &RelayTicket) -> bool {
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
+fn ticket_bounds_current_at(
+    now: Instant,
+    request_started: Instant,
+    expires_in_ms: u64,
+    expires_at: Instant,
+    handoff_deadline: Instant,
+    channel_id: ChannelId,
+    handoff_channel_id: ChannelId,
+    ticket: &RelayTicket,
+) -> bool {
+    (1..=5000).contains(&expires_in_ms)
+        && request_started <= now
+        && now < expires_at
+        && request_started
+            .checked_add(Duration::from_millis(expires_in_ms))
+            .is_some_and(|expiry| expires_at == expiry.min(handoff_deadline))
+        && channel_id == handoff_channel_id
+        && ticket_grammar(ticket)
+}
 impl TicketedAdmission {
+    fn bounds_current_at(&self, now: Instant) -> bool {
+        ticket_bounds_current_at(
+            now,
+            self.request_started,
+            self.expires_in_ms,
+            self.expires_at,
+            self.handoff.deadline(),
+            self.channel_id,
+            self.handoff.channel_id(),
+            &self.ticket,
+        )
+    }
+
+    // Registry polling only decides whether to retain this one-shot ticket.
+    // Keep the original operation, handoff, observation, scope, and trusted
+    // configuration current without recapturing provider or Store evidence.
+    fn poll_current(
+        &self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: RuntimeWithOperation<'_, '_>,
+        eligibility: &PeerEligibility,
+    ) -> bool {
+        if !self.bounds_current_at(Instant::now()) || peer::check_peer_runtime(runtime).is_err() {
+            return false;
+        }
+        let Some(binding) = self.handoff.ticket_binding(runtime.operation, eligibility) else {
+            return false;
+        };
+        binding.scope() == &self.handoff.source().intent.preparation.scope
+            && binding.trusted() == auth.trusted_configuration()
+            && self.handoff.observation().current_operation(runtime)
+            && Instant::now() < self.expires_at
+    }
+
     fn current(
         &self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -96,20 +149,11 @@ impl TicketedAdmission {
         eligibility: &PeerEligibility,
     ) -> bool {
         let now = Instant::now();
-        let bounded = (1..=5000).contains(&self.expires_in_ms)
-            && self.request_started <= now
-            && now < self.expires_at
-            && self
-                .request_started
-                .checked_add(Duration::from_millis(self.expires_in_ms))
-                .is_some_and(|expiry| self.expires_at == expiry.min(self.handoff.deadline()))
-            && self.channel_id == self.handoff.channel_id()
-            && ticket_grammar(&self.ticket);
-        if !bounded {
+        if !self.bounds_current_at(now) {
             return false;
         }
-        // Cache polling rechecks the named current ACK/source/local join. No
-        // owner/Store/provider borrow or effect continuation crosses iterations.
+        // Consumed connect revalidates the named current ACK/source/local join
+        // against fresh provider and owner evidence before relay IO.
         let current = (|| {
             self.handoff.check_current(auth, runtime, eligibility)?;
             let provider = peer::ProviderCapture::read(auth, runtime, eligibility)?;
@@ -731,7 +775,7 @@ impl<'cancel> Driver<'cancel> {
                 (Some(candidate), None) => {
                     candidate.check_current(auth, runtime, eligibility).is_ok()
                 }
-                (None, Some(ticketed)) => ticketed.current(auth, runtime, eligibility),
+                (None, Some(ticketed)) => ticketed.poll_current(auth, runtime, eligibility),
                 _ => false,
             });
         if !current {
@@ -850,11 +894,16 @@ impl<'cancel> Driver<'cancel> {
             .checked_add(Duration::from_millis(expires_in_ms))
             .ok_or(peer::PeerError::Invalid)?
             .min(handoff.deadline());
-        if response.channel_id != handoff.channel_id()
-            || !(1..=5000).contains(&expires_in_ms)
-            || !ticket_grammar(&response.ticket)
-            || received_at >= expires_at
-        {
+        if !ticket_bounds_current_at(
+            received_at,
+            request_started,
+            expires_in_ms,
+            expires_at,
+            handoff.deadline(),
+            response.channel_id,
+            handoff.channel_id(),
+            &response.ticket,
+        ) {
             return Err(peer::PeerError::Invalid);
         }
         drop(effect);
@@ -4347,5 +4396,111 @@ mod peer_refresh_tests {
         );
         assert_eq!(peer_refresh_deadline_for(false, cutoff, now), None);
         assert_eq!(peer_refresh_deadline_for(true, now, now), None);
+    }
+}
+
+#[cfg(test)]
+mod ticket_bounds_tests {
+    use super::*;
+
+    fn channel_id(byte: u8) -> ChannelId {
+        ChannelId::from_bytes([byte; 16]).expect("valid channel id")
+    }
+
+    fn ticket(value: String) -> RelayTicket {
+        RelayTicket::try_from(value).expect("valid relay ticket encoding")
+    }
+
+    #[test]
+    fn ticket_cache_bounds_keep_original_ticket_and_handoff_expiry() {
+        let now = Instant::now();
+        let request_started = now - Duration::from_millis(100);
+        let ticket_deadline = request_started + Duration::from_millis(5000);
+        let handoff_deadline = ticket_deadline + Duration::from_secs(1);
+        let id = channel_id(1);
+        let relay_ticket = ticket("A".repeat(43));
+
+        assert!(ticket_bounds_current_at(
+            now,
+            request_started,
+            5000,
+            ticket_deadline,
+            handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
+        assert!(!ticket_bounds_current_at(
+            ticket_deadline,
+            request_started,
+            5000,
+            ticket_deadline,
+            handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
+        assert!(!ticket_bounds_current_at(
+            now,
+            request_started,
+            5000,
+            ticket_deadline - Duration::from_millis(1),
+            handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
+        assert!(!ticket_bounds_current_at(
+            now,
+            request_started,
+            5000,
+            ticket_deadline,
+            handoff_deadline,
+            id,
+            channel_id(2),
+            &relay_ticket,
+        ));
+        assert!(!ticket_bounds_current_at(
+            now,
+            request_started,
+            5000,
+            ticket_deadline,
+            handoff_deadline,
+            id,
+            id,
+            &ticket("A".repeat(42)),
+        ));
+        assert!(!ticket_bounds_current_at(
+            now,
+            request_started,
+            5001,
+            ticket_deadline,
+            handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
+
+        let short_handoff_deadline = now + Duration::from_millis(250);
+        assert!(ticket_bounds_current_at(
+            now,
+            request_started,
+            5000,
+            short_handoff_deadline,
+            short_handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
+        assert!(!ticket_bounds_current_at(
+            short_handoff_deadline,
+            request_started,
+            5000,
+            short_handoff_deadline,
+            short_handoff_deadline,
+            id,
+            id,
+            &relay_ticket,
+        ));
     }
 }
