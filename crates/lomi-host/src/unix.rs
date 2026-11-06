@@ -1204,12 +1204,14 @@ fn require_host_account() -> Result<(), HostError> {
 const HOST_INITIALIZATION_RECEIPT_VERSION: u8 = 1;
 #[cfg(target_os = "macos")]
 const HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT: u8 = 2;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+const HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT: u8 = 2;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT: u8 = HOST_INITIALIZATION_RECEIPT_VERSION;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
-enum HostInitializationBinding {
+pub(crate) enum HostInitializationBinding {
     #[cfg(unix)]
     Unix {
         uid: u32,
@@ -1223,6 +1225,20 @@ enum HostInitializationBinding {
             skip_serializing_if = "Option::is_none"
         )]
         volume_uuid: Option<String>,
+        #[cfg(target_os = "linux")]
+        #[serde(
+            rename = "filesystemUuid",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        filesystem_uuid: Option<String>,
+        #[cfg(target_os = "linux")]
+        #[serde(
+            rename = "subvolumeUuid",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        subvolume_uuid: Option<String>,
     },
     #[cfg(windows)]
     Windows {
@@ -1234,20 +1250,20 @@ enum HostInitializationBinding {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum HostInitializationState {
+pub(crate) enum HostInitializationState {
     Creating,
     Complete,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct HostInitializationReceipt {
-    version: u8,
-    state: HostInitializationState,
-    profile_path: String,
-    owner: HostInitializationBinding,
-    host_id: Option<String>,
-    profile_id: Option<String>,
+pub(crate) struct HostInitializationReceipt {
+    pub(crate) version: u8,
+    pub(crate) state: HostInitializationState,
+    pub(crate) profile_path: String,
+    pub(crate) owner: HostInitializationBinding,
+    pub(crate) host_id: Option<String>,
+    pub(crate) profile_id: Option<String>,
 }
 
 fn host_initialization_owner_v1(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
@@ -1267,6 +1283,10 @@ fn host_initialization_owner_v1(lock: &OwnerLock) -> Result<HostInitializationBi
             inode: second,
             #[cfg(target_os = "macos")]
             volume_uuid: None,
+            #[cfg(target_os = "linux")]
+            filesystem_uuid: None,
+            #[cfg(target_os = "linux")]
+            subvolume_uuid: None,
         })
     }
     #[cfg(windows)]
@@ -1306,12 +1326,43 @@ fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBindi
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
+    let base = host_initialization_owner_v1(lock)?;
+    let Some(identity) = lock
+        .profile_btrfs_identity()
+        .map_err(|_| HostError::InvalidProfile)?
+    else {
+        return Ok(base);
+    };
+    if !canonical_profile_volume_uuid(&identity.filesystem_uuid)
+        || !canonical_profile_volume_uuid(&identity.subvolume_uuid)
+    {
+        return Err(HostError::InvalidProfile);
+    }
+    let HostInitializationBinding::Unix {
+        uid,
+        gid,
+        device,
+        inode,
+        ..
+    } = base;
+    Ok(HostInitializationBinding::Unix {
+        uid,
+        gid,
+        device,
+        inode,
+        filesystem_uuid: Some(identity.filesystem_uuid),
+        subvolume_uuid: Some(identity.subvolume_uuid),
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn host_initialization_owner(lock: &OwnerLock) -> Result<HostInitializationBinding, HostError> {
     host_initialization_owner_v1(lock)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn canonical_profile_volume_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value)
         .is_ok_and(|parsed| !parsed.is_nil() && parsed.hyphenated().to_string() == value)
@@ -1352,6 +1403,37 @@ fn initialization_bindings_match(
             && receipt_inode == current_inode
             && receipt_uuid == current_uuid;
     }
+    #[cfg(target_os = "linux")]
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
+        let (
+            HostInitializationBinding::Unix {
+                uid: receipt_uid,
+                gid: receipt_gid,
+                inode: receipt_inode,
+                filesystem_uuid: Some(receipt_filesystem_uuid),
+                subvolume_uuid: Some(receipt_subvolume_uuid),
+                ..
+            },
+            HostInitializationBinding::Unix {
+                uid: current_uid,
+                gid: current_gid,
+                inode: current_inode,
+                filesystem_uuid: Some(current_filesystem_uuid),
+                subvolume_uuid: Some(current_subvolume_uuid),
+                ..
+            },
+        ) = (receipt_owner, current_owner)
+        else {
+            return false;
+        };
+        return canonical_profile_volume_uuid(receipt_filesystem_uuid)
+            && canonical_profile_volume_uuid(receipt_subvolume_uuid)
+            && receipt_uid == current_uid
+            && receipt_gid == current_gid
+            && receipt_inode == current_inode
+            && receipt_filesystem_uuid == current_filesystem_uuid
+            && receipt_subvolume_uuid == current_subvolume_uuid;
+    }
     false
 }
 
@@ -1371,6 +1453,10 @@ fn initialization_receipt_current_owner(
     if version == HOST_INITIALIZATION_RECEIPT_VERSION {
         return host_initialization_owner_v1(lock);
     }
+    #[cfg(target_os = "linux")]
+    if version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
+        return host_initialization_owner(lock);
+    }
     #[cfg(target_os = "macos")]
     if version == HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
         return host_initialization_owner(lock);
@@ -1378,7 +1464,7 @@ fn initialization_receipt_current_owner(
     Err(HostError::InvalidProfile)
 }
 
-fn initialization_receipt(
+pub(crate) fn initialization_receipt(
     lock: &OwnerLock,
 ) -> Result<Option<HostInitializationReceipt>, HostError> {
     let Some(bytes) = lock
@@ -1414,7 +1500,7 @@ fn initialization_receipt(
     Ok(Some(receipt))
 }
 
-fn parse_initialization_identity(
+pub(crate) fn parse_initialization_identity(
     receipt: &HostInitializationReceipt,
 ) -> Result<lomi_host_store::Identity, HostError> {
     let host_id = receipt
@@ -1437,13 +1523,138 @@ fn parse_initialization_identity(
     })
 }
 
-fn make_initialization_receipt(
+#[cfg(target_os = "linux")]
+fn prepare_linux_v1_device_rebind(
+    bytes: &[u8],
+    profile_path: &str,
+    current_owner: &HostInitializationBinding,
+) -> Result<(Vec<u8>, lomi_host_store::Identity), HostError> {
+    let mut receipt: HostInitializationReceipt =
+        serde_json::from_slice(bytes).map_err(|_| HostError::InvalidProfile)?;
+    if serde_json::to_vec(&receipt).map_err(|_| HostError::InvalidProfile)? != bytes
+        || receipt.version != HOST_INITIALIZATION_RECEIPT_VERSION
+        || receipt.state != HostInitializationState::Complete
+        || receipt.profile_path != profile_path
+    {
+        return Err(HostError::InvalidProfile);
+    }
+    let identity = parse_initialization_identity(&receipt)?;
+    let (
+        HostInitializationBinding::Unix {
+            uid: receipt_uid,
+            gid: receipt_gid,
+            device: receipt_device,
+            inode: receipt_inode,
+            filesystem_uuid: None,
+            subvolume_uuid: None,
+        },
+        HostInitializationBinding::Unix {
+            uid: current_uid,
+            gid: current_gid,
+            device: current_device,
+            inode: current_inode,
+            filesystem_uuid: None,
+            subvolume_uuid: None,
+        },
+    ) = (&mut receipt.owner, current_owner)
+    else {
+        return Err(HostError::InvalidProfile);
+    };
+    if receipt_uid != current_uid
+        || receipt_gid != current_gid
+        || receipt_inode != current_inode
+        || receipt_device == current_device
+    {
+        return Err(HostError::IdentityMismatch);
+    }
+    *receipt_device = *current_device;
+    let updated = serde_json::to_vec(&receipt).map_err(|_| HostError::InvalidProfile)?;
+    Ok((updated, identity))
+}
+
+/// Owner-authorized repair for a complete v1 Linux receipt whose sole drift is
+/// the profile directory's device number. The repair keeps version 1 so the
+/// currently installed daemon can start; a later initializer can promote it
+/// to the Btrfs-bound v2 format after validating the database identity.
+///
+/// This does not prove that the original v1 receipt came from the same physical
+/// volume; v1 did not record a stable filesystem or subvolume UUID.
+#[cfg(target_os = "linux")]
+pub fn repair_profile_device_binding(profile: &Path, confirmed: bool) -> Result<(), HostError> {
+    if !confirmed {
+        return Err(HostError::InvalidProfile);
+    }
+    require_host_account()?;
+    let lock = OwnerLock::acquire_existing(profile).map_err(map_initialization_platform_error)?;
+    let current_path = lock
+        .profile()
+        .path()
+        .to_str()
+        .ok_or(HostError::InvalidProfile)?;
+    let btrfs_identity = lock
+        .profile_btrfs_identity()
+        .map_err(|_| HostError::InvalidProfile)?
+        .ok_or(HostError::InvalidProfile)?;
+    if !canonical_profile_volume_uuid(&btrfs_identity.filesystem_uuid)
+        || !canonical_profile_volume_uuid(&btrfs_identity.subvolume_uuid)
+    {
+        return Err(HostError::InvalidProfile);
+    }
+    let current_owner = host_initialization_owner_v1(&lock)?;
+    let bytes = lock
+        .read_host_initialization_receipt()
+        .map_err(map_initialization_platform_error)?
+        .ok_or(HostError::InvalidProfile)?;
+    let (updated_bytes, pinned_identity) =
+        prepare_linux_v1_device_rebind(&bytes, current_path, &current_owner)?;
+
+    let database = lock
+        .validate_existing_database()
+        .map_err(map_initialization_platform_error)?;
+    let database_identity =
+        HostStore::inspect_legacy_v14_identity_under_owner_lock(&database, &lock)
+            .map_err(|error| store_error_for_initialization(error, true))?;
+    if database_identity != pinned_identity {
+        return Err(HostError::IdentityMismatch);
+    }
+
+    lock.replace_host_initialization_receipt(&updated_bytes)
+        .map_err(map_initialization_platform_error)
+}
+
+pub(crate) fn make_initialization_receipt(
     lock: &OwnerLock,
     state: HostInitializationState,
     identity: Option<&lomi_host_store::Identity>,
 ) -> Result<HostInitializationReceipt, HostError> {
+    #[cfg(target_os = "linux")]
+    let owner = if state == HostInitializationState::Creating {
+        // Keep an interrupted fresh initialization readable by the schema-14
+        // CLI. The stable Btrfs binding is only committed with Complete, after
+        // opening and durably checkpointing the schema-15 Store.
+        host_initialization_owner_v1(lock)?
+    } else {
+        host_initialization_owner(lock)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let owner = host_initialization_owner(lock)?;
+    #[cfg(target_os = "linux")]
+    let version = match (&state, &owner) {
+        (HostInitializationState::Creating, _) => HOST_INITIALIZATION_RECEIPT_VERSION,
+        (
+            _,
+            HostInitializationBinding::Unix {
+                filesystem_uuid: Some(_),
+                subvolume_uuid: Some(_),
+                ..
+            },
+        ) => HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT,
+        _ => HOST_INITIALIZATION_RECEIPT_VERSION,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let version = HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT;
     let receipt = HostInitializationReceipt {
-        version: HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT,
+        version,
         state,
         profile_path: lock
             .profile()
@@ -1451,7 +1662,7 @@ fn make_initialization_receipt(
             .to_str()
             .ok_or(HostError::InvalidProfile)?
             .to_owned(),
-        owner: host_initialization_owner(lock)?,
+        owner,
         host_id: identity.map(|value| String::from(value.host_id)),
         profile_id: identity.map(|value| String::from(value.profile_id)),
     };
@@ -1463,13 +1674,58 @@ fn make_initialization_receipt(
     Ok(receipt)
 }
 
-fn write_initialization_receipt(
+pub(crate) fn write_initialization_receipt(
     lock: &OwnerLock,
     receipt: &HostInitializationReceipt,
 ) -> Result<(), HostError> {
     let bytes = serde_json::to_vec(receipt).map_err(|_| HostError::InvalidProfile)?;
     lock.replace_host_initialization_receipt(&bytes)
         .map_err(map_initialization_platform_error)
+}
+
+#[cfg(target_os = "linux")]
+fn promote_linux_btrfs_v1_receipt_after_store_open(
+    lock: &OwnerLock,
+    database: &Path,
+    receipt: &HostInitializationReceipt,
+    store: HostStore,
+) -> Result<HostStore, HostError> {
+    if receipt.version != HOST_INITIALIZATION_RECEIPT_VERSION
+        || receipt.state != HostInitializationState::Complete
+    {
+        return Ok(store);
+    }
+    let pinned = parse_initialization_identity(receipt)?;
+    if store.identity() != &pinned {
+        return Err(HostError::IdentityMismatch);
+    }
+    let upgraded = make_initialization_receipt(
+        lock,
+        HostInitializationState::Complete,
+        Some(store.identity()),
+    )?;
+    if upgraded.version != HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT {
+        return Ok(store);
+    }
+
+    // Opening the identity-bound Store performs the Linux 14→15 schema fence.
+    // Commit and sync it before replacing the v1 receipt, so an old updater
+    // cannot roll back to a binary that rejects the new receipt format.
+    store
+        .checkpoint_initialization()
+        .map_err(|error| store_error_for_initialization(error, true))?;
+    let identity = store.identity().clone();
+    drop(store);
+    lock.sync_database()
+        .map_err(map_initialization_platform_error)?;
+    write_initialization_receipt(lock, &upgraded)?;
+
+    let reopened = HostStore::open_existing_identity_bound(database, Limits::default(), &identity)
+        .map_err(|error| store_error_for_initialization(error, true))?;
+    if reopened.identity() != &identity {
+        return Err(HostError::IdentityMismatch);
+    }
+    Ok(reopened)
 }
 
 fn map_initialization_platform_error(error: platform::Error) -> HostError {
@@ -1574,6 +1830,9 @@ pub fn initialize_profile(profile: &Path) -> Result<lomi_host_store::Identity, H
             if expected_host_id.is_some_and(|expected| expected != pinned.host_id) {
                 return Err(HostError::IdentityMismatch);
             }
+            if expected_profile_id.is_some_and(|expected| expected != pinned.profile_id) {
+                return Err(HostError::IdentityMismatch);
+            }
             if !has_database_set {
                 return Err(HostError::IdentityMismatch);
             }
@@ -1581,12 +1840,25 @@ pub fn initialize_profile(profile: &Path) -> Result<lomi_host_store::Identity, H
             let store =
                 HostStore::open_existing_identity_bound(&database, Limits::default(), &pinned)
                     .map_err(|error| store_error_for_initialization(error, true))?;
-            if store.identity() != &pinned
-                || expected_profile_id.is_some_and(|expected| expected != pinned.profile_id)
-            {
+            if store.identity() != &pinned {
                 return Err(HostError::IdentityMismatch);
             }
-            return Ok(pinned);
+            #[cfg(target_os = "linux")]
+            let store = if receipt.version == HOST_INITIALIZATION_RECEIPT_VERSION {
+                promote_linux_btrfs_v1_receipt_after_store_open(&lock, &database, receipt, store)?
+            } else {
+                store
+            };
+            #[cfg(target_os = "linux")]
+            let identity = store.identity().clone();
+            #[cfg(target_os = "linux")]
+            drop(store);
+            #[cfg(target_os = "linux")]
+            return Ok(identity);
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Ok(pinned);
+            }
         }
     }
 
@@ -1749,7 +2021,8 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
     let durable_host_id =
         lomi_platform::setup_journal::read_expected_host_id(lock.profile().path())
             .map_err(|_| HostError::InvalidProfile)?;
-    let receipt_identity = initialization_identity(initialization_receipt(&lock)?.as_ref())?;
+    let receipt = initialization_receipt(&lock)?;
+    let receipt_identity = initialization_identity(receipt.as_ref())?;
     let expected_host_id = merge_host_identity_pins(&[
         expected_host_id,
         durable_host_id,
@@ -1805,6 +2078,10 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
             HostError::Storage
         }
     })?;
+    #[cfg(target_os = "linux")]
+    if existing_profile && let Some(receipt) = receipt.as_ref() {
+        store = promote_linux_btrfs_v1_receipt_after_store_open(&lock, &database, receipt, store)?;
+    }
     #[cfg(any(unix, windows))]
     {
         public_configuration::startup(&mut store, lock.profile())
@@ -2484,6 +2761,29 @@ mod initialization_receipt_tests {
             inode,
             #[cfg(target_os = "macos")]
             volume_uuid: volume_uuid.map(str::to_owned),
+            #[cfg(target_os = "linux")]
+            filesystem_uuid: None,
+            #[cfg(target_os = "linux")]
+            subvolume_uuid: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_btrfs_owner(
+        uid: u32,
+        gid: u32,
+        device: u64,
+        inode: u64,
+        filesystem_uuid: &str,
+        subvolume_uuid: &str,
+    ) -> HostInitializationBinding {
+        HostInitializationBinding::Unix {
+            uid,
+            gid,
+            device,
+            inode,
+            filesystem_uuid: Some(filesystem_uuid.to_owned()),
+            subvolume_uuid: Some(subvolume_uuid.to_owned()),
         }
     }
 
@@ -2607,6 +2907,362 @@ mod initialization_receipt_tests {
         assert_eq!(
             serde_json::to_vec(&value).unwrap(),
             br#"{"version":1,"state":"complete","profilePath":"/tmp/profile","owner":{"platform":"unix","uid":501,"gid":20,"device":16777231,"inode":157451039},"hostId":"host-id","profileId":"profile-id"}"#,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_version_two_binds_to_filesystem_and_subvolume_uuids_not_device() {
+        let filesystem_uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let subvolume_uuid = "11234567-89ab-cdef-0123-456789abcdef";
+        let stored = linux_btrfs_owner(501, 20, 100, 200, filesystem_uuid, subvolume_uuid);
+        let current = linux_btrfs_owner(501, 20, 101, 200, filesystem_uuid, subvolume_uuid);
+
+        assert!(initialization_bindings_match(2, &stored, &current));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &linux_btrfs_owner(
+                501,
+                20,
+                101,
+                200,
+                "21234567-89ab-cdef-0123-456789abcdef",
+                subvolume_uuid
+            ),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &linux_btrfs_owner(
+                501,
+                20,
+                101,
+                200,
+                filesystem_uuid,
+                "21234567-89ab-cdef-0123-456789abcdef"
+            ),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &linux_btrfs_owner(501, 20, 101, 201, filesystem_uuid, subvolume_uuid),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &linux_btrfs_owner(502, 20, 101, 200, filesystem_uuid, subvolume_uuid),
+        ));
+        assert!(!initialization_bindings_match(
+            2,
+            &stored,
+            &linux_btrfs_owner(501, 21, 101, 200, filesystem_uuid, subvolume_uuid),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_version_two_receipt_uses_stable_camel_case_uuid_fields() {
+        let value = receipt(
+            2,
+            "/profile",
+            linux_btrfs_owner(
+                501,
+                20,
+                16_777_231,
+                157_451_039,
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "11234567-89ab-cdef-0123-456789abcdef",
+            ),
+        );
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap(),
+            br#"{"version":2,"state":"complete","profilePath":"/profile","owner":{"platform":"unix","uid":501,"gid":20,"device":16777231,"inode":157451039,"filesystemUuid":"01234567-89ab-cdef-0123-456789abcdef","subvolumeUuid":"11234567-89ab-cdef-0123-456789abcdef"},"hostId":"host-id","profileId":"profile-id"}"#,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_repair_updates_only_device_on_a_complete_canonical_v1_receipt() {
+        let mut original = receipt(1, "/profile", unix_owner(501, 20, 100, 200, None));
+        original.host_id = Some("01234567-89ab-cdef-0123-456789abcdef".to_owned());
+        original.profile_id = Some("11234567-89ab-cdef-0123-456789abcdef".to_owned());
+        let before = serde_json::to_vec(&original).unwrap();
+        let current_owner = unix_owner(501, 20, 101, 200, None);
+        let (updated_bytes, identity) =
+            prepare_linux_v1_device_rebind(&before, "/profile", &current_owner).unwrap();
+        let updated: HostInitializationReceipt = serde_json::from_slice(&updated_bytes).unwrap();
+
+        assert_eq!(updated.version, 1);
+        assert_eq!(updated.state, HostInitializationState::Complete);
+        assert_eq!(updated.profile_path, original.profile_path);
+        assert_eq!(identity, parse_initialization_identity(&original).unwrap());
+        assert_eq!(
+            updated.owner,
+            unix_owner(501, 20, 101, 200, None),
+            "only the device number changes"
+        );
+        assert_eq!(original.owner, unix_owner(501, 20, 100, 200, None));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_repair_rejects_nonexclusive_or_noncanonical_v1_receipts() {
+        let mut value = receipt(1, "/profile", unix_owner(501, 20, 100, 200, None));
+        value.host_id = Some("01234567-89ab-cdef-0123-456789abcdef".to_owned());
+        value.profile_id = Some("11234567-89ab-cdef-0123-456789abcdef".to_owned());
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let current = unix_owner(501, 20, 101, 200, None);
+
+        assert_eq!(
+            prepare_linux_v1_device_rebind(&bytes, "/other", &current),
+            Err(HostError::InvalidProfile)
+        );
+        assert_eq!(
+            prepare_linux_v1_device_rebind(
+                &bytes,
+                "/profile",
+                &unix_owner(501, 20, 100, 200, None)
+            ),
+            Err(HostError::IdentityMismatch)
+        );
+        assert_eq!(
+            prepare_linux_v1_device_rebind(
+                &bytes,
+                "/profile",
+                &unix_owner(502, 20, 101, 200, None)
+            ),
+            Err(HostError::IdentityMismatch)
+        );
+        assert_eq!(
+            prepare_linux_v1_device_rebind(
+                &bytes,
+                "/profile",
+                &unix_owner(501, 20, 101, 201, None)
+            ),
+            Err(HostError::IdentityMismatch)
+        );
+
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b' ');
+        assert_eq!(
+            prepare_linux_v1_device_rebind(&noncanonical, "/profile", &current),
+            Err(HostError::InvalidProfile)
+        );
+        let snapshot = bytes.clone();
+        assert!(prepare_linux_v1_device_rebind(&bytes, "/profile", &current).is_ok());
+        assert_eq!(
+            bytes, snapshot,
+            "repair preparation never mutates input bytes"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run from a Btrfs-backed test workspace as the selected Host account"]
+    fn linux_btrfs_device_repair_allows_old_startup_then_v2_promotion() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct TempProfile(std::path::PathBuf);
+        impl Drop for TempProfile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let path = std::env::current_dir()
+            .expect("current test workspace")
+            .join(format!(
+                ".linux-profile-repair-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+        std::fs::create_dir(&path).expect("create private profile test directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make profile test directory private");
+        let _profile = TempProfile(path.clone());
+
+        let legacy_cli = std::env::var_os("LOMI_LEGACY_PROFILE_CLI")
+            .map(PathBuf::from)
+            .expect("set LOMI_LEGACY_PROFILE_CLI to the installed 0.1.6 CLI");
+        let initialize_with_legacy_cli = || {
+            Command::new(&legacy_cli)
+                .arg("--internal-initialize-profile")
+                .arg(&path)
+                .status()
+                .expect("run installed legacy initializer")
+        };
+        fn schema(lock: &OwnerLock, identity: &lomi_host_store::Identity) -> u64 {
+            lomi_host_store::MaintenanceProfileStore::open_existing(lock, identity)
+                .and_then(|store| store.observation())
+                .expect("read schema without migration")
+                .profile_schema
+        }
+        assert!(
+            {
+                let lock = OwnerLock::acquire(&path).expect("acquire fresh profile lock");
+                let creating =
+                    make_initialization_receipt(&lock, HostInitializationState::Creating, None)
+                        .expect("create interrupted-initialization receipt");
+                assert_eq!(creating.version, HOST_INITIALIZATION_RECEIPT_VERSION);
+                assert!(matches!(
+                    creating.owner,
+                    HostInitializationBinding::Unix {
+                        filesystem_uuid: None,
+                        subvolume_uuid: None,
+                        ..
+                    }
+                ));
+                write_initialization_receipt(&lock, &creating)
+                    .expect("persist pre-database v1 receipt");
+                drop(lock);
+                initialize_with_legacy_cli().success()
+            },
+            "installed 0.1.6 accepts an interrupted fresh v1 receipt and completes it"
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("acquire temporary profile lock");
+        let receipt = initialization_receipt(&lock)
+            .expect("read old CLI receipt")
+            .expect("old CLI wrote complete receipt");
+        assert_eq!(receipt.version, HOST_INITIALIZATION_RECEIPT_VERSION);
+        let identity = parse_initialization_identity(&receipt).expect("read old CLI identity");
+        assert_eq!(
+            schema(&lock, &identity),
+            14,
+            "the installed CLI creates schema 14"
+        );
+        let stable = lock
+            .profile_btrfs_identity()
+            .expect("read Btrfs identity")
+            .expect("test workspace is Btrfs-backed");
+        assert!(canonical_profile_volume_uuid(&stable.filesystem_uuid));
+        assert!(canonical_profile_volume_uuid(&stable.subvolume_uuid));
+
+        let expected_v1 = HostInitializationReceipt {
+            version: HOST_INITIALIZATION_RECEIPT_VERSION,
+            state: HostInitializationState::Complete,
+            profile_path: path.to_str().expect("UTF-8 test path").to_owned(),
+            owner: host_initialization_owner_v1(&lock).expect("read v1 owner binding"),
+            host_id: Some(String::from(identity.host_id.clone())),
+            profile_id: Some(String::from(identity.profile_id.clone())),
+        };
+        let mut drifted_v1 = expected_v1.clone();
+        let HostInitializationBinding::Unix { device, .. } = &mut drifted_v1.owner;
+        *device = device.checked_add(1).expect("different device value");
+        write_initialization_receipt(&lock, &drifted_v1).expect("write v1 drift fixture");
+        let before = lock
+            .read_host_initialization_receipt()
+            .expect("read v1 fixture")
+            .expect("v1 receipt exists");
+        drop(lock);
+
+        assert_eq!(
+            repair_profile_device_binding(&path, false),
+            Err(HostError::InvalidProfile)
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("reacquire profile lock");
+        assert_eq!(
+            lock.read_host_initialization_receipt()
+                .expect("read unchanged v1 receipt")
+                .as_deref(),
+            Some(before.as_slice())
+        );
+        let mut mismatched_v1 = drifted_v1.clone();
+        mismatched_v1.host_id = Some("21234567-89ab-cdef-0123-456789abcdef".to_owned());
+        write_initialization_receipt(&lock, &mismatched_v1)
+            .expect("write mismatched identity fixture");
+        let mismatched_before = lock
+            .read_host_initialization_receipt()
+            .expect("read mismatched identity fixture")
+            .expect("mismatched receipt exists");
+        drop(lock);
+
+        assert_eq!(
+            repair_profile_device_binding(&path, true),
+            Err(HostError::IdentityMismatch)
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("reacquire mismatched profile");
+        assert_eq!(
+            lock.read_host_initialization_receipt()
+                .expect("read unchanged mismatched receipt")
+                .as_deref(),
+            Some(mismatched_before.as_slice())
+        );
+        write_initialization_receipt(&lock, &drifted_v1).expect("restore matching v1 fixture");
+        drop(lock);
+
+        repair_profile_device_binding(&path, true).expect("repair device-only v1 drift");
+        let lock = OwnerLock::acquire_existing(&path).expect("reacquire repaired profile");
+        assert_eq!(
+            initialization_receipt(&lock).expect("validate repaired old-format receipt"),
+            Some(expected_v1.clone())
+        );
+        assert_eq!(
+            schema(&lock, &identity),
+            14,
+            "legacy repair must not migrate the DB"
+        );
+        drop(lock);
+
+        assert!(
+            initialize_with_legacy_cli().success(),
+            "the installed 0.1.6 CLI still accepts the repaired v1 receipt and schema 14"
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("reacquire legacy profile");
+        assert_eq!(schema(&lock, &identity), 14);
+        assert_eq!(
+            initialization_receipt(&lock).expect("validate legacy receipt after old init"),
+            Some(expected_v1.clone())
+        );
+        drop(lock);
+
+        assert_eq!(
+            initialize_profile(&path).expect("new initializer migrates and promotes v1"),
+            identity
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("inspect promoted profile");
+        let promoted = initialization_receipt(&lock)
+            .expect("validate promoted v2 receipt")
+            .expect("complete receipt exists");
+        assert_eq!(
+            promoted.version,
+            HOST_INITIALIZATION_RECEIPT_VERSION_CURRENT
+        );
+        assert!(matches!(
+            promoted.owner,
+            HostInitializationBinding::Unix {
+                filesystem_uuid: Some(_),
+                subvolume_uuid: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            schema(&lock, &identity),
+            15,
+            "schema 15 is committed before receipt v2"
+        );
+        let receipt_before_old_access = lock
+            .read_host_initialization_receipt()
+            .expect("read v2 receipt before legacy access")
+            .expect("v2 receipt exists");
+        let database_before_old_access = std::fs::read(path.join("host.sqlite3"))
+            .expect("read private test database before legacy access");
+        drop(lock);
+
+        assert!(
+            !initialize_with_legacy_cli().success(),
+            "the installed 0.1.6 CLI rejects schema 15 / receipt v2"
+        );
+        let lock = OwnerLock::acquire_existing(&path).expect("reacquire promoted profile");
+        assert_eq!(
+            lock.read_host_initialization_receipt()
+                .expect("read receipt after legacy rejection")
+                .as_deref(),
+            Some(receipt_before_old_access.as_slice())
+        );
+        assert_eq!(
+            std::fs::read(path.join("host.sqlite3")).expect("reread private test database"),
+            database_before_old_access,
+            "legacy rejection leaves the v2 profile unchanged"
         );
     }
 }

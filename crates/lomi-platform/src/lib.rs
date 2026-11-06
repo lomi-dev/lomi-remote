@@ -3,6 +3,8 @@
 //!
 //! The owner lock is held for the entire host lifetime, including SQLite shutdown.
 //! Peers are authenticated by the operating system before any JSON is accepted.
+#[cfg(target_os = "linux")]
+mod btrfs_identity;
 #[cfg(target_os = "macos")]
 pub mod native_evidence_runtime;
 #[cfg(unix)]

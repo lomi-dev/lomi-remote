@@ -395,7 +395,11 @@ fn read_cloud_history(db: &Connection) -> Result<Option<bool>> {
     })
     .transpose()
 }
-#[cfg(any(unix, windows))]
+#[cfg(target_os = "linux")]
+const VERSION: i64 = 15;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const VERSION: i64 = 14;
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 const VERSION: i64 = 14;
 #[cfg(any(unix, windows))]
 const MAX_NATIVE_INTENT_ROWS: usize = 16_384;
@@ -763,6 +767,102 @@ impl HostStore {
             return SetupInspection::Unavailable;
         }
         Self::inspect_setup_snapshot(path)
+    }
+
+    /// Read only the pinned Store identity while the caller holds the exact
+    /// Unix profile owner lock. This path is immutable/read-only and never
+    /// reads authorization configuration, workspace data, or runs migrations.
+    #[cfg(target_os = "linux")]
+    pub fn inspect_identity_under_owner_lock(
+        path: &Path,
+        lock: &lomi_platform::unix::OwnerLock,
+    ) -> Result<Identity> {
+        Self::inspect_identity_under_owner_lock_version(path, lock, None)
+    }
+
+    /// Read only a schema-14 identity for the hidden legacy Linux profile
+    /// device-binding repair. That operation must not migrate the database,
+    /// because its purpose is to let the old schema-14 daemon start.
+    #[cfg(target_os = "linux")]
+    pub fn inspect_legacy_v14_identity_under_owner_lock(
+        path: &Path,
+        lock: &lomi_platform::unix::OwnerLock,
+    ) -> Result<Identity> {
+        Self::inspect_identity_under_owner_lock_version(path, lock, Some(14))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inspect_identity_under_owner_lock_version(
+        path: &Path,
+        lock: &lomi_platform::unix::OwnerLock,
+        expected_version: Option<i64>,
+    ) -> Result<Identity> {
+        let validated_path = lock
+            .validate_existing_database()
+            .map_err(|_| StoreError::Invalid)?;
+        if validated_path != path {
+            return Err(StoreError::Invalid);
+        }
+
+        // Immutable SQLite reads ignore WAL content. A nonempty WAL or hot
+        // journal therefore makes the identity ambiguous and is rejected.
+        for suffix in ["-wal", "-journal"] {
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            match fs::symlink_metadata(Path::new(&sidecar)) {
+                Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {}
+                Ok(metadata) if metadata.file_type().is_file() => return Err(StoreError::Busy),
+                Ok(_) => return Err(StoreError::Invalid),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(StoreError::Storage),
+            }
+        }
+
+        let uri = immutable_setup_uri(path).ok_or(StoreError::Invalid)?;
+        let db = Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::ZERO)?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if !(1..=VERSION).contains(&version)
+            || expected_version.is_some_and(|expected| expected != version)
+        {
+            return Err(StoreError::SchemaVersion);
+        }
+        let metadata_exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !metadata_exists {
+            return Err(StoreError::SchemaVersion);
+        }
+        let identity_rows: i64 = db.query_row(
+            "SELECT count(*) FROM metadata WHERE key='identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        if identity_rows != 1 {
+            return Err(StoreError::Fenced);
+        }
+        let identity_length: i64 = db.query_row(
+            "SELECT length(CAST(value AS BLOB)) FROM metadata WHERE key='identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !(1..=4096).contains(&identity_length) {
+            return Err(StoreError::Storage);
+        }
+        let wire: String = db.query_row(
+            "SELECT value FROM metadata WHERE key='identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        decode(&wire)
     }
 
     #[cfg(windows)]
@@ -1383,6 +1483,19 @@ PRAGMA user_version=6;",
                     ON profile_purge_attempt_ids(attempt_id);
                 PRAGMA user_version=14;",
             )?;
+            tx.commit()?;
+        }
+        #[cfg(target_os = "linux")]
+        if version < 15 {
+            if version != 0 {
+                // Schema 15 is an intentional rollback fence for Linux's
+                // Btrfs-bound profile receipt format. The tables and rows are
+                // unchanged; the version commit itself must be durable before
+                // a v1 receipt can be replaced with v2.
+                migration_backup(&db, &path.with_extension("before-v15.sqlite"), 14)?;
+            }
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch("PRAGMA user_version=15;")?;
             tx.commit()?;
         }
         #[cfg(any(unix, windows))]
@@ -5737,5 +5850,264 @@ fn clear_exited_sessions(layout: &mut TerminalLayout) -> bool {
             let a = clear_exited_sessions(first);
             clear_exited_sessions(second) || a
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod identity_inspection_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct TestProfile(PathBuf);
+
+    impl Drop for TestProfile {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn private_test_profile(suffix: &str) -> TestProfile {
+        let path = std::env::temp_dir().join(format!(
+            "lomi-host-store-identity-{suffix}-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir(&path).expect("create private test profile");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("set private test profile mode");
+        TestProfile(path)
+    }
+
+    #[test]
+    fn identity_read_does_not_decode_auth_configuration() {
+        let profile = private_test_profile("auth");
+        let lock =
+            lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
+        let database = lock.prepare_database().expect("prepare test database");
+        let store = HostStore::open(&database, Limits::default()).expect("initialize store");
+        let expected = store.identity().clone();
+        drop(store);
+
+        let writer = Connection::open(&database).expect("open test database for fixture");
+        writer
+            .execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES('auth_configuration','invalid')",
+                [],
+            )
+            .expect("write unreadable auth fixture");
+        drop(writer);
+
+        let observed = HostStore::inspect_identity_under_owner_lock(&database, &lock)
+            .expect("read identity without decoding auth configuration");
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn identity_read_rejects_pending_wal_without_mutating_it() {
+        let profile = private_test_profile("wal");
+        let lock =
+            lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
+        let database = lock.prepare_database().expect("prepare test database");
+        let store = HostStore::open(&database, Limits::default()).expect("initialize store");
+        drop(store);
+
+        let mut wal = database.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal_path = PathBuf::from(wal);
+        fs::write(&wal_path, b"pending").expect("write pending WAL fixture");
+        fs::set_permissions(&wal_path, fs::Permissions::from_mode(0o600))
+            .expect("set private WAL fixture mode");
+        let before = fs::read(&wal_path).expect("read WAL fixture");
+
+        assert_eq!(
+            HostStore::inspect_identity_under_owner_lock(&database, &lock),
+            Err(StoreError::Busy)
+        );
+        let after = fs::read(&wal_path).expect("reread WAL fixture");
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn legacy_repair_identity_read_requires_schema_14_and_never_migrates() {
+        let profile = private_test_profile("legacy-v14");
+        let lock =
+            lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
+        let database = lock.prepare_database().expect("prepare test database");
+        let store = HostStore::open(&database, Limits::default()).expect("initialize store");
+        let expected = store.identity().clone();
+        drop(store);
+
+        let writer = Connection::open(&database).expect("open test database for v14 fixture");
+        writer
+            .pragma_update(None, "journal_mode", "DELETE")
+            .expect("close WAL for legacy fixture");
+        writer
+            .pragma_update(None, "user_version", 14)
+            .expect("mark legacy schema version");
+        drop(writer);
+
+        let observed = HostStore::inspect_legacy_v14_identity_under_owner_lock(&database, &lock)
+            .expect("read schema-14 identity without migration");
+        assert_eq!(observed, expected);
+        let reader = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open migrated-version observation");
+        let version: i64 = reader
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(version, 14, "legacy repair observation must be read-only");
+        drop(reader);
+
+        let writer = Connection::open(&database).expect("open database to change fixture version");
+        writer
+            .pragma_update(None, "user_version", 15)
+            .expect("set current schema for rejection fixture");
+        drop(writer);
+        assert_eq!(
+            HostStore::inspect_legacy_v14_identity_under_owner_lock(&database, &lock),
+            Err(StoreError::SchemaVersion),
+            "legacy repair is limited to the schema accepted by 0.1.6"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod schema_15_migration_tests {
+    use super::*;
+    use rusqlite::OpenFlags;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct TestProfile(PathBuf);
+
+    impl Drop for TestProfile {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn private_test_profile() -> TestProfile {
+        let path =
+            std::env::temp_dir().join(format!("lomi-host-store-schema-15-{}", Uuid::new_v4()));
+        fs::create_dir(&path).expect("create private test profile");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("set private test profile mode");
+        TestProfile(path)
+    }
+
+    fn complete_rows(db: &Connection) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        let tables = db
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .expect("prepare table inventory")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("read table inventory")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect table inventory");
+        tables
+            .into_iter()
+            .map(|table| {
+                let quoted = table.replace('"', "\"\"");
+                let base = format!("SELECT * FROM \"{quoted}\"");
+                let columns = db
+                    .prepare(&base)
+                    .expect("prepare table snapshot")
+                    .column_count();
+                let order = (1..=columns)
+                    .map(|column| column.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut rows = database_rows(db, &format!("{base} ORDER BY {order}"))
+                    .expect("read table rows");
+                // Opening the normal Host runs its established recovery turn
+                // after migration. It advances these runtime fences; the
+                // schema migration itself must preserve every other row.
+                if table == "metadata" {
+                    rows.retain(|row| {
+                        row.first()
+                            != Some(&rusqlite::types::Value::Text("owner_generation".to_owned()))
+                    });
+                } else if table == "native_clock" {
+                    rows.clear();
+                }
+                (table, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn schema_14_to_15_preserves_all_tables_rows_and_identity() {
+        assert_eq!(PROFILE_SCHEMA_VERSION, 15);
+        let profile = private_test_profile();
+        let lock =
+            lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
+        let database = lock.prepare_database().expect("prepare test database");
+        let store = HostStore::open(&database, Limits::default()).expect("initialize store");
+        let identity = store.identity().clone();
+        store
+            .checkpoint_initialization()
+            .expect("checkpoint initial store");
+        drop(store);
+
+        let writer = Connection::open(&database).expect("open test database for v14 fixture");
+        writer
+            .pragma_update(None, "journal_mode", "DELETE")
+            .expect("close WAL for v14 fixture");
+        writer
+            .execute(
+                "INSERT INTO metadata(key,value) VALUES('schema15_test_marker','preserve-me')",
+                [],
+            )
+            .expect("insert migration preservation marker");
+        writer
+            .pragma_update(None, "user_version", 14)
+            .expect("mark legacy schema version");
+        drop(writer);
+
+        let before = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open schema-14 snapshot");
+        let before_tables = database_rows(
+            &before,
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
+        )
+        .expect("snapshot schema-14 table definitions");
+        let before_rows = complete_rows(&before);
+        let before_version: i64 = before
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema-14 version");
+        assert_eq!(before_version, 14);
+        drop(before);
+
+        let migrated =
+            HostStore::open_existing_identity_bound(&database, Limits::default(), &identity)
+                .expect("open identity-bound store and migrate schema");
+        assert_eq!(migrated.identity(), &identity);
+        migrated
+            .checkpoint_initialization()
+            .expect("checkpoint schema-15 store");
+        drop(migrated);
+        lock.sync_database().expect("sync migrated database");
+
+        let after = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open schema-15 snapshot");
+        let after_tables = database_rows(
+            &after,
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
+        )
+        .expect("snapshot schema-15 table definitions");
+        let after_rows = complete_rows(&after);
+        let after_version: i64 = after
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema-15 version");
+        let marker: String = after
+            .query_row(
+                "SELECT value FROM metadata WHERE key='schema15_test_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read preservation marker");
+        assert_eq!(after_version, 15);
+        assert_eq!(after_tables, before_tables, "schema 15 adds no tables");
+        assert_eq!(
+            after_rows, before_rows,
+            "schema 15 preserves all table rows"
+        );
+        assert_eq!(marker, "preserve-me");
     }
 }

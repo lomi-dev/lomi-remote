@@ -10,12 +10,8 @@ use lomi_host_store::{
     HostStore, Identity, Limits, ProfilePurgeAuthority, ProfilePurgePhase, ProfilePurgeStore,
     StoreError,
 };
-use lomi_platform::{
-    secrets::{SecretStorage, Selection},
-    setup_context,
-};
+use lomi_platform::secrets::{SecretStorage, Selection};
 use lomi_remote_protocol::{HostId, OperationId, ipc::*};
-use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -57,202 +53,13 @@ impl std::fmt::Display for ProfilePurgeError {
 }
 impl std::error::Error for ProfilePurgeError {}
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
-enum InitializationBinding {
-    #[cfg(unix)]
-    Unix {
-        uid: u32,
-        gid: u32,
-        device: u64,
-        inode: u64,
-        #[cfg(target_os = "macos")]
-        #[serde(
-            rename = "volumeUuid",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        volume_uuid: Option<String>,
-    },
-    #[cfg(windows)]
-    Windows {
-        sid: String,
-        volume: u64,
-        file_index: u64,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum InitializationState {
-    Creating,
-    Complete,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct InitializationReceipt {
-    version: u8,
-    state: InitializationState,
-    profile_path: String,
-    owner: InitializationBinding,
-    host_id: Option<String>,
-    profile_id: Option<String>,
-}
-
-#[cfg(unix)]
-fn unix_initialization_binding_matches(
-    version: u8,
-    receipt_owner: &InitializationBinding,
-    current_uid: u32,
-    current_gid: u32,
-    current_device: u64,
-    current_inode: u64,
-    current_volume_uuid: Option<&str>,
-) -> bool {
-    match version {
-        1 => {
-            #[cfg(target_os = "macos")]
-            {
-                matches!(
-                    receipt_owner,
-                    InitializationBinding::Unix {
-                        uid,
-                        gid,
-                        device,
-                        inode,
-                        volume_uuid: None,
-                    } if *uid == current_uid
-                        && *gid == current_gid
-                        && *device == current_device
-                        && *inode == current_inode
-                )
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                matches!(
-                    receipt_owner,
-                    InitializationBinding::Unix { uid, gid, device, inode }
-                        if *uid == current_uid
-                            && *gid == current_gid
-                            && *device == current_device
-                            && *inode == current_inode
-                )
-            }
-        }
-        #[cfg(target_os = "macos")]
-        2 => {
-            let InitializationBinding::Unix {
-                uid,
-                gid,
-                inode,
-                volume_uuid: Some(receipt_uuid),
-                ..
-            } = receipt_owner
-            else {
-                return false;
-            };
-            let Some(current_uuid) = current_volume_uuid else {
-                return false;
-            };
-            crate::unix::canonical_profile_volume_uuid(receipt_uuid)
-                && crate::unix::canonical_profile_volume_uuid(current_uuid)
-                && *uid == current_uid
-                && *gid == current_gid
-                && *inode == current_inode
-                && receipt_uuid == current_uuid
-        }
-        _ => false,
-    }
-}
-
-fn initialization_receipt_path_matches(receipt_path: &str, profile: &Path) -> bool {
-    profile
-        .to_str()
-        .is_some_and(|current_path| receipt_path == current_path)
-}
-
 fn receipt_identity(owner: &platform::OwnerLock) -> Result<Identity, ProfilePurgeError> {
-    let bytes = owner
-        .read_host_initialization_receipt()
+    let receipt = crate::unix::initialization_receipt(owner)
         .map_err(|_| ProfilePurgeError::InvalidProfile)?
+        .filter(|receipt| receipt.state == crate::unix::HostInitializationState::Complete)
         .ok_or(ProfilePurgeError::InvalidProfile)?;
-    let receipt: InitializationReceipt =
-        serde_json::from_slice(&bytes).map_err(|_| ProfilePurgeError::InvalidProfile)?;
-    let encoded = serde_json::to_vec(&receipt).map_err(|_| ProfilePurgeError::InvalidProfile)?;
-    #[cfg(target_os = "macos")]
-    let supported_version = matches!(receipt.version, 1 | 2);
-    #[cfg(not(target_os = "macos"))]
-    let supported_version = receipt.version == 1;
-    if encoded != bytes
-        || !supported_version
-        || receipt.state != InitializationState::Complete
-        || !initialization_receipt_path_matches(&receipt.profile_path, owner.profile().path())
-    {
-        return Err(ProfilePurgeError::InvalidProfile);
-    }
-
-    let selected =
-        setup_context::select_current_account().map_err(|_| ProfilePurgeError::IdentityMismatch)?;
-    let (first, second) = owner.profile_identity();
-    #[cfg(unix)]
-    let binding_matches = {
-        let account = selected.unix().ok_or(ProfilePurgeError::IdentityMismatch)?;
-        let current_volume_uuid: Option<String> = if receipt.version == 2 {
-            #[cfg(target_os = "macos")]
-            {
-                Some(
-                    owner
-                        .profile_volume_uuid()
-                        .map_err(|_| ProfilePurgeError::InvalidProfile)?,
-                )
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                None
-            }
-        } else {
-            None
-        };
-        unix_initialization_binding_matches(
-            receipt.version,
-            &receipt.owner,
-            account.uid(),
-            account.gid(),
-            first,
-            second,
-            current_volume_uuid.as_deref(),
-        )
-    };
-    #[cfg(windows)]
-    let binding_matches = {
-        let account = selected
-            .windows()
-            .ok_or(ProfilePurgeError::IdentityMismatch)?;
-        matches!(
-            &receipt.owner,
-            InitializationBinding::Windows { sid, volume, file_index }
-                if sid == account.sid() && *volume == first && *file_index == second
-        )
-    };
-    if !binding_matches {
-        return Err(ProfilePurgeError::IdentityMismatch);
-    }
-
-    let host_id: HostId = receipt
-        .host_id
-        .ok_or(ProfilePurgeError::InvalidProfile)?
-        .try_into()
-        .map_err(|_| ProfilePurgeError::InvalidProfile)?;
-    let profile_id: IpcProfileId = receipt
-        .profile_id
-        .ok_or(ProfilePurgeError::InvalidProfile)?
-        .try_into()
-        .map_err(|_| ProfilePurgeError::InvalidProfile)?;
-    Ok(Identity {
-        host_id,
-        profile_id,
-    })
+    crate::unix::parse_initialization_identity(&receipt)
+        .map_err(|_| ProfilePurgeError::InvalidProfile)
 }
 
 fn validate_receipt(
@@ -477,123 +284,81 @@ fn mark_uncertain(store: &mut ProfilePurgeStore, authority: &ProfilePurgeAuthori
     let _ = store.mark_uncertain(authority);
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod initialization_receipt_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
-    #[cfg(unix)]
-    fn unix_owner(
-        uid: u32,
-        gid: u32,
-        device: u64,
-        inode: u64,
-        volume_uuid: Option<&str>,
-    ) -> InitializationBinding {
-        #[cfg(not(target_os = "macos"))]
-        let _ = volume_uuid;
-        InitializationBinding::Unix {
-            uid,
-            gid,
-            device,
-            inode,
-            #[cfg(target_os = "macos")]
-            volume_uuid: volume_uuid.map(str::to_owned),
+    struct TestProfile(std::path::PathBuf);
+
+    impl Drop for TestProfile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
     #[test]
-    #[cfg(unix)]
-    fn version_one_still_rejects_device_drift() {
-        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, None);
-        assert!(!unix_initialization_binding_matches(
-            1,
-            &stored,
-            501,
-            20,
-            16_777_233,
-            157_451_039,
-            None,
-        ));
-    }
+    #[ignore = "run from a Btrfs-backed test workspace as the selected Host account"]
+    fn linux_btrfs_v2_receipt_purge_validation_pins_filesystem_and_subvolume() {
+        let path = std::env::current_dir()
+            .expect("current test workspace")
+            .join(format!(".linux-profile-purge-v2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).expect("create private profile test directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make profile test directory private");
+        let _profile = TestProfile(path.clone());
+        let owner = platform::OwnerLock::acquire(&path).expect("acquire profile owner lock");
+        let identity = Identity {
+            host_id: HostId::from_bytes(uuid::Uuid::new_v4().into_bytes())
+                .expect("valid test Host ID"),
+            profile_id: IpcProfileId::from_bytes(uuid::Uuid::new_v4().into_bytes())
+                .expect("valid test profile ID"),
+        };
+        let receipt = crate::unix::make_initialization_receipt(
+            &owner,
+            crate::unix::HostInitializationState::Complete,
+            Some(&identity),
+        )
+        .expect("create Btrfs v2 test receipt");
+        assert_eq!(receipt.version, 2);
+        crate::unix::write_initialization_receipt(&owner, &receipt)
+            .expect("write Btrfs v2 test receipt");
+        assert_eq!(receipt_identity(&owner), Ok(identity.clone()));
 
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn version_two_matches_uuid_and_inode_and_checks_account_and_path() {
-        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
-        let stored = unix_owner(501, 20, 16_777_231, 157_451_039, Some(uuid));
-        assert!(unix_initialization_binding_matches(
-            2,
-            &stored,
-            501,
-            20,
-            16_777_233,
-            157_451_039,
-            Some(uuid),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &unix_owner(501, 20, 16_777_231, 157_451_039, Some("not-a-uuid")),
-            501,
-            20,
-            16_777_233,
-            157_451_039,
-            Some("not-a-uuid"),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &unix_owner(
-                501,
-                20,
-                16_777_231,
-                157_451_039,
-                Some("00000000-0000-0000-0000-000000000000"),
-            ),
-            501,
-            20,
-            16_777_233,
-            157_451_039,
-            Some("00000000-0000-0000-0000-000000000000"),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &stored,
-            501,
-            20,
-            16_777_233,
-            157_451_040,
-            Some(uuid),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &stored,
-            502,
-            20,
-            16_777_233,
-            157_451_039,
-            Some(uuid),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &stored,
-            501,
-            21,
-            16_777_233,
-            157_451_039,
-            Some(uuid),
-        ));
-        assert!(!unix_initialization_binding_matches(
-            2,
-            &stored,
-            501,
-            20,
-            16_777_233,
-            157_451_039,
-            Some("11234567-89ab-cdef-0123-456789abcdef"),
-        ));
-        assert!(!initialization_receipt_path_matches(
-            "/other/profile",
-            Path::new("/profile"),
-        ));
+        let mut changed = receipt.clone();
+        let crate::unix::HostInitializationBinding::Unix { device, .. } = &mut changed.owner;
+        *device = device.checked_add(1).expect("different mount device");
+        crate::unix::write_initialization_receipt(&owner, &changed)
+            .expect("write mount-device drift fixture");
+        assert_eq!(
+            receipt_identity(&owner),
+            Ok(identity.clone()),
+            "v2 uses stable UUIDs instead of the mount device number"
+        );
+
+        let crate::unix::HostInitializationBinding::Unix {
+            filesystem_uuid, ..
+        } = &mut changed.owner;
+        *filesystem_uuid = Some("21234567-89ab-cdef-0123-456789abcdef".to_owned());
+        crate::unix::write_initialization_receipt(&owner, &changed)
+            .expect("write wrong filesystem UUID fixture");
+        assert_eq!(
+            receipt_identity(&owner),
+            Err(ProfilePurgeError::InvalidProfile),
+            "purge rejects a receipt bound to another filesystem"
+        );
+
+        let mut changed = receipt;
+        let crate::unix::HostInitializationBinding::Unix { subvolume_uuid, .. } =
+            &mut changed.owner;
+        *subvolume_uuid = Some("21234567-89ab-cdef-0123-456789abcdef".to_owned());
+        crate::unix::write_initialization_receipt(&owner, &changed)
+            .expect("write wrong subvolume UUID fixture");
+        assert_eq!(
+            receipt_identity(&owner),
+            Err(ProfilePurgeError::InvalidProfile),
+            "purge rejects a receipt bound to another physical subvolume"
+        );
     }
 }
 

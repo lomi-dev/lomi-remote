@@ -1258,6 +1258,27 @@ fn main() -> ExitCode {
             Err(_) => 4,
         });
     }
+    #[cfg(target_os = "linux")]
+    if env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-repair-profile-device"))
+    {
+        let mut arguments = env::args_os().skip(2);
+        let (Some(confirm), Some(profile), None) =
+            (arguments.next(), arguments.next(), arguments.next())
+        else {
+            return ExitCode::from(2);
+        };
+        if confirm != "--confirm" {
+            return ExitCode::from(2);
+        }
+        return ExitCode::from(
+            match lomi_host::repair_profile_device_binding(Path::new(&profile), true) {
+                Ok(()) => 0,
+                Err(lomi_host::HostError::NonRootAccountRequired) => 3,
+                Err(_) => 4,
+            },
+        );
+    }
     ExitCode::from(run())
 }
 

@@ -5,6 +5,8 @@ pub mod keychain;
 pub mod secret_service;
 pub mod secrets;
 pub(crate) mod setup_journal;
+#[cfg(target_os = "linux")]
+pub use crate::btrfs_identity::Identity as ProfileBtrfsIdentity;
 use lomi_remote_protocol::{
     HostId, LocalIpcVersion, RequestId, RuntimeId,
     ipc::{
@@ -430,6 +432,12 @@ impl OwnerLock {
     /// receipt to this exact private profile directory.
     pub fn profile_identity(&self) -> (u64, u64) {
         (self.profile.identity.device, self.profile.identity.inode)
+    }
+    /// Stable Btrfs filesystem and subvolume identity for this exact retained
+    /// profile directory descriptor. `None` means the profile is not on Btrfs.
+    #[cfg(target_os = "linux")]
+    pub fn profile_btrfs_identity(&self) -> io::Result<Option<ProfileBtrfsIdentity>> {
+        crate::btrfs_identity::read(self.profile.directory())
     }
     /// Stable filesystem volume identity for this exact retained profile
     /// directory descriptor. Available on macOS, where device numbers may

@@ -84,6 +84,8 @@ mod windows_launch;
 pub mod windows_service;
 #[cfg(windows)]
 pub mod windows_task;
+#[cfg(target_os = "linux")]
+pub use unix::repair_profile_device_binding;
 #[cfg(any(unix, windows))]
 pub use unix::{
     initialize_profile, run, run_bound, run_bound_identity, run_existing, start, start_bound,

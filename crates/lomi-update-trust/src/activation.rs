@@ -2048,3 +2048,68 @@ mod volume_format_tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_schema_fence_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn policy(version: &str, maximum_schema: u64) -> serde_json::Value {
+        serde_json::json!({"lomiRelease": {
+            "format": 1,
+            "platform": "linux-x86_64",
+            "version": version,
+            "minProfileSchema": 14,
+            "maxProfileSchema": maximum_schema,
+        }})
+    }
+
+    #[test]
+    fn schema_15_rejects_auto_rollback_to_signed_schema_14_target_before_pointer_change() {
+        let directory = tempfile::tempdir().expect("create private activation directory");
+        let root = directory.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+            .expect("make activation directory private");
+
+        let old = activate_verified_target(
+            root,
+            b"legacy 0.1.6 target",
+            &policy("0.1.6", 14),
+            "linux-x86_64",
+            14,
+        )
+        .expect("activate old schema-14 target");
+        let current = activate_verified_target(
+            root,
+            b"Linux schema-15 target",
+            &policy("0.1.7", 15),
+            "linux-x86_64",
+            14,
+        )
+        .expect("activate new target against pre-migration schema 14");
+        assert_ne!(old, current);
+
+        let active_before = read_pointer(root, ACTIVE).expect("read active pointer");
+        let previous_before = read_pointer(root, PREVIOUS).expect("read previous pointer");
+        assert!(
+            check_release_compatibility(
+                root,
+                previous_before.as_deref().unwrap(),
+                "linux-x86_64",
+                15
+            )
+            .is_err(),
+            "signed maxProfileSchema=14 is incompatible with actual schema 15"
+        );
+        assert!(
+            rollback(root, "linux-x86_64", 15).is_err(),
+            "auto-schema rollback must reject the old signed target"
+        );
+        assert_eq!(read_pointer(root, ACTIVE).unwrap(), active_before);
+        assert_eq!(read_pointer(root, PREVIOUS).unwrap(), previous_before);
+        assert_eq!(
+            fs::read(root.join(STABLE_EXECUTABLE)).unwrap(),
+            b"Linux schema-15 target"
+        );
+    }
+}
