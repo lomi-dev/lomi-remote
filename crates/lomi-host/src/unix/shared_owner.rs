@@ -6149,6 +6149,8 @@ impl PeerJournalRows {
             .into_iter()
             .map(|d| (d.pane_id, d.status))
             .collect();
+        let (pairing_pending, pairing_acknowledged) = store.pairing_decision_records()?;
+        let (channel_pending, channel_acknowledged) = store.channel_admission_records()?;
         Ok(Self {
             authorization: store.authorization_state()?,
             verified: store.verified_authorization_generation()?,
@@ -6163,10 +6165,10 @@ impl PeerJournalRows {
                 Err(error) => return Err(error),
             },
             terminals,
-            pairing_pending: store.pending_pairing_decisions()?,
-            pairing_acknowledged: store.acknowledged_workspace_grants()?,
-            channel_pending: store.pending_channel_admissions()?,
-            channel_acknowledged: store.acknowledged_channel_admissions()?,
+            pairing_pending,
+            pairing_acknowledged,
+            channel_pending,
+            channel_acknowledged,
         })
     }
     fn current(&self, other: &Self) -> bool {
@@ -6752,16 +6754,18 @@ fn peer_time_at(now: u64, clock_floor: u64) -> Result<u64, StoreError> {
 impl PeerRemoteRows {
     fn read(store: &HostStore) -> Result<Self, StoreError> {
         let current = PeerEligibilityRows::read(store)?;
+        let (pairings, grants) = store.pairing_decision_records()?;
+        let (channels, admissions) = store.channel_admission_records()?;
         Ok(Self {
             configuration: current.configuration,
             binding: current.binding,
             publication: current.publication,
             host_pending: current.host_pending,
             outbox: current.outbox,
-            pairings: store.pending_pairing_decisions()?,
-            grants: store.acknowledged_workspace_grants()?,
-            channels: store.pending_channel_admissions()?,
-            admissions: store.acknowledged_channel_admissions()?,
+            pairings,
+            grants,
+            channels,
+            admissions,
         })
     }
     fn eligible(&self, eligibility: &super::auth::cloud::PeerEligibility) -> Result<(), Error> {

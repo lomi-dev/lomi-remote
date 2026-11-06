@@ -18,6 +18,7 @@ const ACK_PREFIX: &str = "host_channel_admission:";
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COUNTER: u64 = i64::MAX as u64;
+const RECORDS_QUERY: &str = "SELECT key,value FROM (SELECT key,value FROM metadata WHERE key GLOB 'host_channel_intent:*' UNION ALL SELECT key,value FROM metadata WHERE key GLOB 'host_channel_admission:*') ORDER BY key";
 
 /// Caller-verified metadata for the exact authenticated proposal and signed wire.
 /// Times are absolute seconds; retries never recompute the context, nonce or TTL.
@@ -194,7 +195,7 @@ fn records(db: &Connection) -> Result<Records> {
         bytes: bytes as usize,
         ..Records::default()
     };
-    let mut query = db.prepare("SELECT key,value FROM metadata WHERE key GLOB 'host_channel_intent:*' OR key GLOB 'host_channel_admission:*' ORDER BY key")?;
+    let mut query = db.prepare(RECORDS_QUERY)?;
     for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (key, wire) = row?;
         if key.starts_with(INTENT_PREFIX) {
@@ -345,10 +346,21 @@ impl HostStore {
     }
     /// Historical reconciliation evidence; does not look up or revive the source grant.
     pub fn pending_channel_admissions(&self) -> Result<Vec<ChannelAdmissionIntent>> {
-        Ok(records(&self.db)?.intents)
+        self.channel_admission_records().map(|(intents, _)| intents)
     }
     pub fn acknowledged_channel_admissions(&self) -> Result<Vec<AcknowledgedChannelAdmission>> {
-        Ok(records(&self.db)?.acknowledged)
+        self.channel_admission_records()
+            .map(|(_, acknowledged)| acknowledged)
+    }
+    /// Reads both validated channel journal collections in one pass.
+    pub fn channel_admission_records(
+        &self,
+    ) -> Result<(
+        Vec<ChannelAdmissionIntent>,
+        Vec<AcknowledgedChannelAdmission>,
+    )> {
+        let all = records(&self.db)?;
+        Ok((all.intents, all.acknowledged))
     }
     /// Reserves count and the complete final ACK record before the request is sendable.
     pub fn prepare_channel_admission(
@@ -486,5 +498,100 @@ impl HostStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod records_query_tests {
+    use super::*;
+
+    fn rows(db: &Connection, query: &str) -> Vec<(String, String)> {
+        db.prepare(query)
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn union_scan_matches_legacy_order_without_temp_sorter_in_bundled_sqlite() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+            .unwrap();
+        for key in [
+            "host_channel_admission:b",
+            "host_channel_intent:z",
+            "host_channel_intent:a",
+            "host_channel_admission:y",
+            "host_channel_intent:c",
+            "host_channel_intent:",
+            "host_channel_intentX:ignored",
+            "other",
+        ] {
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                rusqlite::params![key, format!("value:{key}")],
+            )
+            .unwrap();
+        }
+
+        let legacy = rows(
+            &db,
+            "SELECT key,value FROM metadata WHERE key GLOB 'host_channel_intent:*' OR key GLOB 'host_channel_admission:*' ORDER BY key",
+        );
+        let union = rows(&db, RECORDS_QUERY);
+        assert_eq!(union, legacy);
+        assert!(union.windows(2).all(|pair| pair[0].0 < pair[1].0));
+
+        let plan: Vec<String> = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {RECORDS_QUERY}"))
+            .unwrap()
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().all(|line| !line.contains("TEMP B-TREE")),
+            "bundled SQLite query plan used a temp sorter: {plan:#?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|line| line.contains("SEARCH metadata USING"))
+                .count(),
+            2,
+            "each prefix branch must use an indexed range search: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn records_reject_corrupt_pending_and_ack_json() {
+        let identity = Identity {
+            host_id: HostId::from_bytes(Uuid::new_v4().into_bytes()).unwrap(),
+            profile_id: IpcProfileId::from_bytes(Uuid::new_v4().into_bytes()).unwrap(),
+        };
+        for key in [
+            "host_channel_intent:corrupt",
+            "host_channel_admission:corrupt",
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+                .unwrap();
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES('identity',?1)",
+                [json(&identity).unwrap()],
+            )
+            .unwrap();
+            assert!(
+                matches!(records(&db), Ok(records) if records.intents.is_empty() && records.acknowledged.is_empty())
+            );
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                [key, "not json"],
+            )
+            .unwrap();
+
+            assert!(matches!(records(&db), Err(StoreError::Storage)), "{key}");
+        }
     }
 }

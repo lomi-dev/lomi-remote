@@ -19,6 +19,7 @@ const GRANT_PREFIX: &str = "host_workspace_grant:";
 const MAX_RECORD_BYTES: usize = 128 * 1024;
 const MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COUNTER: u64 = i64::MAX as u64;
+const RECORDS_QUERY: &str = "SELECT key,value FROM (SELECT key,value FROM metadata WHERE key GLOB 'host_pairing_intent:*' UNION ALL SELECT key,value FROM metadata WHERE key GLOB 'host_workspace_grant:*') ORDER BY key";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,7 +212,7 @@ fn records(db: &Connection) -> Result<Records> {
         bytes: bytes as usize,
         ..Records::default()
     };
-    let mut query = db.prepare("SELECT key,value FROM metadata WHERE key GLOB 'host_pairing_intent:*' OR key GLOB 'host_workspace_grant:*' ORDER BY key")?;
+    let mut query = db.prepare(RECORDS_QUERY)?;
     for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (key, wire) = row?;
         if key.starts_with(INTENT_PREFIX) {
@@ -307,11 +308,18 @@ impl HostStore {
     }
     /// Reconciliation evidence only; valid after logout or reopen, not send authority.
     pub fn pending_pairing_decisions(&self) -> Result<Vec<PairingDecisionIntent>> {
-        Ok(records(&self.db)?.intents)
+        self.pairing_decision_records().map(|(intents, _)| intents)
     }
     /// Historical public evidence only; never a deserialized policy approval token.
     pub fn acknowledged_workspace_grants(&self) -> Result<Vec<AcknowledgedWorkspaceGrant>> {
-        Ok(records(&self.db)?.grants)
+        self.pairing_decision_records().map(|(_, grants)| grants)
+    }
+    /// Reads both validated pairing journal collections in one pass.
+    pub fn pairing_decision_records(
+        &self,
+    ) -> Result<(Vec<PairingDecisionIntent>, Vec<AcknowledgedWorkspaceGrant>)> {
+        let all = records(&self.db)?;
+        Ok((all.intents, all.grants))
     }
     /// Reserves both count and final ACK wire bytes before admitting an approval.
     /// Unresolved requests retain this capacity until exact ACK or explicit retirement.
@@ -506,5 +514,100 @@ impl HostStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod records_query_tests {
+    use super::*;
+
+    fn rows(db: &Connection, query: &str) -> Vec<(String, String)> {
+        db.prepare(query)
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn union_scan_matches_legacy_order_without_temp_sorter_in_bundled_sqlite() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+            .unwrap();
+        for key in [
+            "host_workspace_grant:b",
+            "host_pairing_intent:z",
+            "host_pairing_intent:a",
+            "host_workspace_grant:y",
+            "host_pairing_intent:c",
+            "host_pairing_intent:",
+            "host_pairing_intentX:ignored",
+            "other",
+        ] {
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                rusqlite::params![key, format!("value:{key}")],
+            )
+            .unwrap();
+        }
+
+        let legacy = rows(
+            &db,
+            "SELECT key,value FROM metadata WHERE key GLOB 'host_pairing_intent:*' OR key GLOB 'host_workspace_grant:*' ORDER BY key",
+        );
+        let union = rows(&db, RECORDS_QUERY);
+        assert_eq!(union, legacy);
+        assert!(union.windows(2).all(|pair| pair[0].0 < pair[1].0));
+
+        let plan: Vec<String> = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {RECORDS_QUERY}"))
+            .unwrap()
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().all(|line| !line.contains("TEMP B-TREE")),
+            "bundled SQLite query plan used a temp sorter: {plan:#?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|line| line.contains("SEARCH metadata USING"))
+                .count(),
+            2,
+            "each prefix branch must use an indexed range search: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn records_reject_corrupt_pending_and_ack_json() {
+        let identity = Identity {
+            host_id: HostId::from_bytes(Uuid::new_v4().into_bytes()).unwrap(),
+            profile_id: IpcProfileId::from_bytes(Uuid::new_v4().into_bytes()).unwrap(),
+        };
+        for key in [
+            "host_pairing_intent:corrupt",
+            "host_workspace_grant:corrupt",
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+                .unwrap();
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES('identity',?1)",
+                [json(&identity).unwrap()],
+            )
+            .unwrap();
+            assert!(
+                matches!(records(&db), Ok(records) if records.intents.is_empty() && records.grants.is_empty())
+            );
+            db.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                [key, "not json"],
+            )
+            .unwrap();
+
+            assert!(matches!(records(&db), Err(StoreError::Storage)), "{key}");
+        }
     }
 }
