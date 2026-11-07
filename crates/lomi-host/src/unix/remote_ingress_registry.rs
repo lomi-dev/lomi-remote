@@ -14,7 +14,7 @@ use std::{
 // channel. Allow eight views plus one overlapping reconnect pair, while
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
-const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(10);
+const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(500);
 
 fn staged_batch_initial_allowed(
     ordinary_yield_pending: bool,
@@ -769,7 +769,7 @@ mod tests {
             )
         };
         assert!(can_continue(
-            Duration::from_millis(9),
+            Duration::from_millis(499),
             1,
             true,
             false,
@@ -777,7 +777,7 @@ mod tests {
             true
         ));
         assert!(!can_continue(
-            Duration::from_millis(10),
+            Duration::from_millis(500),
             1,
             true,
             false,
