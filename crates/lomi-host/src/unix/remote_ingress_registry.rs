@@ -88,12 +88,19 @@ impl<'cancel> Registry<'cancel> {
         &mut self,
         setup_pending: bool,
         staged_output_pending: bool,
+        due_peer_refresh: bool,
     ) -> bool {
-        if setup_pending {
+        if setup_pending || due_peer_refresh {
             return true;
         }
         let idle_yield = std::mem::take(&mut self.idle_yield_pending);
         staged_output_pending && !idle_yield
+    }
+
+    pub(in crate::unix::auth) fn has_due_peer_refresh(&self, now: Instant) -> bool {
+        self.entries
+            .values()
+            .any(|driver| driver.peer_refresh_deadline(now).is_some())
     }
 
     pub(in crate::unix::auth) fn has_retained_operation(&self) -> bool {
@@ -721,7 +728,7 @@ mod tests {
 
         for (channel, is_staged_after) in events {
             let any_staged = staged.iter().any(|is_staged| *is_staged);
-            let priority_ingress_pending = registry.idle_priority_pending(false, any_staged);
+            let priority_ingress_pending = registry.idle_priority_pending(false, any_staged, false);
             let reservation_before = idle.reservation;
             let selected = idle.select_class_for_ready_turn(
                 priority_ingress_pending,
@@ -761,9 +768,76 @@ mod tests {
         let mut registry = Registry::with_coordinator(&cancelled, Weak::new());
         registry.note_staged_message_transition(true, false);
 
-        assert!(registry.idle_priority_pending(true, true));
-        assert!(!registry.idle_priority_pending(false, true));
-        assert!(registry.idle_priority_pending(false, true));
+        assert!(registry.idle_priority_pending(true, true, false));
+        assert!(!registry.idle_priority_pending(false, true, false));
+        assert!(registry.idle_priority_pending(false, true, false));
+    }
+
+    #[test]
+    fn due_peer_refresh_preserves_cached_idle_reservations_and_owed_yield() {
+        let due_peer_refresh = true;
+        let refreshed_peer_refresh = false;
+
+        for (class, peer_cached, channel_cached) in [
+            (WorkClass::Peer, true, false),
+            (WorkClass::Channel, false, true),
+        ] {
+            let cancelled = AtomicBool::new(false);
+            let mut registry = Registry::with_coordinator(&cancelled, Weak::new());
+            registry.note_staged_message_transition(true, false);
+
+            let mut idle = IdleScheduler::default();
+            assert_eq!(
+                idle.select_class_for_ready_turn(
+                    false,
+                    false,
+                    peer_cached,
+                    false,
+                    channel_cached,
+                    false,
+                    true,
+                ),
+                Some(class)
+            );
+            assert!(!idle.after_step(class, false, true, false));
+            let cached_reservation = idle.reservation;
+
+            // A due peer refresh suppresses cached idle work without consuming
+            // the owed turn or dropping either scheduler reservation.
+            assert!(registry.idle_priority_pending(false, true, due_peer_refresh));
+            assert!(registry.idle_yield_pending);
+            assert_eq!(
+                idle.select_class_for_ready_turn(
+                    true,
+                    false,
+                    peer_cached,
+                    false,
+                    channel_cached,
+                    false,
+                    true,
+                ),
+                None
+            );
+            assert_eq!(idle.reservation, cached_reservation);
+
+            // Once the peer cutoff is refreshed outside the due window, the
+            // owed idle turn runs even though sibling ingress remains staged.
+            assert!(!registry.idle_priority_pending(false, true, refreshed_peer_refresh));
+            assert!(!registry.idle_yield_pending);
+            assert_eq!(
+                idle.select_class_for_ready_turn(
+                    false,
+                    false,
+                    peer_cached,
+                    false,
+                    channel_cached,
+                    false,
+                    true,
+                ),
+                Some(class)
+            );
+            assert_eq!(idle.reservation, cached_reservation);
+        }
     }
 
     #[test]

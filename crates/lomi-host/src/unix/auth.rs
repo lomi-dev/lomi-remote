@@ -2584,11 +2584,15 @@ fn run_with_apis_inner(
                             let setup_pending = ingress.has_pending_setup();
                             let staged_output_pending =
                                 ingress.has_staged_output(runtime, Some(&eligibility));
-                            let priority_ingress_pending =
-                                ingress.idle_priority_pending(setup_pending, staged_output_pending);
+                            let due_peer_refresh = ingress.has_due_peer_refresh(Instant::now());
+                            let priority_ingress_pending = ingress.idle_priority_pending(
+                                setup_pending,
+                                staged_output_pending,
+                                due_peer_refresh,
+                            );
                             let discovery_allowed = apis.enabled && !setup_pending;
-                            // Cloud retains priority above. Advance an in-flight
-                            // setup or already-staged finite output before idle
+                            // Cloud retains priority above. Advance due peer
+                            // refreshes, setup, or staged output before idle
                             // Peer/Channel work. A message settlement grants
                             // one global idle turn across all channels, even
                             // while sibling messages remain staged. Keep the
