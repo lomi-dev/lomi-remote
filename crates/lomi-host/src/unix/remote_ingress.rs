@@ -438,6 +438,22 @@ struct PendingStream<'cancel> {
     delivery: Option<RemoteTerminalStreamFrame>,
     remaining: usize,
 }
+
+fn transfer_maintenance_to_stream<'cancel, Peer>(
+    maintenance: &mut super::OwnerOperation<'cancel>,
+    maintenance_aborted: &mut std::cell::Cell<bool>,
+    peer: &mut Option<Peer>,
+    replacement_maintenance: super::OwnerOperation<'cancel>,
+) -> (
+    super::OwnerOperation<'cancel>,
+    std::cell::Cell<bool>,
+    Option<Peer>,
+) {
+    let operation = std::mem::replace(maintenance, replacement_maintenance);
+    let aborted = std::mem::replace(maintenance_aborted, std::cell::Cell::new(false));
+    (operation, aborted, peer.take())
+}
+
 struct QueuedStartedOutput<'cancel> {
     kind: MessageKind,
     bytes: Box<[u8]>,
@@ -3474,7 +3490,7 @@ impl<'cancel> Connection<'cancel> {
             );
             self.peer = None;
         }
-        let runtime = Runtime {
+        let maintenance_runtime = Runtime {
             operation: &self.maintenance,
             aborted: &self.maintenance_aborted,
             ..runtime
@@ -3482,7 +3498,7 @@ impl<'cancel> Connection<'cancel> {
         let current = current_proof(
             self.peer.take(),
             auth,
-            runtime,
+            maintenance_runtime,
             eligibility,
             &self.source,
             self.peer_cutoff,
@@ -3490,17 +3506,17 @@ impl<'cancel> Connection<'cancel> {
         self.assembler
             .expire(u64::try_from(self.origin.elapsed().as_millis()).map_err(invalid_at!())?)
             .map_err(invalid_at!())?;
-        let evidence = runtime.remote_worker_evidence(auth, eligibility)?;
+        let evidence = maintenance_runtime.remote_worker_evidence(auth, eligibility)?;
         let io_deadline = current
             .io_deadline(&evidence)
             .ok_or(peer::PeerError::Invalid)?;
-        let operation = runtime.operation;
-        let owner = runtime.owner;
+        let operation = maintenance_runtime.operation;
+        let owner = maintenance_runtime.owner;
         let continuation = current.continuation();
-        let gate = runtime.gate;
-        let paused = runtime.paused;
-        let stopping = runtime.stopping;
-        let public_pending = &runtime.public_io.setup().pending;
+        let gate = maintenance_runtime.gate;
+        let paused = maintenance_runtime.paused;
+        let stopping = maintenance_runtime.stopping;
+        let public_pending = &maintenance_runtime.public_io.setup().pending;
         let check = || {
             watch(operation, gate, paused, stopping, public_pending)?;
             owner
@@ -3512,10 +3528,12 @@ impl<'cancel> Connection<'cancel> {
             | Crypto::WriteSecond(pending)
             | Crypto::ReadThird(pending) = &mut self.crypto
         {
-            let turn = peer::owner_turn(runtime, || {
-                runtime
-                    .owner
-                    .try_remote_workspace_turn(&evidence, &current, &self.workspace)
+            let turn = peer::owner_turn(maintenance_runtime, || {
+                maintenance_runtime.owner.try_remote_workspace_turn(
+                    &evidence,
+                    &current,
+                    &self.workspace,
+                )
             })?;
             turn.refresh_pending_peer(pending).map_err(invalid_at!())?;
             self.applied_observation = current.observed_at();
@@ -3526,8 +3544,8 @@ impl<'cancel> Connection<'cancel> {
         match stage {
             Crypto::WriteSecond(mut pending) => {
                 let bytes = {
-                    let turn = peer::owner_turn(runtime, || {
-                        runtime.owner.try_remote_workspace_turn(
+                    let turn = peer::owner_turn(maintenance_runtime, || {
+                        maintenance_runtime.owner.try_remote_workspace_turn(
                             &evidence,
                             &current,
                             &self.workspace,
@@ -3551,8 +3569,8 @@ impl<'cancel> Connection<'cancel> {
                 };
                 match (other, frame) {
                     (Crypto::Established(mut crypto), Poll::Pending) => {
-                        let turn = peer::owner_turn(runtime, || {
-                            runtime.owner.try_remote_workspace_turn(
+                        let turn = peer::owner_turn(maintenance_runtime, || {
+                            maintenance_runtime.owner.try_remote_workspace_turn(
                                 &evidence,
                                 &current,
                                 &self.workspace,
@@ -3566,8 +3584,8 @@ impl<'cancel> Connection<'cancel> {
                     }
                     (stage, Poll::Pending) => self.crypto = stage,
                     (Crypto::ReadFirst(mut pending), Poll::Ready(bytes)) => {
-                        let turn = peer::owner_turn(runtime, || {
-                            runtime.owner.try_remote_workspace_turn(
+                        let turn = peer::owner_turn(maintenance_runtime, || {
+                            maintenance_runtime.owner.try_remote_workspace_turn(
                                 &evidence,
                                 &current,
                                 &self.workspace,
@@ -3579,8 +3597,8 @@ impl<'cancel> Connection<'cancel> {
                         advanced = true;
                     }
                     (Crypto::ReadThird(mut pending), Poll::Ready(bytes)) => {
-                        let turn = peer::owner_turn(runtime, || {
-                            runtime.owner.try_remote_workspace_turn(
+                        let turn = peer::owner_turn(maintenance_runtime, || {
+                            maintenance_runtime.owner.try_remote_workspace_turn(
                                 &evidence,
                                 &current,
                                 &self.workspace,
@@ -3601,8 +3619,8 @@ impl<'cancel> Connection<'cancel> {
                     }
                     (Crypto::Established(mut crypto), Poll::Ready(bytes)) => {
                         let plain = {
-                            let turn = peer::owner_turn(runtime, || {
-                                runtime.owner.try_remote_workspace_turn(
+                            let turn = peer::owner_turn(maintenance_runtime, || {
+                                maintenance_runtime.owner.try_remote_workspace_turn(
                                     &evidence,
                                     &current,
                                     &self.workspace,
@@ -3677,7 +3695,7 @@ impl<'cancel> Connection<'cancel> {
             && let Crypto::Established(crypto) = &mut self.crypto
         {
             let current = self.peer.as_ref().ok_or(peer::PeerError::Invalid)?;
-            let evidence = runtime.remote_worker_evidence(auth, eligibility)?;
+            let evidence = maintenance_runtime.remote_worker_evidence(auth, eligibility)?;
             let mut outbound = None;
             // Rotate stream classes so a busy terminal or directory cannot
             // indefinitely delay workspace changes on the same connection.
@@ -3698,8 +3716,8 @@ impl<'cancel> Connection<'cancel> {
                         .map_err(invalid_at!())?,
                     1 if self.workspace_stream.is_some() => {
                         let state = {
-                            let turn = peer::owner_turn(runtime, || {
-                                runtime.owner.try_remote_workspace_turn(
+                            let turn = peer::owner_turn(maintenance_runtime, || {
+                                maintenance_runtime.owner.try_remote_workspace_turn(
                                     &evidence,
                                     current,
                                     &self.workspace,
@@ -3736,33 +3754,37 @@ impl<'cancel> Connection<'cancel> {
             }
             drop(evidence);
             if let Some((kind, bytes, delivery)) = outbound {
-                let operation = super::OwnerOperation::new(
-                    worker_deadline,
-                    cancelled.ok_or(peer::PeerError::Invalid)?,
-                );
-                let aborted = std::cell::Cell::new(false);
-                // Serialization follows dropping actor/Domain/Core turns.
-                // The first physical fragment obtains fresh authority under
-                // this new logical stream operation, then retains it.
+                let cancellation = cancelled.ok_or(peer::PeerError::Invalid)?;
+                let authorization_call = match kind {
+                    MessageKind::WorkspaceFrame => self.workspace_stream_call.clone(),
+                    MessageKind::FileWatchFrame => self.watch_call.clone(),
+                    MessageKind::TerminalFrame => None,
+                    _ => return Err(peer::PeerError::Invalid),
+                };
+                let replacement_maintenance =
+                    super::OwnerOperation::new(worker_deadline, cancellation);
                 let remaining = bytes
                     .len()
                     .div_ceil(lomi_remote_protocol::message_framing::MAX_FRAGMENT_PAYLOAD_LEN);
                 self.encoder.begin(kind, bytes).map_err(invalid_at!())?;
+                // Serialization follows dropping actor/Domain/Core turns.
+                // Transfer the exact maintenance admission and proof that
+                // authorized this output to its first physical fragment.
+                let (operation, aborted, peer) = transfer_maintenance_to_stream(
+                    &mut self.maintenance,
+                    &mut self.maintenance_aborted,
+                    &mut self.peer,
+                    replacement_maintenance,
+                );
                 self.stream = Some(PendingStream {
                     operation,
                     aborted,
-                    peer: None,
+                    peer,
                     kind,
-                    authorization_call: match kind {
-                        MessageKind::WorkspaceFrame => self.workspace_stream_call.clone(),
-                        MessageKind::FileWatchFrame => self.watch_call.clone(),
-                        MessageKind::TerminalFrame => None,
-                        _ => return Err(peer::PeerError::Invalid),
-                    },
+                    authorization_call,
                     delivery,
                     remaining,
                 });
-                self.peer = None;
                 advanced = true;
             }
         }
@@ -4655,6 +4677,87 @@ mod staged_output_tests {
             false,
             operation_deadline,
         ));
+    }
+}
+
+#[cfg(test)]
+mod stream_operation_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn stream_transfer_preserves_operation_and_moves_its_proof_once() {
+        let cancelled = AtomicBool::new(false);
+        let original_deadline = Instant::now() + Duration::from_secs(20);
+        let replacement_deadline = original_deadline + Duration::from_secs(5);
+        let mut maintenance = super::super::OwnerOperation::new(original_deadline, &cancelled);
+        let proof_identity = maintenance.retained_identity();
+        let mut maintenance_aborted = std::cell::Cell::new(true);
+        let mut peer = Some(proof_identity.clone());
+
+        let (stream_operation, stream_aborted, stream_peer) = transfer_maintenance_to_stream(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            &mut peer,
+            super::super::OwnerOperation::new(replacement_deadline, &cancelled),
+        );
+
+        assert!(stream_operation.is_same_admission(&proof_identity));
+        assert_eq!(stream_operation.deadline(), original_deadline);
+        assert!(stream_aborted.get());
+        assert!(
+            stream_peer
+                .as_ref()
+                .is_some_and(|proof| stream_operation.is_same_admission(proof))
+        );
+        assert!(peer.is_none());
+
+        let replacement_identity = maintenance.retained_identity();
+        assert!(!maintenance.is_same_admission(&proof_identity));
+        assert_eq!(maintenance.deadline(), replacement_deadline);
+        assert!(!maintenance_aborted.get());
+        assert!(maintenance.check().is_ok());
+
+        let (_next_stream_operation, _next_stream_aborted, next_stream_peer) =
+            transfer_maintenance_to_stream(
+                &mut maintenance,
+                &mut maintenance_aborted,
+                &mut peer,
+                super::super::OwnerOperation::new(replacement_deadline, &cancelled),
+            );
+        assert!(next_stream_peer.is_none());
+        assert!(!maintenance.is_same_admission(&replacement_identity));
+    }
+
+    #[test]
+    fn transferred_stream_operation_keeps_expiry_and_sticky_cancellation() {
+        let cancelled = AtomicBool::new(false);
+        let expired_deadline = Instant::now() - Duration::from_secs(1);
+        let mut maintenance = super::super::OwnerOperation::new(expired_deadline, &cancelled);
+        let mut maintenance_aborted = std::cell::Cell::new(false);
+        let mut peer: Option<()> = Some(());
+        let (expired_stream, _, _) = transfer_maintenance_to_stream(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            &mut peer,
+            super::super::OwnerOperation::new(Instant::now() + Duration::from_secs(20), &cancelled),
+        );
+        assert!(expired_stream.check().is_err());
+
+        let cancelled = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut maintenance = super::super::OwnerOperation::new(deadline, &cancelled);
+        let mut maintenance_aborted = std::cell::Cell::new(false);
+        let mut peer: Option<()> = Some(());
+        let (cancelled_stream, _, _) = transfer_maintenance_to_stream(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            &mut peer,
+            super::super::OwnerOperation::new(deadline, &cancelled),
+        );
+        cancelled.store(true, Ordering::Release);
+        assert!(cancelled_stream.check().is_err());
+        cancelled.store(false, Ordering::Release);
+        assert!(cancelled_stream.check().is_err());
     }
 }
 
