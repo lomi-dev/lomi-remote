@@ -40,6 +40,7 @@ pub(in crate::unix::auth) struct Registry<'cancel> {
     entries: BTreeMap<ChannelId, Driver<'cancel>>,
     round_robin: VecDeque<ChannelId>,
     idle_yield_pending: bool,
+    ordinary_yield_pending: bool,
 }
 
 impl<'cancel> Registry<'cancel> {
@@ -70,12 +71,14 @@ impl<'cancel> Registry<'cancel> {
             entries: BTreeMap::new(),
             round_robin: VecDeque::new(),
             idle_yield_pending: false,
+            ordinary_yield_pending: false,
         }
     }
 
     fn note_staged_message_transition(&mut self, was_staged: bool, is_staged: bool) {
         if was_staged && !is_staged {
             self.idle_yield_pending = true;
+            self.ordinary_yield_pending = true;
         }
     }
 
@@ -348,8 +351,7 @@ impl<'cancel> Registry<'cancel> {
         // this channel wins the shared round-robin advance.
     }
 
-    /// Advances one round-robin entry. Eligible queued output in any entry
-    /// keeps the next actor pass immediate, including output on a sibling.
+    /// Advances due peer refreshes first, then staged finite output fairly.
     pub(in crate::unix::auth) fn advance(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -362,7 +364,7 @@ impl<'cancel> Registry<'cancel> {
             .is_some()
             .then(|| self.next_peer_refresh(now))
             .flatten();
-        let Some(channel_id) = due.or_else(|| self.next_round_robin()) else {
+        let Some(channel_id) = self.next_registry_channel(due) else {
             return false;
         };
         let staged_settled = if let Some(driver) = self.entries.get_mut(&channel_id) {
@@ -389,6 +391,7 @@ impl<'cancel> Registry<'cancel> {
         self.entries.clear();
         self.round_robin.clear();
         self.idle_yield_pending = false;
+        self.ordinary_yield_pending = false;
         if let Some(coordinator) = self.coordinator.upgrade() {
             let _ = coordinator.set_started_git_terminal_continuation(None);
         }
@@ -412,15 +415,14 @@ impl<'cancel> Registry<'cancel> {
         self.round_robin.push_back(channel_id);
     }
 
-    fn next_round_robin(&mut self) -> Option<ChannelId> {
-        for _ in 0..MAX_CHANNELS {
-            let channel_id = self.round_robin.pop_front()?;
-            if self.entries.contains_key(&channel_id) {
-                self.round_robin.push_back(channel_id);
-                return Some(channel_id);
-            }
-        }
-        None
+    fn next_registry_channel(&mut self, due: Option<ChannelId>) -> Option<ChannelId> {
+        let entries = &self.entries;
+        select_registry_channel(
+            due,
+            &mut self.ordinary_yield_pending,
+            &mut self.round_robin,
+            |channel_id| entries.get(&channel_id).map(Driver::has_staged_output),
+        )
     }
 
     /// Refresh the pending or established connection with the earliest
@@ -470,6 +472,43 @@ impl<'cancel> Registry<'cancel> {
             self.prune_empty(channel_id);
         }
     }
+}
+
+fn next_matching_round_robin(
+    round_robin: &mut VecDeque<ChannelId>,
+    mut matches: impl FnMut(ChannelId) -> Option<bool>,
+) -> Option<ChannelId> {
+    round_robin.retain(|channel_id| matches(*channel_id).is_some());
+    let index = round_robin
+        .iter()
+        .position(|channel_id| matches(*channel_id) == Some(true))?;
+    let channel_id = round_robin.remove(index)?;
+    round_robin.push_back(channel_id);
+    Some(channel_id)
+}
+
+fn select_registry_channel(
+    due: Option<ChannelId>,
+    ordinary_yield_pending: &mut bool,
+    round_robin: &mut VecDeque<ChannelId>,
+    mut has_staged_output: impl FnMut(ChannelId) -> Option<bool>,
+) -> Option<ChannelId> {
+    if due.is_some() {
+        return due;
+    }
+    if *ordinary_yield_pending {
+        if let Some(channel_id) = next_matching_round_robin(round_robin, |channel_id| {
+            has_staged_output(channel_id).map(|_| true)
+        }) {
+            *ordinary_yield_pending = false;
+            return Some(channel_id);
+        }
+    }
+    next_matching_round_robin(round_robin, &mut has_staged_output).or_else(|| {
+        next_matching_round_robin(round_robin, |channel_id| {
+            has_staged_output(channel_id).map(|_| true)
+        })
+    })
 }
 
 fn earliest_peer_refresh(
@@ -725,5 +764,133 @@ mod tests {
         assert!(registry.idle_priority_pending(true, true));
         assert!(!registry.idle_priority_pending(false, true));
         assert!(registry.idle_priority_pending(false, true));
+    }
+
+    #[test]
+    fn due_peer_refresh_keeps_registry_yield_for_the_next_turn() {
+        let due = ChannelId::from_bytes([16; 16]).unwrap();
+        let staged = ChannelId::from_bytes([17; 16]).unwrap();
+        let mut round_robin = VecDeque::from([staged]);
+        let mut ordinary_yield_pending = true;
+
+        assert_eq!(
+            select_registry_channel(
+                Some(due),
+                &mut ordinary_yield_pending,
+                &mut round_robin,
+                |_| { panic!("a due refresh must win before staged output") }
+            ),
+            Some(due)
+        );
+        assert!(ordinary_yield_pending);
+        assert_eq!(round_robin, VecDeque::from([staged]));
+    }
+
+    #[test]
+    fn registry_yield_services_round_robin_before_remaining_staged_output() {
+        let idle = ChannelId::from_bytes([18; 16]).unwrap();
+        let first_staged = ChannelId::from_bytes([19; 16]).unwrap();
+        let second_staged = ChannelId::from_bytes([20; 16]).unwrap();
+        let mut round_robin = VecDeque::from([idle, first_staged, second_staged]);
+        let mut ordinary_yield_pending = true;
+        let staged = |channel_id| Some(channel_id != idle);
+
+        assert_eq!(
+            select_registry_channel(None, &mut ordinary_yield_pending, &mut round_robin, staged),
+            Some(idle)
+        );
+        assert!(!ordinary_yield_pending);
+        assert_eq!(
+            select_registry_channel(None, &mut ordinary_yield_pending, &mut round_robin, staged),
+            Some(first_staged)
+        );
+        assert_eq!(
+            select_registry_channel(None, &mut ordinary_yield_pending, &mut round_robin, staged),
+            Some(second_staged)
+        );
+        assert_eq!(round_robin.len(), 3);
+    }
+
+    #[test]
+    fn completed_staged_message_yields_to_idle_channel_before_sibling_output() {
+        let idle = ChannelId::from_bytes([25; 16]).unwrap();
+        let completed = ChannelId::from_bytes([26; 16]).unwrap();
+        let sibling = ChannelId::from_bytes([27; 16]).unwrap();
+        let mut round_robin = VecDeque::from([idle, completed, sibling]);
+        let staged = |channel_id| Some(channel_id != idle);
+        let mut ordinary_yield_pending = false;
+
+        assert_eq!(
+            select_registry_channel(None, &mut ordinary_yield_pending, &mut round_robin, staged),
+            Some(completed)
+        );
+        assert_eq!(round_robin, VecDeque::from([idle, sibling, completed]));
+
+        let cancelled = AtomicBool::new(false);
+        let mut registry = Registry::with_coordinator(&cancelled, Weak::new());
+        registry.note_staged_message_transition(true, false);
+        assert!(registry.ordinary_yield_pending);
+
+        assert_eq!(
+            select_registry_channel(
+                None,
+                &mut registry.ordinary_yield_pending,
+                &mut round_robin,
+                staged
+            ),
+            Some(idle)
+        );
+        assert!(!registry.ordinary_yield_pending);
+        assert_eq!(round_robin, VecDeque::from([sibling, completed, idle]));
+    }
+
+    #[test]
+    fn staged_output_round_robins_and_skips_unknown_or_unstaged_channels() {
+        let unknown = ChannelId::from_bytes([21; 16]).unwrap();
+        let producer_only = ChannelId::from_bytes([22; 16]).unwrap();
+        let first_staged = ChannelId::from_bytes([23; 16]).unwrap();
+        let second_staged = ChannelId::from_bytes([24; 16]).unwrap();
+        let mut round_robin = VecDeque::from([unknown, producer_only, first_staged, second_staged]);
+        let mut ordinary_yield_pending = false;
+        let has_staged = |channel_id| match channel_id {
+            id if id == unknown => None,
+            id if id == producer_only => Some(false),
+            _ => Some(true),
+        };
+
+        assert_eq!(
+            select_registry_channel(
+                None,
+                &mut ordinary_yield_pending,
+                &mut round_robin,
+                has_staged
+            ),
+            Some(first_staged)
+        );
+        assert_eq!(
+            select_registry_channel(
+                None,
+                &mut ordinary_yield_pending,
+                &mut round_robin,
+                has_staged
+            ),
+            Some(second_staged)
+        );
+        assert_eq!(round_robin.len(), 3);
+        assert!(!round_robin.contains(&unknown));
+
+        let mut unstaged = VecDeque::from([producer_only, first_staged]);
+        let only_unstaged = |channel_id| (channel_id == producer_only).then_some(false);
+        assert_eq!(
+            select_registry_channel(
+                None,
+                &mut ordinary_yield_pending,
+                &mut unstaged,
+                only_unstaged
+            ),
+            Some(producer_only)
+        );
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged.front(), Some(&producer_only));
     }
 }
