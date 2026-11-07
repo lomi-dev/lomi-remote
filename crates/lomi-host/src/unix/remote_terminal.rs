@@ -1149,4 +1149,96 @@ mod finite_emission_retention_tests {
             assert!(other_terminal.has_immediate_output());
         });
     }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+    fn large_resize_checkpoint_is_delivered_without_resync_and_keeps_control_lease() {
+        let service = TerminalService::new();
+        let session_id = TerminalSessionId::from_bytes([41; 16]).unwrap();
+        let session_epoch = SessionEpoch::from_bytes([42; 16]).unwrap();
+        let principal =
+            AuthenticatedConnection::new(ConsumerAuthorizationId::from_bytes([43; 16]).unwrap());
+        let profile = SpawnProfile {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_owned(), "exec /bin/sleep 30".to_owned()],
+            cwd: std::env::current_dir().unwrap(),
+            environment: Vec::new(),
+            shell_integration: None,
+            rows: 24,
+            cols: 80,
+            history: 0,
+        };
+        service.spawn(session_id, session_epoch, &profile).unwrap();
+
+        let attachment = service
+            .attach(session_id, session_epoch, &principal)
+            .unwrap();
+        assert_eq!(
+            (attachment.snapshot.rows, attachment.snapshot.cols),
+            (24, 80)
+        );
+        attachment
+            .acknowledge(&principal, attachment.snapshot.sequence.0)
+            .unwrap();
+        let lease = service
+            .claim(session_id, session_epoch, &principal)
+            .unwrap();
+        assert!(matches!(
+            &*attachment.try_next().expect("claim control-change event"),
+            TerminalEvent::ControlChanged {
+                controlled: true,
+                ..
+            }
+        ));
+        let before_resize = service.snapshot(session_id, session_epoch).unwrap();
+
+        let receipt = service
+            .resize(
+                session_id,
+                session_epoch,
+                &principal,
+                &lease,
+                1,
+                39,
+                120,
+                || true,
+            )
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.cols), (39, 120));
+        let event = attachment
+            .try_next_with_metadata()
+            .expect("large resize checkpoint event");
+        let TerminalEvent::State(patch) = &*event.event else {
+            panic!("expected state checkpoint, got {:?}", event.event);
+        };
+        let encoded = serde_json::to_vec(&**patch).expect("serialize delivered checkpoint");
+        let checkpoint: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode delivered checkpoint");
+        assert_eq!(checkpoint["update"]["kind"], "checkpoint");
+        let resized = patch.apply(&before_resize).expect("apply resize checkpoint");
+        assert_eq!((resized.rows, resized.cols), (39, 120));
+        assert!(encoded.len() > 1024 * 1024);
+        assert!(encoded.len() <= lomi_terminal::ATTACHMENT_BYTES);
+        assert!(!attachment.resync_required());
+        assert_eq!(service.stats(session_id).unwrap().subscriber_overflows, 0);
+
+        assert!(service.lease_is_current(session_id, session_epoch, &principal, &lease));
+        assert_eq!(
+            service
+                .resize(
+                    session_id,
+                    session_epoch,
+                    &principal,
+                    &lease,
+                    2,
+                    24,
+                    80,
+                    || true
+                )
+                .unwrap()
+                .resize_seq,
+            2,
+        );
+        service.stop(session_id).unwrap();
+    }
 }

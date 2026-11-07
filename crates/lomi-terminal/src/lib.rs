@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 pub mod shell;
 
-pub const ATTACHMENT_BYTES: usize = 1024 * 1024;
+pub const ATTACHMENT_BYTES: usize = lomi_terminal_state::MAX_SNAPSHOT_BYTES;
 pub const MAX_ATTACHMENTS: usize = 64;
 pub const MAX_SESSIONS: usize = 32;
 pub const INPUT_LIMIT: usize = 16384;

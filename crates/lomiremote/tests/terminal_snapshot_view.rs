@@ -8,7 +8,7 @@ use lomi_remote_protocol::{
         TerminalStreamFrame, WorkingDirectoryValue,
     },
 };
-use lomi_terminal_state::{Buffer, TerminalState};
+use lomi_terminal_state::{Buffer, GridPatch, TerminalState};
 use lomiremote::attach::View;
 
 const SNAPSHOT_CHUNK_BYTES: usize = 16_384;
@@ -102,4 +102,31 @@ fn cli_view_accepts_snapshot_serialized_from_terminal_state() {
     assert_eq!(view.model.as_ref(), Some(&snapshot));
     assert_eq!(view.subscription, Some(metadata.subscription_id));
     assert_eq!(view.through, Some(metadata.through_seq));
+}
+
+#[test]
+fn resize_checkpoint_fits_terminal_attachment_queue_budget() {
+    let mut terminal = TerminalState::new(24, 80, 0).expect("create initial 80x24 model");
+    let before = terminal.snapshot().expect("capture initial model");
+    terminal.resize(39, 120).expect("resize model to 120x39");
+    let after = terminal.snapshot().expect("capture resized model");
+    let patch = GridPatch::between(&before, &after).expect("build topology checkpoint");
+    let encoded = serde_json::to_vec(&patch).expect("serialize resize checkpoint");
+    let value: serde_json::Value =
+        serde_json::from_slice(&encoded).expect("decode serialized checkpoint");
+
+    assert_eq!(value["update"]["kind"], "checkpoint");
+    assert_eq!(after.rows, 39);
+    assert_eq!(after.cols, 120);
+    assert!(terminal.working_directory().is_none());
+    assert!(
+        encoded.len() > 1024 * 1024,
+        "checkpoint should reproduce the former 1 MiB overflow"
+    );
+    assert!(
+        encoded.len() <= lomi_terminal::ATTACHMENT_BYTES,
+        "serialized checkpoint is {} bytes, attachment queue budget is {} bytes",
+        encoded.len(),
+        lomi_terminal::ATTACHMENT_BYTES,
+    );
 }
