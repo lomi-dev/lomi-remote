@@ -2,7 +2,7 @@
 use super::super::Coordinator;
 use super::super::cloud::PeerEligibility;
 use super::{Driver, HostAuth, RuntimeWithOperation, SecretStorage, channel};
-use lomi_remote_protocol::ChannelId;
+use lomi_remote_protocol::{ChannelId, message_framing::MAX_FRAGMENTS_PER_MESSAGE};
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -14,6 +14,60 @@ use std::{
 // channel. Allow eight views plus one overlapping reconnect pair, while
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
+const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(10);
+
+fn staged_batch_initial_allowed(
+    ordinary_yield_pending: bool,
+    due_peer_selected: bool,
+    staged_output_live: bool,
+    remaining: Option<usize>,
+    active_git_writer: bool,
+    output_eligibility_live: bool,
+) -> bool {
+    !ordinary_yield_pending
+        && !due_peer_selected
+        && staged_output_live
+        && remaining.is_some_and(|remaining| remaining > 0)
+        && !active_git_writer
+        && output_eligibility_live
+}
+
+fn staged_batch_made_progress(advanced: bool, before: Option<usize>, after: Option<usize>) -> bool {
+    advanced
+        && matches!((before, after), (Some(before), Some(after)) if before > 0 && after > 0 && after < before)
+}
+
+fn staged_batch_can_continue(
+    progressed: bool,
+    remaining: Option<usize>,
+    elapsed: Duration,
+    iterations: usize,
+    staged_output_live: bool,
+    due_peer_refresh: bool,
+    active_git_writer: bool,
+    output_eligibility_live: bool,
+) -> bool {
+    progressed
+        && remaining.is_some_and(|remaining| remaining > 0)
+        && elapsed < STAGED_MESSAGE_BATCH_QUANTUM
+        && iterations < MAX_FRAGMENTS_PER_MESSAGE
+        && staged_output_live
+        && !due_peer_refresh
+        && !active_git_writer
+        && output_eligibility_live
+}
+
+fn staged_batch_fence_is_clear(
+    observation: Result<
+        super::super::shared_owner::CloudPublicationFenceObservation,
+        super::super::shared_owner::Error,
+    >,
+) -> bool {
+    matches!(
+        observation,
+        Ok(super::super::shared_owner::CloudPublicationFenceObservation::Clear)
+    )
+}
 
 fn output_eligibility_is_live(
     runtime: RuntimeWithOperation<'_, '_>,
@@ -301,6 +355,35 @@ impl<'cancel> Registry<'cancel> {
             && self.entries.values().any(Driver::has_staged_output)
     }
 
+    fn staged_batch_ready(
+        &self,
+        channel_id: ChannelId,
+        runtime: RuntimeWithOperation<'cancel, '_>,
+        eligibility: &PeerEligibility,
+        batch_started_at: Instant,
+        iterations: usize,
+        remaining: Option<usize>,
+    ) -> bool {
+        let now = Instant::now();
+        let current_remaining = self
+            .entries
+            .get(&channel_id)
+            .and_then(Driver::staged_message_remaining);
+        staged_batch_can_continue(
+            true,
+            remaining,
+            now.checked_duration_since(batch_started_at)
+                .unwrap_or_default(),
+            iterations,
+            self.entries
+                .get(&channel_id)
+                .is_some_and(Driver::has_staged_output),
+            self.has_due_peer_refresh(now),
+            self.has_active_git_writer(),
+            output_eligibility_is_live(runtime, eligibility, now),
+        ) && current_remaining == remaining
+    }
+
     pub(in crate::unix::auth) fn poll(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -367,6 +450,7 @@ impl<'cancel> Registry<'cancel> {
     ) -> bool {
         self.prune_all_empty();
         let now = Instant::now();
+        let ordinary_yield_pending_before_selection = self.ordinary_yield_pending;
         let due = eligibility
             .is_some()
             .then(|| self.next_peer_refresh(now))
@@ -374,13 +458,111 @@ impl<'cancel> Registry<'cancel> {
         let Some(channel_id) = self.next_registry_channel(due) else {
             return false;
         };
-        let staged_settled = if let Some(driver) = self.entries.get_mut(&channel_id) {
-            let staged_before = driver.has_staged_message();
-            let _ = driver.advance_registry_stage(auth, runtime, eligibility);
-            staged_before && !driver.has_staged_message()
+
+        let output_eligibility_live = eligibility.is_some_and(|eligibility| {
+            output_eligibility_is_live(runtime, eligibility, Instant::now())
+        });
+        let active_git_writer = self.has_active_git_writer();
+        let staged_output_live = self
+            .entries
+            .get(&channel_id)
+            .is_some_and(Driver::has_staged_output);
+        let staged_remaining_before = self
+            .entries
+            .get(&channel_id)
+            .and_then(Driver::staged_message_remaining);
+        let batch_allowed = staged_batch_initial_allowed(
+            ordinary_yield_pending_before_selection,
+            due.is_some(),
+            staged_output_live,
+            staged_remaining_before,
+            active_git_writer,
+            output_eligibility_live,
+        );
+
+        let staged_before = self
+            .entries
+            .get(&channel_id)
+            .is_some_and(Driver::has_staged_message);
+        // The quantum begins immediately before the original registry stage;
+        // that stage itself remains unchanged and is included in the hard cap.
+        let batch_started_at = Instant::now();
+        let first_advanced = self
+            .entries
+            .get_mut(&channel_id)
+            .is_some_and(|driver| driver.advance_registry_stage(auth, runtime, eligibility));
+        let mut staged_remaining_after = if batch_allowed {
+            self.entries
+                .get(&channel_id)
+                .and_then(Driver::staged_message_remaining)
         } else {
-            false
+            None
         };
+        let mut iterations = 1;
+        let mut progressed = batch_allowed
+            && staged_batch_made_progress(
+                first_advanced,
+                staged_remaining_before,
+                staged_remaining_after,
+            );
+
+        while progressed {
+            let Some(eligibility) = eligibility else {
+                break;
+            };
+            if !self.staged_batch_ready(
+                channel_id,
+                runtime,
+                eligibility,
+                batch_started_at,
+                iterations,
+                staged_remaining_after,
+            ) {
+                break;
+            }
+            if !staged_batch_fence_is_clear(runtime.owner.cloud_publication_fence_observation(
+                runtime.operation,
+                eligibility.binding.scope.authorization_generation,
+                Some(&eligibility.binding.scope),
+            )) {
+                break;
+            }
+
+            // The negative-only cloud observation can take time. Recheck the
+            // quantum and all live scheduler gates before one more same-message
+            // fragment; a changed gate merely ends batching.
+            if !self.staged_batch_ready(
+                channel_id,
+                runtime,
+                eligibility,
+                batch_started_at,
+                iterations,
+                staged_remaining_after,
+            ) {
+                break;
+            }
+
+            let Some(before_remaining) = staged_remaining_after else {
+                break;
+            };
+            let advanced = self.entries.get_mut(&channel_id).is_some_and(|driver| {
+                driver.advance_registry_stage(auth, runtime, Some(eligibility))
+            });
+            let after_remaining = self
+                .entries
+                .get(&channel_id)
+                .and_then(Driver::staged_message_remaining);
+            iterations += 1;
+            progressed =
+                staged_batch_made_progress(advanced, Some(before_remaining), after_remaining);
+            staged_remaining_after = after_remaining;
+        }
+
+        let staged_settled = staged_before
+            && !self
+                .entries
+                .get(&channel_id)
+                .is_some_and(Driver::has_staged_message);
         if staged_settled {
             self.note_staged_message_transition(true, false);
         }
@@ -536,6 +718,137 @@ fn earliest_peer_refresh(
 mod tests {
     use super::super::super::{IdleScheduler, WorkClass};
     use super::*;
+
+    #[test]
+    fn staged_batch_requires_no_owed_turn_due_refresh_writer_or_dead_output() {
+        assert!(staged_batch_initial_allowed(
+            false,
+            false,
+            true,
+            Some(4),
+            false,
+            true,
+        ));
+        for (ordinary_yield, due, staged, remaining, writer, live) in [
+            (true, false, true, Some(4), false, true),
+            (false, true, true, Some(4), false, true),
+            (false, false, false, Some(4), false, true),
+            (false, false, true, None, false, true),
+            (false, false, true, Some(4), true, true),
+            (false, false, true, Some(4), false, false),
+        ] {
+            assert!(!staged_batch_initial_allowed(
+                ordinary_yield,
+                due,
+                staged,
+                remaining,
+                writer,
+                live,
+            ));
+        }
+    }
+
+    #[test]
+    fn staged_batch_requires_strict_same_message_progress_and_all_live_gates() {
+        assert!(staged_batch_made_progress(true, Some(5), Some(4)));
+        assert!(!staged_batch_made_progress(false, Some(5), Some(4)));
+        assert!(!staged_batch_made_progress(true, Some(5), Some(5)));
+        assert!(!staged_batch_made_progress(true, Some(5), None));
+        assert!(!staged_batch_made_progress(true, Some(1), Some(0)));
+
+        let can_continue = |elapsed, iterations, staged, due, writer, live| {
+            staged_batch_can_continue(
+                true,
+                Some(4),
+                elapsed,
+                iterations,
+                staged,
+                due,
+                writer,
+                live,
+            )
+        };
+        assert!(can_continue(
+            Duration::from_millis(9),
+            1,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(!can_continue(
+            Duration::from_millis(10),
+            1,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(!can_continue(
+            Duration::from_millis(1),
+            MAX_FRAGMENTS_PER_MESSAGE,
+            true,
+            false,
+            false,
+            true,
+        ));
+        assert!(!can_continue(Duration::ZERO, 1, false, false, false, true));
+        assert!(!can_continue(Duration::ZERO, 1, true, true, false, true));
+        assert!(!can_continue(Duration::ZERO, 1, true, false, true, true));
+        assert!(!can_continue(Duration::ZERO, 1, true, false, false, false));
+    }
+
+    #[test]
+    fn staged_batch_stops_on_every_nonclear_cloud_observation() {
+        use super::super::super::shared_owner::CloudPublicationFenceObservation;
+
+        assert!(staged_batch_fence_is_clear(Ok(
+            CloudPublicationFenceObservation::Clear
+        )));
+        assert!(!staged_batch_fence_is_clear(Ok(
+            CloudPublicationFenceObservation::CloseIngress
+        )));
+        assert!(!staged_batch_fence_is_clear(Ok(
+            CloudPublicationFenceObservation::Defer
+        )));
+        assert!(!staged_batch_fence_is_clear(Err(
+            super::super::super::shared_owner::Error::Domain(
+                super::super::super::owner_domain::Error::Stale
+            )
+        )));
+    }
+
+    #[test]
+    fn staged_batch_finishes_only_the_current_fragment_sequence_within_bounds() {
+        let mut remaining = Some(33);
+        let mut iterations = 1;
+        let mut fragment_calls = 1;
+        let mut progressed = staged_batch_made_progress(true, Some(34), remaining);
+        while staged_batch_can_continue(
+            progressed,
+            remaining,
+            Duration::from_millis(1),
+            iterations,
+            true,
+            false,
+            false,
+            true,
+        ) {
+            let before = remaining;
+            remaining = before
+                .and_then(|count| count.checked_sub(1))
+                .filter(|count| *count > 0);
+            fragment_calls += 1;
+            iterations += 1;
+            progressed = staged_batch_made_progress(true, before, remaining);
+        }
+        assert_eq!(fragment_calls, 34);
+        assert_eq!(
+            remaining, None,
+            "completion ends the batch before a next message"
+        );
+        assert!(iterations <= MAX_FRAGMENTS_PER_MESSAGE);
+    }
 
     #[test]
     fn earlier_pending_handshake_refresh_precedes_later_established_refresh() {

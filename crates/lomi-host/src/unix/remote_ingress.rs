@@ -727,6 +727,17 @@ impl<'cancel> Driver<'cancel> {
             .as_ref()
             .is_some_and(Connection::has_staged_message)
     }
+    /// Remaining fragments in the response/stream that `turn` would send
+    /// first. Started Git owns its own output scheduler, so it has no staged
+    /// message count for registry batching.
+    pub(super) fn staged_message_remaining(&self) -> Option<usize> {
+        if self.has_active_git_writer() {
+            return None;
+        }
+        self.connection
+            .as_ref()
+            .and_then(Connection::staged_message_remaining)
+    }
     /// Empty means no candidate, ticket, or live transport. A live transport
     /// can outlast its maintenance operation and must remain in the registry.
     pub(super) fn is_empty(&self) -> bool {
@@ -3173,6 +3184,17 @@ impl<'cancel> Connection<'cancel> {
                 .is_some_and(|stream| stream.remaining > 0)
     }
 
+    fn staged_message_remaining(&self) -> Option<usize> {
+        if self.has_active_git_writer() {
+            return None;
+        }
+        prioritized_staged_remaining(
+            self.response.as_ref().map(|response| response.remaining),
+            self.stream.as_ref().map(|stream| stream.remaining),
+            false,
+        )
+    }
+
     fn turn(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -4412,6 +4434,19 @@ fn frame_count(byte_length: usize) -> usize {
     byte_length.div_ceil(MAX_FRAGMENT_PAYLOAD_LEN)
 }
 
+fn prioritized_staged_remaining(
+    response_remaining: Option<usize>,
+    stream_remaining: Option<usize>,
+    has_active_git_writer: bool,
+) -> Option<usize> {
+    if has_active_git_writer {
+        return None;
+    }
+    response_remaining
+        .filter(|remaining| *remaining > 0)
+        .or_else(|| stream_remaining.filter(|remaining| *remaining > 0))
+}
+
 fn git_mutation_call(call: &RpcCall) -> bool {
     matches!(
         call,
@@ -4605,6 +4640,21 @@ mod peer_refresh_tests {
 #[cfg(test)]
 mod staged_output_tests {
     use super::*;
+
+    #[test]
+    fn staged_remaining_follows_response_then_stream_and_excludes_git_writer() {
+        assert_eq!(
+            prioritized_staged_remaining(Some(3), Some(5), false),
+            Some(3)
+        );
+        assert_eq!(
+            prioritized_staged_remaining(Some(0), Some(5), false),
+            Some(5)
+        );
+        assert_eq!(prioritized_staged_remaining(None, Some(5), false), Some(5));
+        assert_eq!(prioritized_staged_remaining(Some(3), Some(5), true), None);
+        assert_eq!(prioritized_staged_remaining(Some(0), Some(0), false), None);
+    }
 
     #[test]
     fn staged_output_priority_tracks_only_live_queued_message_fragments() {
