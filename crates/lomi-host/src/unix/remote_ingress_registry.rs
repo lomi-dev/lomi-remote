@@ -528,7 +528,7 @@ fn earliest_peer_refresh(
         .filter_map(|channel_id| {
             cutoff(*channel_id).map(|deadline| (*channel_id, deadline, established(*channel_id)))
         })
-        .min_by_key(|(_, deadline, is_established)| (!*is_established, *deadline))
+        .min_by_key(|(_, deadline, is_established)| (*deadline, !*is_established))
         .map(|(channel_id, _, _)| channel_id)
 }
 
@@ -538,7 +538,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn established_refresh_precedes_earlier_pending_handshake_refresh() {
+    fn earlier_pending_handshake_refresh_precedes_later_established_refresh() {
         let pending = ChannelId::from_bytes([1; 16]).unwrap();
         let established = ChannelId::from_bytes([2; 16]).unwrap();
         let pending_cutoff = Instant::now() + Duration::from_secs(1);
@@ -555,7 +555,7 @@ mod tests {
             |channel_id| channel_id == established,
         );
 
-        assert_eq!(selected, Some(established));
+        assert_eq!(selected, Some(pending));
     }
 
     #[test]
@@ -612,6 +612,8 @@ mod tests {
     fn equal_cutoffs_keep_round_robin_order_and_empty_cutoffs_select_none() {
         let first = ChannelId::from_bytes([9; 16]).unwrap();
         let second = ChannelId::from_bytes([10; 16]).unwrap();
+        let pending = ChannelId::from_bytes([21; 16]).unwrap();
+        let established = ChannelId::from_bytes([22; 16]).unwrap();
         let cutoff = Instant::now() + Duration::from_millis(500);
         let round_robin = VecDeque::from([first, second]);
 
@@ -623,10 +625,19 @@ mod tests {
             earliest_peer_refresh(&round_robin, |_| None, |_| false),
             None
         );
+        assert_eq!(
+            earliest_peer_refresh(
+                &VecDeque::from([pending, established]),
+                |_| Some(cutoff),
+                |channel_id| channel_id == established,
+            ),
+            Some(established),
+            "established state breaks equal-cutoff ties only",
+        );
     }
 
     #[test]
-    fn established_refreshes_use_earliest_deadline_ahead_of_pending_work() {
+    fn earliest_deadline_wins_across_established_and_pending_channels() {
         let first_established = ChannelId::from_bytes([11; 16]).unwrap();
         let second_established = ChannelId::from_bytes([12; 16]).unwrap();
         let pending = ChannelId::from_bytes([13; 16]).unwrap();
@@ -648,7 +659,7 @@ mod tests {
                     channel_id == first_established || channel_id == second_established
                 },
             ),
-            Some(second_established)
+            Some(pending)
         );
     }
 
@@ -657,7 +668,7 @@ mod tests {
         let established = ChannelId::from_bytes([14; 16]).unwrap();
         let pending = ChannelId::from_bytes([15; 16]).unwrap();
         let now = Instant::now();
-        let established_cutoff = now + Duration::from_millis(2_500);
+        let established_cutoff = now + Duration::from_millis(1_500);
         let pending_cutoff = now + Duration::from_millis(2_000);
         let refreshed_cutoff = now + super::super::PEER_REFRESH_MARGIN + Duration::from_nanos(1);
         let round_robin = VecDeque::from([established, pending]);
@@ -695,6 +706,73 @@ mod tests {
                 |channel_id| channel_id == established,
             ),
             Some(pending)
+        );
+    }
+
+    #[test]
+    fn child_deadline_first_leaves_time_for_parent_refresh_after_heartbeat() {
+        let child = ChannelId::from_bytes([23; 16]).unwrap();
+        let parent = ChannelId::from_bytes([24; 16]).unwrap();
+        let start = Instant::now();
+        let child_cutoff = start + Duration::from_millis(866);
+        let parent_cutoff = start + Duration::from_millis(2_565);
+        let child_connect = Duration::from_millis(844);
+        let cloud_heartbeat = Duration::from_millis(190);
+        let parent_refresh = Duration::from_millis(592);
+        let round_robin = VecDeque::from([parent, child]);
+
+        let selected = earliest_peer_refresh(
+            &round_robin,
+            |channel_id| match channel_id {
+                id if id == child => {
+                    super::super::peer_refresh_deadline_for(true, child_cutoff, start)
+                }
+                id if id == parent => {
+                    super::super::peer_refresh_deadline_for(true, parent_cutoff, start)
+                }
+                _ => None,
+            },
+            |channel_id| channel_id == parent,
+        );
+        assert_eq!(selected, Some(child));
+
+        let child_completed = start + child_connect;
+        assert!(child_completed < child_cutoff);
+        let after_heartbeat = child_completed + cloud_heartbeat;
+        let refreshed_child_cutoff = child_completed + Duration::from_secs(5);
+        let selected = earliest_peer_refresh(
+            &round_robin,
+            |channel_id| match channel_id {
+                id if id == child => super::super::peer_refresh_deadline_for(
+                    true,
+                    refreshed_child_cutoff,
+                    after_heartbeat,
+                ),
+                id if id == parent => {
+                    super::super::peer_refresh_deadline_for(true, parent_cutoff, after_heartbeat)
+                }
+                _ => None,
+            },
+            |channel_id| channel_id == parent,
+        );
+        assert_eq!(selected, Some(parent));
+        assert!(after_heartbeat < parent_cutoff);
+        assert!(after_heartbeat + parent_refresh < parent_cutoff);
+    }
+
+    #[test]
+    fn expired_or_unknown_cutoffs_are_skipped() {
+        let expired = ChannelId::from_bytes([25; 16]).unwrap();
+        let live = ChannelId::from_bytes([26; 16]).unwrap();
+        let cutoff = Instant::now() + Duration::from_millis(500);
+
+        assert_eq!(
+            earliest_peer_refresh(
+                &VecDeque::from([expired, live]),
+                |channel_id| (channel_id == live).then_some(cutoff),
+                |_| false,
+            ),
+            Some(live)
         );
     }
 
