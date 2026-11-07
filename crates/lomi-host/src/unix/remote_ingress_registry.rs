@@ -2,7 +2,10 @@
 use super::super::Coordinator;
 use super::super::cloud::PeerEligibility;
 use super::{Driver, HostAuth, RuntimeWithOperation, SecretStorage, channel};
-use lomi_remote_protocol::{ChannelId, message_framing::MAX_FRAGMENTS_PER_MESSAGE};
+use lomi_remote_protocol::{
+    ChannelId,
+    message_framing::{ASSEMBLY_TIMEOUT_MS, MAX_FRAGMENTS_PER_MESSAGE},
+};
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -15,6 +18,14 @@ use std::{
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
 const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(500);
+
+fn terminal_emission_headroom() -> Duration {
+    Duration::from_millis(ASSEMBLY_TIMEOUT_MS).saturating_add(super::PEER_REFRESH_MARGIN)
+}
+
+pub(super) fn terminal_emission_retains_operation(deadline: Instant, now: Instant) -> bool {
+    deadline.saturating_duration_since(now) > terminal_emission_headroom()
+}
 
 fn staged_batch_initial_allowed(
     ordinary_yield_pending: bool,
@@ -157,8 +168,26 @@ impl<'cancel> Registry<'cancel> {
             .any(|driver| driver.peer_refresh_deadline(now).is_some())
     }
 
-    pub(in crate::unix::auth) fn has_retained_operation(&self) -> bool {
-        self.entries.values().any(Driver::has_retained_operation)
+    pub(in crate::unix::auth) fn has_retained_operation_at(&self, now: Instant) -> bool {
+        self.entries
+            .values()
+            .any(|driver| driver.has_retained_operation_at(now))
+    }
+
+    /// Suspend idle established channels as one safe boundary before replacing
+    /// their shared worker operation. The producer-owned terminal queue and its
+    /// cursor remain attached to the live transport.
+    pub(in crate::unix::auth) fn suspend_at_message_boundary(&mut self, now: Instant) -> bool {
+        if self
+            .entries
+            .values()
+            .any(|driver| !driver.can_suspend_at_message_boundary(now))
+        {
+            return false;
+        }
+        self.entries
+            .values_mut()
+            .all(|driver| driver.suspend_at_message_boundary(now))
     }
 
     pub(in crate::unix::auth) fn has_pending_setup(&self) -> bool {
@@ -718,6 +747,26 @@ fn earliest_peer_refresh(
 mod tests {
     use super::super::super::{IdleScheduler, WorkClass};
     use super::*;
+
+    #[test]
+    fn terminal_emission_is_resource_only_inside_settlement_headroom() {
+        let now = Instant::now();
+        let headroom = terminal_emission_headroom();
+
+        assert!(terminal_emission_retains_operation(
+            now + headroom + Duration::from_millis(1),
+            now,
+        ));
+        assert!(!terminal_emission_retains_operation(now + headroom, now));
+        assert!(!terminal_emission_retains_operation(
+            now + headroom - Duration::from_millis(1),
+            now,
+        ));
+        assert!(!terminal_emission_retains_operation(
+            now - Duration::from_millis(1),
+            now,
+        ));
+    }
 
     #[test]
     fn staged_batch_requires_no_owed_turn_due_refresh_writer_or_dead_output() {

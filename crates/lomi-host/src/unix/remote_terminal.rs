@@ -40,9 +40,9 @@ struct PendingDelivery {
     retire: bool,
 }
 /// A logical message, not a ciphertext or permission to disclose later.
-/// The one connection MessageEncoder serializes frame(); call check_fragment
-/// again before EVERY encrypted fragment and complete_delivery only after the
-/// final fragment has physically completed. Failure requires disconnect.
+/// The one connection MessageEncoder serializes frame(); seal_fragment checks
+/// this delivery again before EVERY encrypted fragment and complete_delivery
+/// runs only after the final fragment has physically completed.
 pub(super) struct RemoteTerminalStreamFrame {
     frame: TerminalStreamFrame,
     terminal: TerminalContext,
@@ -969,24 +969,52 @@ impl RemoteTerminalState {
         };
         Ok(self.prepare(key, terminal, frame, through, false))
     }
-    pub(super) fn check_fragment(
+    /// Validate, refresh, authorize and seal one physical MessageEncoder
+    /// fragment against the same freshly captured terminal owner/store turn.
+    /// The returned ciphertext is ready for transport, with all actor and owner
+    /// guards dropped before the caller performs socket IO.
+    pub(super) fn seal_fragment(
         &mut self,
-        frame: &RemoteTerminalStreamFrame,
+        delivery: &RemoteTerminalStreamFrame,
         connection: &mut RemoteConnectionState,
+        encoder: &mut lomi_remote_protocol::message_framing::MessageEncoder,
         worker: &RemoteWorkerEvidence<'_, '_, '_, '_>,
         peer: &VerifiedCurrentPeer,
-    ) -> Result<(), RemoteError> {
-        let result = if !self.pending.as_ref().is_some_and(|p| {
-            p.id == frame.delivery
-                && self
-                    .subscriptions
-                    .get(&p.subscription)
-                    .is_some_and(|s| s.terminal == frame.terminal)
-        }) {
-            Err(fault(ErrorCode::ScopeDenied))
-        } else {
-            self.check_target(connection, worker, peer, &frame.terminal)
-        };
+        applied_observation: &mut std::time::Instant,
+    ) -> Result<Vec<u8>, RemoteError> {
+        let result = (|| {
+            if !self.pending_frame_matches(delivery, connection) {
+                return Err(fault(ErrorCode::ScopeDenied));
+            }
+            let coordinator = self
+                .coordinator
+                .upgrade()
+                .ok_or_else(|| fault(ErrorCode::ServiceUnavailable))?;
+            if !std::ptr::eq(coordinator.owner.as_ref(), worker.owner()) {
+                return Err(fault(ErrorCode::ScopeDenied));
+            }
+            let actor = coordinator
+                .workspace_lock(delivery.terminal.workspace.workspace_id)
+                .map_err(|_| fault(ErrorCode::ServiceUnavailable))?;
+            let operation = worker.operation();
+            let _actor = rpc::actor_lock(&actor, operation)?;
+            let turn = rpc::owner_call(operation, || {
+                coordinator
+                    .owner
+                    .try_remote_terminal_turn(worker, peer, &delivery.terminal)
+            })
+            .map_err(owner)?;
+            if peer.observed_at() > *applied_observation {
+                turn.refresh_peer(connection).map_err(gate)?;
+                *applied_observation = peer.observed_at();
+            }
+            turn.check_terminal_stream(connection).map_err(gate)?;
+            let plaintext = encoder
+                .next_frame()
+                .map_err(|_| fault(ErrorCode::ScopeDenied))?
+                .ok_or_else(|| fault(ErrorCode::ScopeDenied))?;
+            turn.seal_frame(connection, &plaintext).map_err(gate)
+        })();
         if result.is_err() {
             connection.dispose();
             self.disconnect();
@@ -1025,6 +1053,25 @@ impl RemoteTerminalState {
             self.disconnect();
         }
         result
+    }
+    fn pending_frame_matches(
+        &self,
+        frame: &RemoteTerminalStreamFrame,
+        connection: &RemoteConnectionState,
+    ) -> bool {
+        self.channel_matches(connection) && self.pending_delivery_matches(frame)
+    }
+    fn channel_matches(&self, connection: &RemoteConnectionState) -> bool {
+        !self.disconnected && self.channel == connection.connection_identity()
+    }
+    fn pending_delivery_matches(&self, frame: &RemoteTerminalStreamFrame) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.id == frame.delivery
+                && self
+                    .subscriptions
+                    .get(&pending.subscription)
+                    .is_some_and(|subscription| subscription.terminal == frame.terminal)
+        })
     }
     /// A delivery ACK is transport-owned, never a message from the peer. This
     /// method consumes the unforgeable outstanding frame after its final send.
@@ -1215,7 +1262,9 @@ mod finite_emission_retention_tests {
         let checkpoint: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode delivered checkpoint");
         assert_eq!(checkpoint["update"]["kind"], "checkpoint");
-        let resized = patch.apply(&before_resize).expect("apply resize checkpoint");
+        let resized = patch
+            .apply(&before_resize)
+            .expect("apply resize checkpoint");
         assert_eq!((resized.rows, resized.cols), (39, 120));
         assert!(encoded.len() > 1024 * 1024);
         assert!(encoded.len() <= lomi_terminal::ATTACHMENT_BYTES);
@@ -1240,5 +1289,67 @@ mod finite_emission_retention_tests {
             2,
         );
         service.stop(session_id).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+    fn fragment_preflight_requires_current_delivery_channel_and_terminal() {
+        auth::remote_connection::with_test_established_connections(|connection, other| {
+            let service = TerminalService::new();
+            let session_id = TerminalSessionId::from_bytes([51; 16]).unwrap();
+            let session_epoch = SessionEpoch::from_bytes([52; 16]).unwrap();
+            let profile = SpawnProfile {
+                executable: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_owned(), "exec /bin/sleep 5".to_owned()],
+                cwd: std::env::current_dir().unwrap(),
+                environment: Vec::new(),
+                shell_integration: None,
+                rows: 24,
+                cols: 80,
+                history: 0,
+            };
+            service.spawn(session_id, session_epoch, &profile).unwrap();
+            let mut terminal = RemoteTerminalState::new(Weak::new(), &connection).unwrap();
+            let attachment = service
+                .attach(session_id, session_epoch, &terminal.principal)
+                .unwrap();
+            let context = TerminalContext {
+                workspace: WorkspaceContext {
+                    workspace_id: WorkspaceId::from_bytes([53; 16]).unwrap(),
+                    workspace_epoch: WorkspaceEpoch::from_bytes([54; 16]).unwrap(),
+                    runtime_id: RuntimeId::from_bytes([55; 16]).unwrap(),
+                    runtime_generation: DecimalU64(1),
+                    host_access_epoch: DecimalU64(1),
+                    grant_revision: DecimalU64(1),
+                },
+                pane_id: PaneId::from_bytes([56; 16]).unwrap(),
+                session_id: TerminalSessionId::from_bytes([51; 16]).unwrap(),
+                session_epoch: SessionEpoch::from_bytes([52; 16]).unwrap(),
+                profile: TerminalProfile::ExperimentalRustGridV1,
+            };
+            let metadata = terminal.register(context, attachment).unwrap();
+            let subscription = String::from(metadata.subscription_id);
+            let delivery = terminal.emit(&subscription).unwrap();
+            assert!(terminal.pending_frame_matches(&delivery, &connection));
+            assert!(terminal.channel_matches(&connection));
+            assert!(!terminal.channel_matches(&other));
+
+            let wrong_delivery = RemoteTerminalStreamFrame {
+                frame: delivery.frame.clone(),
+                terminal: delivery.terminal.clone(),
+                delivery: Uuid::new_v4(),
+            };
+            assert!(!terminal.pending_frame_matches(&wrong_delivery, &connection));
+            assert!(!terminal.pending_frame_matches(&delivery, &other));
+
+            let mut wrong_terminal = RemoteTerminalStreamFrame {
+                frame: delivery.frame.clone(),
+                terminal: delivery.terminal.clone(),
+                delivery: delivery.delivery,
+            };
+            wrong_terminal.terminal.session_epoch = SessionEpoch::from_bytes([57; 16]).unwrap();
+            assert!(!terminal.pending_frame_matches(&wrong_terminal, &connection));
+            service.stop(session_id).unwrap();
+        });
     }
 }

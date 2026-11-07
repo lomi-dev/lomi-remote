@@ -2086,21 +2086,35 @@ fn run_with_apis_inner(
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
+        let scheduling_time = Instant::now();
         let retained = worker_unit_retained(
             cloud.has_retained_operation(),
             peer.has_retained_operation(),
             channel.has_retained_operation(),
-            ingress.has_retained_operation(),
+            ingress.has_retained_operation_at(scheduling_time),
             &publication_barrier,
         );
-        if units.started && !retained {
+        let settled_at_message_boundary = units.started
+            && !retained
+            && units.operation().check().is_ok()
+            && ingress.suspend_at_message_boundary(scheduling_time);
+        if settled_at_message_boundary {
             cloud.finish_operation();
             idle.reset_reservation();
             units.admit_after_settlement(stopping);
         }
+        // Rejected settlement must not issue a standalone clock mutation
+        // against the other connections' still-retained peer scopes.
+        let retained = retained || (units.started && !settled_at_message_boundary);
         units.started = true;
         let mut runtime =
             initial_runtime.with_operation_at(units.operation(), units.aborted(), base, anchor);
+        if settled_at_message_boundary {
+            // This no-eligibility poll preserves only the established socket
+            // resource and applies the original peer cutoff before the fresh
+            // Cloud read/heartbeat and maintenance pairing read below.
+            ingress.poll(auth, runtime, None);
+        }
         let operation = runtime.operation;
         let wait = remote_ingress::actor_wait_duration(std::mem::take(&mut immediate_ingress_pass));
         match receiver.recv_timeout(wait) {
@@ -2154,6 +2168,7 @@ fn run_with_apis_inner(
             publication_barrier.reset();
             ingress.discard();
             gate.store(true, Ordering::Release);
+            units.admit_after_settlement(stopping);
             continue;
         }
         if runtime.check().is_err() {
@@ -2203,6 +2218,7 @@ fn run_with_apis_inner(
                 publication_barrier.reset();
                 ingress.discard();
                 gate.store(true, Ordering::Release);
+                units.admit_after_settlement(stopping);
                 continue;
             }
             if let Ok(mut turn) = owner.begin_seal_authorization(operation) {

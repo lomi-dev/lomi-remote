@@ -497,6 +497,26 @@ struct Connection<'cancel> {
     git_read: Option<PendingGitRead<'cancel>>,
     git_mutation: Option<PendingGitMutation<'cancel>>,
 }
+
+fn connection_retains_worker_unit(
+    bound_work: impl IntoIterator<Item = bool>,
+    terminal_output: bool,
+    maintenance_deadline: Instant,
+    now: Instant,
+) -> bool {
+    bound_work.into_iter().any(|retained| retained)
+        || (terminal_output
+            && registry::terminal_emission_retains_operation(maintenance_deadline, now))
+}
+
+fn may_suspend_at_message_boundary(
+    established: bool,
+    peer_cutoff_live: bool,
+    retained_operation: bool,
+) -> bool {
+    established && peer_cutoff_live && !retained_operation
+}
+
 enum Crypto {
     Vacant,
     ReadFirst(PendingRemoteConnection),
@@ -534,12 +554,31 @@ impl<'cancel> Driver<'cancel> {
         }
     }
     pub(super) fn has_retained_operation(&self) -> bool {
+        self.has_retained_operation_at(Instant::now())
+    }
+    pub(super) fn has_retained_operation_at(&self, now: Instant) -> bool {
         self.candidate.is_some()
             || self.ticketed.is_some()
             || self
                 .connection
                 .as_ref()
-                .is_some_and(Connection::has_retained_operation)
+                .is_some_and(|connection| connection.has_retained_operation_at(now))
+    }
+    pub(super) fn can_suspend_at_message_boundary(&self, now: Instant) -> bool {
+        self.candidate.is_none()
+            && self.ticketed.is_none()
+            && self
+                .connection
+                .as_ref()
+                .is_none_or(|connection| connection.can_suspend_at_message_boundary(now))
+    }
+    pub(super) fn suspend_at_message_boundary(&mut self, now: Instant) -> bool {
+        if !self.can_suspend_at_message_boundary(now) {
+            return false;
+        }
+        self.connection
+            .as_mut()
+            .is_none_or(|connection| connection.suspend_at_message_boundary(now))
     }
     pub(super) fn has_pending_setup(&self) -> bool {
         self.candidate.is_some()
@@ -1303,24 +1342,51 @@ impl<'cancel> Connection<'cancel> {
     fn is_established(&self) -> bool {
         matches!(&self.crypto, Crypto::Established(_)) && !self.socket.is_closed()
     }
-    /// A live socket is a resource, not an unfinished owner operation. Keep the
-    /// worker unit only for the handshake or an RPC/stream operation whose
-    /// original deadline and continuation are still retained here. A partial
-    /// inbound message is not dispatched yet; `turn` enforces its assembler's
-    /// fixed origin-based timeout before accepting more input.
-    fn has_retained_operation(&self) -> bool {
-        self.response.is_some()
-            || self.stream.is_some()
-            || !self.started_git_outputs.is_empty()
-            || self.git_output_reservation != 0
-            || self.git_read.is_some()
-            || self.git_mutation.is_some()
-            || !matches!(&self.crypto, Crypto::Established(_))
-            || self.peer_refresh_deadline(Instant::now()).is_some()
-            || self
-                .terminal
-                .as_ref()
-                .is_some_and(RemoteTerminalState::has_immediate_output)
+    /// A live socket and its bounded terminal producer queue are resources, not
+    /// unfinished owner operations. Keep the worker unit for the handshake,
+    /// partial inbound message, RPC/stream operation, or Git continuation whose
+    /// original deadline is still retained here. Near unit expiry, terminal
+    /// producer output can wait across a fresh unit at a completed-message
+    /// boundary.
+    fn has_retained_operation_at(&self, now: Instant) -> bool {
+        let terminal_output = self
+            .terminal
+            .as_ref()
+            .is_some_and(RemoteTerminalState::has_immediate_output);
+        connection_retains_worker_unit(
+            [
+                self.response.is_some(),
+                self.stream.is_some(),
+                !self.started_git_outputs.is_empty(),
+                self.git_output_reservation != 0,
+                self.git_read.is_some(),
+                self.git_mutation.is_some(),
+                !matches!(&self.crypto, Crypto::Established(_)),
+                self.assembler.has_pending_message(),
+                self.peer_refresh_deadline(now).is_some(),
+            ],
+            terminal_output,
+            self.maintenance.deadline(),
+            now,
+        )
+    }
+
+    fn can_suspend_at_message_boundary(&self, now: Instant) -> bool {
+        may_suspend_at_message_boundary(
+            self.is_established(),
+            now < self.peer_cutoff,
+            self.has_retained_operation_at(now),
+        )
+    }
+
+    fn suspend_at_message_boundary(&mut self, now: Instant) -> bool {
+        if !self.can_suspend_at_message_boundary(now) {
+            return false;
+        }
+        self.peer = None;
+        self.started_git_peer = None;
+        self.suspended = true;
+        true
     }
 
     fn has_pending_setup(&self) -> bool {
@@ -3427,31 +3493,37 @@ impl<'cancel> Connection<'cancel> {
             let Crypto::Established(crypto) = &mut self.crypto else {
                 return Err(peer::PeerError::Invalid);
             };
-            {
-                let turn = peer::owner_turn(stream_runtime, || {
-                    stream_runtime.owner.try_remote_workspace_turn(
-                        &evidence,
-                        &current,
-                        &self.workspace,
-                    )
-                })?;
-                if current.observed_at() > self.applied_observation {
-                    turn.refresh_peer(crypto).map_err(invalid_at!())?;
-                    self.applied_observation = current.observed_at();
-                }
-                if let Some(request) = stream.authorization_call.as_ref() {
-                    turn.check_response(crypto, request)
-                        .map_err(invalid_at!())?;
-                }
-            }
-            if let Some(delivery) = &stream.delivery {
+            let ciphertext = if let Some(delivery) = &stream.delivery {
                 self.terminal
                     .as_mut()
                     .ok_or(peer::PeerError::Invalid)?
-                    .check_fragment(delivery, crypto, &evidence, &current)
-                    .map_err(invalid_at!())?;
-            }
-            let ciphertext = {
+                    .seal_fragment(
+                        delivery,
+                        crypto,
+                        &mut self.encoder,
+                        &evidence,
+                        &current,
+                        &mut self.applied_observation,
+                    )
+                    .map_err(invalid_at!())?
+            } else {
+                {
+                    let turn = peer::owner_turn(stream_runtime, || {
+                        stream_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            &current,
+                            &self.workspace,
+                        )
+                    })?;
+                    if current.observed_at() > self.applied_observation {
+                        turn.refresh_peer(crypto).map_err(invalid_at!())?;
+                        self.applied_observation = current.observed_at();
+                    }
+                    if let Some(request) = stream.authorization_call.as_ref() {
+                        turn.check_response(crypto, request)
+                            .map_err(invalid_at!())?;
+                    }
+                }
                 let turn = peer::owner_turn(stream_runtime, || {
                     stream_runtime.owner.try_remote_workspace_turn(
                         &evidence,
@@ -4542,6 +4614,80 @@ fn peer_cutoff_requires_discard(
     peer_cutoff_expired(peer_cutoff, now) && (pending_setup || !has_eligibility)
 }
 
+#[cfg(test)]
+mod operation_unit_retention_tests {
+    use super::*;
+
+    #[test]
+    fn pending_stream_and_partial_input_keep_their_original_unit() {
+        let now = Instant::now();
+        let expired_deadline = now - Duration::from_millis(1);
+
+        // PendingStream includes its delivery/cursor and original operation.
+        assert!(connection_retains_worker_unit(
+            [false, true, false, false, false, false, false, false, false],
+            true,
+            expired_deadline,
+            now,
+        ));
+        // The inbound assembler keeps an incomplete logical message and its
+        // first-fragment deadline on the same unit.
+        assert!(connection_retains_worker_unit(
+            [false, false, false, false, false, false, false, true, false],
+            true,
+            expired_deadline,
+            now,
+        ));
+    }
+
+    #[test]
+    fn terminal_emission_yields_only_inside_existing_unit_headroom() {
+        let now = Instant::now();
+        let headroom =
+            Duration::from_millis(lomi_remote_protocol::message_framing::ASSEMBLY_TIMEOUT_MS)
+                + PEER_REFRESH_MARGIN;
+
+        assert!(connection_retains_worker_unit(
+            [false; 9],
+            true,
+            now + headroom + Duration::from_millis(1),
+            now,
+        ));
+        assert!(!connection_retains_worker_unit(
+            [false; 9],
+            true,
+            now + headroom,
+            now,
+        ));
+        assert!(!connection_retains_worker_unit(
+            [false; 9],
+            true,
+            now + headroom - Duration::from_millis(1),
+            now,
+        ));
+    }
+
+    #[test]
+    fn peer_refresh_remains_bound_even_when_terminal_output_is_ready() {
+        let now = Instant::now();
+
+        assert!(connection_retains_worker_unit(
+            [false, false, false, false, false, false, false, false, true],
+            true,
+            now + Duration::from_secs(60),
+            now,
+        ));
+    }
+
+    #[test]
+    fn only_a_live_settled_connection_can_be_suspended() {
+        assert!(may_suspend_at_message_boundary(true, true, false));
+        assert!(!may_suspend_at_message_boundary(false, true, false));
+        assert!(!may_suspend_at_message_boundary(true, false, false));
+        assert!(!may_suspend_at_message_boundary(true, true, true));
+    }
+}
+
 fn staged_message_is_live(
     now: Instant,
     peer_cutoff: Instant,
@@ -4574,6 +4720,36 @@ fn handoff_peer_refresh_deadline(
 #[cfg(test)]
 mod peer_refresh_tests {
     use super::*;
+
+    #[test]
+    fn settlement_uses_the_retention_observation_at_the_refresh_boundary() {
+        let scheduling_time = Instant::now();
+        let cutoff = scheduling_time + PEER_REFRESH_MARGIN + Duration::from_millis(1);
+        let maintenance_deadline = scheduling_time + Duration::from_secs(60);
+        let retained_at = |now| {
+            connection_retains_worker_unit(
+                [peer_refresh_deadline_for(true, cutoff, now).is_some()],
+                false,
+                maintenance_deadline,
+                now,
+            )
+        };
+
+        let retained = retained_at(scheduling_time);
+        assert!(!retained);
+        assert!(may_suspend_at_message_boundary(
+            true,
+            cutoff > scheduling_time,
+            retained
+        ));
+        let later = scheduling_time + Duration::from_millis(1);
+        assert!(retained_at(later));
+        assert!(!may_suspend_at_message_boundary(
+            true,
+            cutoff > later,
+            retained_at(later)
+        ));
+    }
 
     #[test]
     fn peer_refresh_deadline_is_bounded_to_live_margin_and_skips_vacant() {

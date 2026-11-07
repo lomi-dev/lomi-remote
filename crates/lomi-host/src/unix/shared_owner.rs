@@ -8059,6 +8059,27 @@ impl RemoteTerminalTurn<'_, '_, '_, '_, '_, '_> {
         }
         connection.terminal_stream(&self.target, &self.facts(), &mut || self.now())
     }
+    pub(super) fn refresh_peer(
+        &self,
+        connection: &mut super::auth::remote_connection::RemoteConnectionState,
+    ) -> Result<(), super::auth::remote_connection::GateError> {
+        if !self.terminal_current() {
+            connection.dispose();
+            return Err(super::auth::remote_connection::GateError::Disposed);
+        }
+        connection.refresh_peer(self.peer.read(), &self.facts(), &mut || self.now())
+    }
+    pub(super) fn seal_frame(
+        &self,
+        connection: &mut super::auth::remote_connection::RemoteConnectionState,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, super::auth::remote_connection::GateError> {
+        if !self.terminal_current() {
+            connection.dispose();
+            return Err(super::auth::remote_connection::GateError::Disposed);
+        }
+        connection.seal_frame(bytes, &self.facts(), &mut || self.now())
+    }
     pub(super) fn check_terminal_request(
         &self,
         connection: &mut super::auth::remote_connection::RemoteConnectionState,

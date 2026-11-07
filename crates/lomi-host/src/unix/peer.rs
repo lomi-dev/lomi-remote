@@ -1395,7 +1395,7 @@ impl VerifiedCurrentPeer {
                 .min(worker.operation().deadline()),
         )
     }
-    pub(super) fn observed_at(&self) -> Instant {
+    pub(in crate::unix) fn observed_at(&self) -> Instant {
         self.observation.started
     }
     pub(in crate::unix) fn fresh_until(&self) -> Instant {

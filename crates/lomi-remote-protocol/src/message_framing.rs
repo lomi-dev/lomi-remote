@@ -276,6 +276,13 @@ impl MessageAssembler {
         }
     }
 
+    /// Whether a logical message has been partially received. This is a
+    /// readonly scheduling hint; the assembler's original timeout remains
+    /// anchored to the first fragment.
+    pub fn has_pending_message(&self) -> bool {
+        self.active.is_some()
+    }
+
     /// Call on every authenticated frame, using monotonic caller milliseconds.
     pub fn push(
         &mut self,
@@ -442,5 +449,54 @@ impl MessageAssembler {
         self.active = None;
         self.next_id = None;
         self.disposed = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ASSEMBLY_TIMEOUT_MS, MAX_FRAGMENT_PAYLOAD_LEN, MessageAssembler, MessageEncoder,
+        MessageKind,
+    };
+
+    #[test]
+    fn pending_message_reflects_the_assembler_state() {
+        let mut encoder = MessageEncoder::new();
+        encoder
+            .begin(
+                MessageKind::TerminalFrame,
+                vec![0x5a; MAX_FRAGMENT_PAYLOAD_LEN + 1],
+            )
+            .unwrap();
+        let first = encoder.next_frame().unwrap().unwrap();
+        let last = encoder.next_frame().unwrap().unwrap();
+
+        let mut assembler = MessageAssembler::new();
+        assert!(!assembler.has_pending_message());
+        assert!(assembler.push(&first, 0).unwrap().is_none());
+        assert!(assembler.has_pending_message());
+        assert!(assembler.push(&last, 1).unwrap().is_some());
+        assert!(!assembler.has_pending_message());
+    }
+
+    #[test]
+    fn pending_message_keeps_its_original_assembly_deadline() {
+        let mut encoder = MessageEncoder::new();
+        encoder
+            .begin(
+                MessageKind::TerminalFrame,
+                vec![0x5a; MAX_FRAGMENT_PAYLOAD_LEN + 1],
+            )
+            .unwrap();
+        let first = encoder.next_frame().unwrap().unwrap();
+
+        let mut assembler = MessageAssembler::new();
+        assert!(assembler.push(&first, 0).unwrap().is_none());
+        assert!(assembler.has_pending_message());
+        assert_eq!(
+            assembler.expire(ASSEMBLY_TIMEOUT_MS),
+            Err(super::FramingError::Timeout)
+        );
+        assert!(!assembler.has_pending_message());
     }
 }

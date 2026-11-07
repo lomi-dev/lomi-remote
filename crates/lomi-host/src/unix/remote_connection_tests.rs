@@ -556,3 +556,41 @@ fn established_operation_response_uses_refreshed_peer_proof() {
         assert!(unrefreshed.core.disposed);
     });
 }
+
+#[test]
+fn sealing_discards_ciphertext_if_cancelled_or_expired_after_crypto() {
+    with_ready_auth(|auth, config| {
+        let fixture = Fixture::new(auth, config, 30);
+        let mut connection = fixture.established_connection(auth);
+        let mut samples = 0;
+        assert!(
+            connection
+                .seal_frame(b"frame", &fixture.facts(), &mut || {
+                    samples += 1;
+                    fixture.now(1_000)
+                })
+                .is_ok()
+        );
+        assert_eq!(samples, 4);
+
+        for cancel in [false, true] {
+            let fixture = Fixture::new(auth, config, 30);
+            let mut connection = fixture.established_connection(auth);
+            let mut samples = 0;
+            let result = connection.seal_frame(b"frame", &fixture.facts(), &mut || {
+                samples += 1;
+                if samples >= 3 && cancel {
+                    fixture.cancelled.store(true, Ordering::Release);
+                }
+                fixture.now(if samples >= 3 && !cancel {
+                    5_000
+                } else {
+                    1_000
+                })
+            });
+            assert_eq!(samples, 3, "failure must occur after encryption");
+            assert_eq!(result, Err(GateError::Disposed));
+            assert!(connection.core.disposed);
+        }
+    });
+}
