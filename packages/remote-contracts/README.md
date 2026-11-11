@@ -2,7 +2,7 @@
 
 Rust DTOs in `crates/lomi-remote-protocol` own the wire model. The Rust
 `generate-contracts` binary emits JSON Schema 2020-12 and OpenAPI 3.1 for the
-25 logical HTTP routes. This package generates declarations and standalone Ajv
+26 logical HTTP routes. This package generates declarations and standalone Ajv
 2020 validators from those schemas; no TypeScript wire interfaces are copied.
 The contract remains draft E0, the terminal profile is experimental and
 unqualified, and S0.5 is not frozen. OpenAPI declares no deployed server.

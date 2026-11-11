@@ -70,6 +70,7 @@ routes! {
     GrantRevoke: Post, "/grants/{grantId}/revoke", EitherOwnPeer;
     HostRevoke: Post, "/hosts/{hostId}/revoke", SelfHostOrOwnerAccount;
     HostRevocationAck: Post, "/hosts/{hostId}/revocation-ack", HostRevocationProof;
+    HostSelfRetirement: Post, "/hosts/{hostId}/retire", HostRevocationProof;
     HostEnrollmentRevocationAck: Post, "/hosts/{hostId}/enrollment-revocation-ack", HostEnrollmentRevocationProof;
 }
 
@@ -673,6 +674,117 @@ dto!(HostRevocationAckParams {
     refresh: HostRefreshCredential
 });
 
+/// Immutable family binding captured before a durable self-retirement intent.
+/// This metadata carries no authority and is never accepted as a proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSelfRetirementBinding {
+    pub host_id: HostId,
+    pub account_id: AccountId,
+    pub host_authorization_id: HostAuthorizationId,
+    pub expected_host_access_epoch: DecimalU64,
+    pub host_key_fingerprint: [u8; 32],
+    pub refresh_hash: [u8; 32],
+}
+
+/// Durable request context. It does not itself authorize signing or retirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSelfRetirementIntent {
+    pub binding: HostSelfRetirementBinding,
+    pub operation_id: OperationId,
+    pub prepared_at: DecimalU64,
+    pub expires_at: DecimalU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostSelfRetirementParams {
+    pub host_authorization_id: HostAuthorizationId,
+    pub operation_id: OperationId,
+    #[serde(deserialize_with = "deserialize_positive_host_epoch")]
+    #[schemars(schema_with = "positive_host_epoch_schema")]
+    pub expected_host_access_epoch: DecimalU64,
+    #[serde(deserialize_with = "deserialize_positive_timestamp")]
+    #[schemars(schema_with = "positive_timestamp_schema")]
+    pub prepared_at: DecimalU64,
+    #[serde(deserialize_with = "deserialize_positive_timestamp")]
+    #[schemars(schema_with = "positive_timestamp_schema")]
+    pub expires_at: DecimalU64,
+    pub refresh: HostRefreshCredential,
+    pub proof: EnrollmentProof,
+}
+
+impl<'de> Deserialize<'de> for HostSelfRetirementParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            host_authorization_id: HostAuthorizationId,
+            operation_id: OperationId,
+            #[serde(deserialize_with = "deserialize_positive_host_epoch")]
+            expected_host_access_epoch: DecimalU64,
+            #[serde(deserialize_with = "deserialize_positive_timestamp")]
+            prepared_at: DecimalU64,
+            #[serde(deserialize_with = "deserialize_positive_timestamp")]
+            expires_at: DecimalU64,
+            refresh: HostRefreshCredential,
+            proof: EnrollmentProof,
+        }
+        struct ObjectVisitor;
+        impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+            type Value = HostSelfRetirementParams;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object for HostSelfRetirementParams")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let Wire {
+                    host_authorization_id,
+                    operation_id,
+                    expected_host_access_epoch,
+                    prepared_at,
+                    expires_at,
+                    refresh,
+                    proof,
+                } = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                let request = HostSelfRetirementParams {
+                    host_authorization_id,
+                    operation_id,
+                    expected_host_access_epoch,
+                    prepared_at,
+                    expires_at,
+                    refresh,
+                    proof,
+                };
+                request
+                    .validate_time_window()
+                    .map_err(serde::de::Error::custom)?;
+                Ok(request)
+            }
+        }
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+impl HostSelfRetirementParams {
+    /// Enforce the immutable five-minute proof window with checked arithmetic.
+    pub fn validate_time_window(&self) -> Result<(), &'static str> {
+        if self.expected_host_access_epoch.0 != 0
+            && self.expected_host_access_epoch.0 <= i64::MAX as u64
+            && self.prepared_at.0 != 0
+            && self.expires_at.0 != 0
+            && self.prepared_at.0.checked_add(300) == Some(self.expires_at.0)
+        {
+            Ok(())
+        } else {
+            Err("invalid self-retirement time window")
+        }
+    }
+}
+
 // Historical enrollment proof used only to acknowledge retirement of that
 // enrollment's already-revoked host authorization family, if one exists.
 dto!(HostEnrollmentRevocationAckParams {
@@ -747,6 +859,37 @@ fn positive_host_epoch_schema(_: &mut SchemaGenerator) -> Schema {
     })
 }
 
+fn deserialize_positive_timestamp<'de, D>(deserializer: D) -> Result<DecimalU64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = DecimalU64::deserialize(deserializer)?;
+    if value.0 == 0 {
+        return Err(serde::de::Error::custom("timestamp must be positive"));
+    }
+    Ok(value)
+}
+
+fn positive_timestamp_schema(_: &mut SchemaGenerator) -> Schema {
+    let maximum = u64::MAX.to_string();
+    let mut alternatives = vec!["[1-9][0-9]{0,18}".to_owned()];
+    for (i, digit) in maximum.bytes().enumerate() {
+        let low = if i == 0 { b'1' } else { b'0' };
+        if digit > low {
+            alternatives.push(format!(
+                "{}[{}-{}][0-9]{{{}}}",
+                &maximum[..i],
+                low as char,
+                (digit - 1) as char,
+                19 - i
+            ));
+        }
+    }
+    alternatives.push(maximum);
+    let pattern = format!("^({})$", alternatives.join("|"));
+    json_schema!({"type":"string","pattern":pattern,"not":{"pattern":"[^0-9]"},"maxLength":20})
+}
+
 macro_rules! list_schema {
     ($name:ident, $item:ty, $max:literal) => {
         impl JsonSchema for $name {
@@ -809,6 +952,11 @@ pending_list!(
 /// are separate server obligations. Unknown kinds and duplicate fields fail.
 pub fn validate_http_wire(kind: &str, json: &str) -> Result<(), &'static str> {
     crate::json_wire::check_raw(json)?;
+    if kind == "HostSelfRetirementParams" {
+        let request: HostSelfRetirementParams =
+            serde_json::from_str(json).map_err(|_| "INVALID_ARGUMENT")?;
+        return request.validate_time_window();
+    }
     macro_rules! kinds {
         ($($ty:ident),+ $(,)?) => {
             match kind {
@@ -861,7 +1009,71 @@ pub fn validate_http_wire(kind: &str, json: &str) -> Result<(), &'static str> {
         HostRevokeParams,
         HostRevokeResult,
         HostRevocationAckParams,
+        HostSelfRetirementParams,
         HostEnrollmentRevocationAckParams,
         HostEnrollmentRevocationAckResult,
     )
+}
+
+#[cfg(test)]
+mod self_retirement_wire_tests {
+    use super::*;
+
+    const VALID: &str = r#"{"hostAuthorizationId":"22222222-2222-4222-8222-222222222222","operationId":"33333333-3333-4333-8333-333333333333","expectedHostAccessEpoch":"2","preparedAt":"1700000000","expiresAt":"1700000300","refresh":"refresh_token","proof":{"canonicalCbor":"aa","signature":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#;
+
+    #[test]
+    fn request_has_exact_seven_wire_fields_and_canonical_time_window() {
+        validate_http_wire("HostSelfRetirementParams", VALID).unwrap();
+        let request: HostSelfRetirementParams = serde_json::from_str(VALID).unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        let keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "expiresAt",
+                "expectedHostAccessEpoch",
+                "hostAuthorizationId",
+                "operationId",
+                "preparedAt",
+                "proof",
+                "refresh",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+    }
+
+    #[test]
+    fn request_rejects_malformed_epoch_timestamps_and_duration_overflow() {
+        for (from, to) in [
+            (
+                "\"expectedHostAccessEpoch\":\"2\"",
+                "\"expectedHostAccessEpoch\":\"0\"",
+            ),
+            (
+                "\"expectedHostAccessEpoch\":\"2\"",
+                "\"expectedHostAccessEpoch\":\"9223372036854775808\"",
+            ),
+            ("\"preparedAt\":\"1700000000\"", "\"preparedAt\":\"0\""),
+            (
+                "\"preparedAt\":\"1700000000\"",
+                "\"preparedAt\":\"18446744073709551615\"",
+            ),
+            (
+                "\"expiresAt\":\"1700000300\"",
+                "\"expiresAt\":\"1700000299\"",
+            ),
+        ] {
+            let malformed = VALID.replace(from, to);
+            assert!(validate_http_wire("HostSelfRetirementParams", &malformed).is_err());
+        }
+        let wrong_kind = VALID.replace("\"expiresAt\":\"1700000300\"", "\"expiresAt\":1700000300");
+        assert!(validate_http_wire("HostSelfRetirementParams", &wrong_kind).is_err());
+    }
 }

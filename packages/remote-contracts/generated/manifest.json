@@ -40,6 +40,7 @@
     "contracts/HostRevokeParams.schema.json": "8cac9d581b0c14cba5b04917eccf6fc3092f5dfa17d685233a3d1505c4cbeef3",
     "contracts/HostRevokeResult.schema.json": "a944b8e1007b2ce84bd41c2e0743b2587dd24094841d7a4e9834031a677d67c8",
     "contracts/HostRuntimeGetResult.schema.json": "ebc4cd67136e5bb360a22bdba5ee49eefb9102f646bb039f5f2c49ffc7feef7e",
+    "contracts/HostSelfRetirementParams.schema.json": "68db8049b7f5c56eaeff898e19c919db0bc427f87de05ded545857f6db19ecd0",
     "contracts/InventoryResult.schema.json": "fa3f4e6eecd488f4a5484bee40a36bd060855a6fd8fec79232b2298ee3af206c",
     "contracts/PairingCreateParams.schema.json": "f62bf7d7a7a48f7f8cd272b556915fef64d6734d2e0fe2621b5104808663fe4d",
     "contracts/PairingDecisionParams.schema.json": "17129e4d88384a29315fac545fe4d6e399638a24fdc7fa067b402d1ded26c7f1",
@@ -113,6 +114,7 @@
     "HostRevokeParams.d.ts": "8905f1de5fb02e8cca5418141011a922e4cdf1e15da87655d2f113654ea6917a",
     "HostRevokeResult.d.ts": "cfaa56bbbcfff7a6d832c2b419b3771a364c89f94cbfabbd5803cef8030533ce",
     "HostRuntimeGetResult.d.ts": "9afdc52981c3a42b6a0b6b484285fd9f82d050bbe0b86b21592441e45806a46d",
+    "HostSelfRetirementParams.d.ts": "bacf7942b73bb65c90e9fb2fccba520565d6652a5e31a920f527d4a09dcf8c0e",
     "InventoryResult.d.ts": "80f369696db7d1bbc85ce266592c5333595f873196211d5ce7867ee9fb223821",
     "PairingCreateParams.d.ts": "591f7ae213e6e9f84ea5af405587a0acaa632038711f5b7aae75af2161ab0f01",
     "PairingDecisionParams.d.ts": "fb4f6136bec7bc28a745513c1f36cb9e81e3bcbf7184f8238247ac2c2c383126",
@@ -144,9 +146,9 @@
     "workspace-context.d.ts": "a11d0a93d1df7d38791dc006c7066f8e84bcfe472b6ee1c142c6d16444a64ae0",
     "workspace-stream-frame.d.ts": "e282fb2e5eb66670637356f9a44a34d2146482bc1038a823c04df46427de9655",
     "wss-admission-frame.d.ts": "0e0e905e951578efc8019c404aa20daf482e30d710b6beea9ac5f33c28341db4",
-    "validators.mjs": "0ac37f51c33a327b3fa3999ab38678a921718e463986e170683f4ad130bd1be6",
-    "registry.mjs": "e347b7fac3e6d266b81d7f6c798c444b5085676f6d533a67566eebdf3002b970",
-    "index.d.ts": "3d3e4cf0eb09e523b97ce6a3d2a8315335f98e226ce57dd30bf091f962697e2d"
+    "validators.mjs": "211df8a221410f4aadfba78b572d48202485140342b118f7521c2409705319b6",
+    "registry.mjs": "eb459e6e05b4d3216da942e618a1daa9e0c50bc77e4b228f685502af8bdf2201",
+    "index.d.ts": "511929d4a5cee1d40b84519899cf913f6300109e5e976e05c947a5a3e255f3e1"
   },
   "manifestSelfHash": false
 }

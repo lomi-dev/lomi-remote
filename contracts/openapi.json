@@ -4241,6 +4241,120 @@
         "title": "HostRuntimeGetResult",
         "type": "object"
       },
+      "HostSelfRetirementParams": {
+        "$defs": {
+          "CanonicalCryptoCborHex": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^([0-9a-f]{2})+$",
+            "type": "string"
+          },
+          "EnrollmentProof": {
+            "additionalProperties": false,
+            "properties": {
+              "canonicalCbor": {
+                "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/CanonicalCryptoCborHex"
+              },
+              "signature": {
+                "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/SignatureHex"
+              }
+            },
+            "required": [
+              "canonicalCbor",
+              "signature"
+            ],
+            "type": "object"
+          },
+          "HostAuthorizationId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "HostRefreshCredential": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "OperationId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SignatureHex": {
+            "maxLength": 128,
+            "minLength": 128,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^([0-9a-f]{2})+$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "expectedHostAccessEpoch": {
+            "maxLength": 19,
+            "minLength": 1,
+            "pattern": "^([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6][0-9]{0}|9223372036854775807)$",
+            "type": "string"
+          },
+          "expiresAt": {
+            "maxLength": 20,
+            "not": {
+              "pattern": "[^0-9]"
+            },
+            "pattern": "^([1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+            "type": "string"
+          },
+          "hostAuthorizationId": {
+            "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/HostAuthorizationId"
+          },
+          "operationId": {
+            "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/OperationId"
+          },
+          "preparedAt": {
+            "maxLength": 20,
+            "not": {
+              "pattern": "[^0-9]"
+            },
+            "pattern": "^([1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+            "type": "string"
+          },
+          "proof": {
+            "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/EnrollmentProof"
+          },
+          "refresh": {
+            "$ref": "#/components/schemas/HostSelfRetirementParams/$defs/HostRefreshCredential"
+          }
+        },
+        "required": [
+          "hostAuthorizationId",
+          "operationId",
+          "expectedHostAccessEpoch",
+          "preparedAt",
+          "expiresAt",
+          "refresh",
+          "proof"
+        ],
+        "title": "HostSelfRetirementParams",
+        "type": "object"
+      },
       "InputReceipt": {
         "$defs": {
           "DecimalU64": {
@@ -26210,6 +26324,151 @@
           }
         },
         "x-lomi-server-owned-class": "HostAccess"
+      }
+    },
+    "/v2/remote/hosts/{hostId}/retire": {
+      "post": {
+        "description": "Proof-only self-retirement of one exact confirmed host authorization family. The fresh host-key proof binds the path host, account, family, key fingerprint, expected current epoch, origin, operation and immutable five-minute deadline. Historical retained refresh hashes are accepted only with a valid fresh signature. The operation revokes only the matching family and advances the host epoch atomically; an already-revoked family returns its terminal HostRevokeResult without authority writes. It returns no reusable credentials.",
+        "operationId": "HostSelfRetirement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hostId",
+            "required": true,
+            "schema": {
+              "maxLength": 36,
+              "minLength": 36,
+              "not": {
+                "const": "00000000-0000-0000-0000-000000000000"
+              },
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HostSelfRetirementParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostRevokeResult"
+                }
+              }
+            },
+            "description": "Draft success DTO; endpoint implementation is outside this contract."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "426": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteError"
+                }
+              }
+            },
+            "description": "Safe Remote error; code determines HTTP status."
+          }
+        },
+        "x-lomi-server-owned-class": "HostRevocationProof"
       }
     },
     "/v2/remote/hosts/{hostId}/revocation-ack": {

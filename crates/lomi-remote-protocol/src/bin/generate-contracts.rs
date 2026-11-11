@@ -129,6 +129,7 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
         HostRevokeParams,
         HostRevokeResult,
         HostRevocationAckParams,
+        HostSelfRetirementParams,
         HostEnrollmentRevocationAckParams,
         HostEnrollmentRevocationAckResult
     );
@@ -182,6 +183,7 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
             HttpRoute::GrantRevoke => (Some("GrantRevokeParams"), "GrantRevokeResult"),
             HttpRoute::HostRevoke => (Some("HostRevokeParams"), "HostRevokeResult"),
             HttpRoute::HostRevocationAck => (Some("HostRevocationAckParams"), "HostRevokeResult"),
+            HttpRoute::HostSelfRetirement => (Some("HostSelfRetirementParams"), "HostRevokeResult"),
             HttpRoute::HostEnrollmentRevocationAck => (
                 Some("HostEnrollmentRevocationAckParams"),
                 "HostEnrollmentRevocationAckResult",
@@ -201,6 +203,11 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
         if route.route == HttpRoute::HostRevocationAck {
             operation["description"] = json!(
                 "Proof-only acknowledgement for one already-revoked host authorization family. The submitted refresh secret must match a retained secret hash for the requested family, and the path host, family host/account binding, family epoch and current host epoch must match the trusted snapshot. Retained expired or consumed refresh secrets are accepted only for an already-revoked family; wrong, missing or live-family proofs are denied. This route performs no authority DML and returns only HostRevokeResult; it grants no reusable authority."
+            );
+        }
+        if route.route == HttpRoute::HostSelfRetirement {
+            operation["description"] = json!(
+                "Proof-only self-retirement of one exact confirmed host authorization family. The fresh host-key proof binds the path host, account, family, key fingerprint, expected current epoch, origin, operation and immutable five-minute deadline. Historical retained refresh hashes are accepted only with a valid fresh signature. The operation revokes only the matching family and advances the host epoch atomically; an already-revoked family returns its terminal HostRevokeResult without authority writes. It returns no reusable credentials."
             );
         }
         if route.route == HttpRoute::HostEnrollmentRevocationAck {

@@ -36,6 +36,8 @@ pub enum Error {
     Cancelled,
     Redirect,
     HttpStatus,
+    /// Temporary gateway failure; the server-side outcome remains unknown.
+    GatewayUnavailable,
     ResponseTooLarge,
     InvalidResponse,
     ResolverUnavailable,
@@ -53,6 +55,7 @@ impl fmt::Display for Error {
             Self::Cancelled => "HOST_HTTP_CANCELLED",
             Self::Redirect => "HOST_HTTP_REDIRECT",
             Self::HttpStatus => "HOST_HTTP_STATUS",
+            Self::GatewayUnavailable => "HOST_HTTP_GATEWAY_UNAVAILABLE",
             Self::ResponseTooLarge => "HOST_HTTP_RESPONSE_LIMIT",
             Self::InvalidResponse => "HOST_HTTP_RESPONSE",
             Self::ResolverUnavailable => "HOST_HTTP_RESOLVER",
@@ -210,6 +213,22 @@ impl Transport {
             None,
         )
     }
+    /// Retires one exact family using a fresh host-key proof. The request is
+    /// authenticated by its HTTPS body proof, never by Bearer or cookie state.
+    pub fn self_retire(
+        &self,
+        host_id: HostId,
+        request: &HostSelfRetirementParams,
+    ) -> Result<HostRevokeResult> {
+        if request.validate_time_window().is_err() {
+            return Err(Error::Request);
+        }
+        self.post(
+            &format!("/v2/remote/hosts/{}/retire", String::from(host_id)),
+            request,
+            None,
+        )
+    }
     /// Acknowledges retirement of one historical enrollment using its signed
     /// enrollment proof. The proof is sent only in the HTTPS JSON body; this
     /// request never uses Bearer or cookie authorization.
@@ -281,6 +300,10 @@ impl Transport {
             .map_err(network_error)?;
         diagnostics::response_received();
         let status = response.status().as_u16();
+        // A gateway body is never credential authority; callers retain their exact intent.
+        if matches!(status, 502 | 503 | 504) {
+            return Err(Error::GatewayUnavailable);
+        }
         if (300..400).contains(&status) {
             return Err(Error::Redirect);
         }
@@ -605,4 +628,195 @@ fn parse_poll(status: u16, bytes: &[u8]) -> Result<PollOutcome> {
         "invalid_grant" => PollOutcome::InvalidGrant,
         _ => return Err(Error::InvalidResponse),
     })
+}
+
+#[cfg(test)]
+mod gateway_response_tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Instant;
+
+    fn send_response(status: u16, headers: &str) -> Result<(u16, Zeroizing<Vec<u8>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let response =
+            format!("HTTP/1.1 {status} Test\r\nConnection: close\r\n{headers}\r\n<html>");
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "test client did not connect");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("test accept failed: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 4096);
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let mut body = [0; 2];
+            socket.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"{}");
+            std::io::Write::write_all(&mut socket, response.as_bytes()).unwrap();
+        });
+        // Exercise the production response path; only this private fixture permits HTTP.
+        let agent = ureq::Agent::config_builder()
+            .https_only(false)
+            .proxy(None)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build()
+            .into();
+        let transport = Transport {
+            budget: None,
+            agent,
+            origin: format!("http://{address}"),
+            client: "test".into(),
+        };
+        let result = transport.send("/test", &serde_json::json!({}), None);
+        server.join().unwrap();
+        result
+    }
+
+    fn send_self_retirement() -> (Result<HostRevokeResult>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let request_headers = String::from_utf8(headers.clone()).unwrap();
+            let content_length = request_headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|length| length.parse::<usize>().ok())
+                })
+                .unwrap();
+            let mut body = vec![0; content_length];
+            socket.read_exact(&mut body).unwrap();
+            let response_body =
+                r#"{"hostId":"11111111-1111-4111-8111-111111111111","hostAccessEpoch":"3"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            std::io::Write::write_all(&mut socket, response.as_bytes()).unwrap();
+            (request_headers, body)
+        });
+        let agent = ureq::Agent::config_builder()
+            .https_only(false)
+            .proxy(None)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build()
+            .into();
+        let transport = Transport {
+            budget: None,
+            agent,
+            origin: format!("http://{address}"),
+            client: "test".into(),
+        };
+        let host_id = HostId::try_from("11111111-1111-4111-8111-111111111111".to_owned()).unwrap();
+        let request: HostSelfRetirementParams = serde_json::from_str(
+            r#"{"hostAuthorizationId":"22222222-2222-4222-8222-222222222222","operationId":"33333333-3333-4333-8333-333333333333","expectedHostAccessEpoch":"2","preparedAt":"1700000000","expiresAt":"1700000300","refresh":"refresh_token","proof":{"canonicalCbor":"aa","signature":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+        )
+        .unwrap();
+        let result = transport.self_retire(host_id, &request);
+        let (headers, body) = server.join().unwrap();
+        (
+            result,
+            format!("{headers}\n{}", String::from_utf8(body).unwrap()),
+        )
+    }
+
+    #[test]
+    fn self_retirement_posts_exact_host_route_without_bearer_or_cookie() {
+        let (result, request) = send_self_retirement();
+        assert_eq!(
+            result.unwrap(),
+            HostRevokeResult {
+                host_id: HostId::try_from("11111111-1111-4111-8111-111111111111".to_owned())
+                    .unwrap(),
+                host_access_epoch: DecimalU64(3),
+            }
+        );
+        let headers = request.split_once("\r\n\r\n").unwrap().0;
+        assert!(
+            headers.starts_with(
+                "POST /v2/remote/hosts/11111111-1111-4111-8111-111111111111/retire HTTP/1.1\r\n"
+            ),
+            "unexpected request: {headers:?}"
+        );
+        let lower_headers = headers.to_ascii_lowercase();
+        for forbidden in ["authorization:", "cookie:", "origin:", "sec-fetch-"] {
+            assert!(
+                !lower_headers.contains(forbidden),
+                "unexpected {forbidden} header"
+            );
+        }
+        assert!(request.contains("\"hostAuthorizationId\""));
+        assert!(request.contains("\"proof\""));
+    }
+
+    #[test]
+    fn opaque_gateway_responses_do_not_read_or_accept_the_body() {
+        for status in [502, 503, 504] {
+            for headers in [
+                "Content-Type: text/html\r\nContent-Length: 6\r\n",
+                "Content-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 6\r\n",
+                "Content-Type: application/json\r\nContent-Length: 1000000000\r\n",
+            ] {
+                assert_eq!(
+                    send_response(status, headers).unwrap_err(),
+                    Error::GatewayUnavailable
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_statuses_retain_strict_headers_and_redirect_rejection() {
+        for status in [200, 401, 500] {
+            assert_eq!(
+                send_response(status, "Content-Type: text/html\r\nContent-Length: 6\r\n")
+                    .unwrap_err(),
+                Error::InvalidResponse
+            );
+        }
+        assert_eq!(
+            send_response(
+                302,
+                "Location: https://unexpected.example/\r\nContent-Length: 6\r\n"
+            )
+            .unwrap_err(),
+            Error::Redirect
+        );
+    }
 }

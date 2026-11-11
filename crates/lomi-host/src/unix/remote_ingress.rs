@@ -436,6 +436,10 @@ struct PendingStream<'cancel> {
     authorization_call: Option<RpcRequest>,
     /// `None` for workspace/watch frames, which have no terminal delivery ledger.
     delivery: Option<RemoteTerminalStreamFrame>,
+    /// Only normal terminal producer messages may continue a bounded burst
+    /// under this original maintenance admission. Started Git and RPC stream
+    /// messages carry no burst marker.
+    burst_started: Option<Instant>,
     remaining: usize,
 }
 
@@ -452,6 +456,39 @@ fn transfer_maintenance_to_stream<'cancel, Peer>(
     let operation = std::mem::replace(maintenance, replacement_maintenance);
     let aborted = std::mem::replace(maintenance_aborted, std::cell::Cell::new(false));
     (operation, aborted, peer.take())
+}
+
+fn restore_terminal_stream_operation<'cancel>(
+    maintenance: &mut super::OwnerOperation<'cancel>,
+    maintenance_aborted: &mut std::cell::Cell<bool>,
+    operation: super::OwnerOperation<'cancel>,
+    aborted: std::cell::Cell<bool>,
+) {
+    *maintenance = operation;
+    *maintenance_aborted = aborted;
+}
+
+fn terminal_burst_can_continue(
+    burst_started: Option<Instant>,
+    now: Instant,
+    proof_fresh_until: Instant,
+    operation_deadline: Instant,
+    operation_live: bool,
+    proof_current: bool,
+    producer_pending: bool,
+) -> bool {
+    burst_started.is_some_and(|started| {
+        operation_live
+            && proof_current
+            && producer_pending
+            && now
+                .checked_duration_since(started)
+                .is_some_and(|elapsed| elapsed < registry::STAGED_MESSAGE_BATCH_QUANTUM)
+            && registry::terminal_emission_retains_operation(operation_deadline, now)
+            && now
+                .checked_add(PEER_REFRESH_MARGIN)
+                .is_some_and(|refresh_by| refresh_by < proof_fresh_until)
+    })
 }
 
 struct QueuedStartedOutput<'cancel> {
@@ -753,9 +790,9 @@ impl<'cancel> Driver<'cancel> {
                 .as_ref()
                 .is_some_and(|connection| connection.has_immediate_output())
     }
-    /// True only for a finite response/stream message already staged for send.
-    /// A terminal producer with another event ready is deliberately excluded;
-    /// its next message is created after the scheduler's normal idle opportunity.
+    /// True only for output already staged for send. A terminal producer with
+    /// another event ready cannot start a batch; only an explicitly marked
+    /// normal terminal stream may replenish one within its bounded burst.
     pub(super) fn has_staged_output(&self) -> bool {
         self.connection
             .as_ref()
@@ -776,6 +813,13 @@ impl<'cancel> Driver<'cancel> {
         self.connection
             .as_ref()
             .and_then(Connection::staged_message_remaining)
+    }
+    pub(super) fn has_staged_terminal_burst(&self) -> bool {
+        !self.has_active_git_writer()
+            && self
+                .connection
+                .as_ref()
+                .is_some_and(Connection::has_staged_terminal_burst)
     }
     /// Empty means no candidate, ticket, or live transport. A live transport
     /// can outlast its maintenance operation and must remain in the registry.
@@ -1748,6 +1792,7 @@ impl<'cancel> Connection<'cancel> {
                     kind: MessageKind::TerminalFrame,
                     authorization_call: None,
                     delivery: Some(frame),
+                    burst_started: None,
                     remaining,
                 };
                 self.enqueue_started_git_stream(MessageKind::TerminalFrame, bytes, stream)?;
@@ -3261,6 +3306,16 @@ impl<'cancel> Connection<'cancel> {
         )
     }
 
+    fn has_staged_terminal_burst(&self) -> bool {
+        self.stream.as_ref().is_some_and(|stream| {
+            stream.remaining > 0
+                && stream.burst_started.is_some()
+                && stream.kind == MessageKind::TerminalFrame
+                && stream.delivery.is_some()
+                && stream.authorization_call.is_none()
+        })
+    }
+
     fn turn(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -3540,7 +3595,6 @@ impl<'cancel> Connection<'cancel> {
             };
             let deadline = invalid_none_at!("stream.io-deadline", current.io_deadline(&evidence))?;
             self.peer_cutoff = current.fresh_until();
-            drop(evidence);
             let operation = &stream.operation;
             let owner = runtime.owner;
             let continuation = current.continuation();
@@ -3557,19 +3611,76 @@ impl<'cancel> Connection<'cancel> {
             self.socket
                 .send_binary(&ciphertext, deadline, &check)
                 .map_err(invalid_at!())?;
+            check().map_err(invalid_at!())?;
             stream.remaining = stream
                 .remaining
                 .checked_sub(1)
                 .ok_or(peer::PeerError::Invalid)?;
             if stream.remaining == 0 {
-                if let Some(delivery) = stream.delivery {
+                if let Some(delivery) = stream.delivery.take() {
                     self.terminal
                         .as_mut()
                         .ok_or(peer::PeerError::Invalid)?
                         .complete_delivery(crypto, delivery)
                         .map_err(invalid_at!())?;
                 }
-                self.peer = None;
+                let now = Instant::now();
+                let producer_pending = self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(RemoteTerminalState::has_immediate_output);
+                let can_continue_burst = terminal_burst_can_continue(
+                    stream.burst_started,
+                    now,
+                    current.fresh_until(),
+                    stream.operation.deadline(),
+                    !stream.aborted.get() && stream.operation.check().is_ok(),
+                    current.current(&evidence),
+                    producer_pending,
+                );
+                let next_delivery = if can_continue_burst {
+                    self.terminal
+                        .as_mut()
+                        .ok_or(peer::PeerError::Invalid)?
+                        .next_frame(crypto, &evidence, &current)
+                        .map_err(invalid_at!())?
+                } else {
+                    None
+                };
+                drop(evidence);
+                if let Some(delivery) = next_delivery {
+                    watch(operation, gate, paused, stopping, public_pending)
+                        .map_err(invalid_at!())?;
+                    owner
+                        .peer_original_boundary(operation, continuation)
+                        .map_err(owner_error_at!())?;
+                    let bytes = serde_json::to_vec(delivery.frame()).map_err(invalid_at!())?;
+                    let remaining = frame_count(bytes.len());
+                    if remaining == 0 {
+                        return Err(peer::PeerError::Invalid);
+                    }
+                    self.encoder
+                        .begin(MessageKind::TerminalFrame, bytes)
+                        .map_err(invalid_at!())?;
+                    stream.delivery = Some(delivery);
+                    stream.remaining = remaining;
+                    stream.peer = Some(current);
+                    self.stream = Some(stream);
+                } else if stream.burst_started.is_some() {
+                    // The replacement admission has not run while this staged
+                    // normal terminal message owned the connection turn. Return
+                    // the exact original operation (and deadline) for the next
+                    // proof check; never carry it across a worker-unit boundary.
+                    restore_terminal_stream_operation(
+                        &mut self.maintenance,
+                        &mut self.maintenance_aborted,
+                        stream.operation,
+                        stream.aborted,
+                    );
+                    self.peer = Some(current);
+                } else {
+                    self.peer = None;
+                }
             } else {
                 stream.peer = Some(current);
                 self.stream = Some(stream);
@@ -3860,6 +3971,8 @@ impl<'cancel> Connection<'cancel> {
                 let remaining = bytes
                     .len()
                     .div_ceil(lomi_remote_protocol::message_framing::MAX_FRAGMENT_PAYLOAD_LEN);
+                let burst_started =
+                    (kind == MessageKind::TerminalFrame && delivery.is_some()).then(Instant::now);
                 self.encoder.begin(kind, bytes).map_err(invalid_at!())?;
                 // Serialization follows dropping actor/Domain/Core turns.
                 // Transfer the exact maintenance admission and proof that
@@ -3877,6 +3990,7 @@ impl<'cancel> Connection<'cancel> {
                     kind,
                     authorization_call,
                     delivery,
+                    burst_started,
                     remaining,
                 });
                 advanced = true;
@@ -4911,6 +5025,112 @@ mod stream_operation_transfer_tests {
     use super::*;
 
     #[test]
+    fn terminal_burst_requires_origin_quantum_proof_and_worker_headroom() {
+        let now = Instant::now();
+        let started = now - Duration::from_millis(499);
+        let headroom =
+            Duration::from_millis(lomi_remote_protocol::message_framing::ASSEMBLY_TIMEOUT_MS)
+                .saturating_add(PEER_REFRESH_MARGIN);
+        let operation_deadline = now + headroom + Duration::from_nanos(1);
+        let proof_fresh_until = now + PEER_REFRESH_MARGIN + Duration::from_nanos(1);
+
+        let can_continue =
+            |origin, at, fresh_until, deadline, operation_live, proof_current, pending| {
+                terminal_burst_can_continue(
+                    origin,
+                    at,
+                    fresh_until,
+                    deadline,
+                    operation_live,
+                    proof_current,
+                    pending,
+                )
+            };
+
+        assert!(can_continue(
+            Some(started),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            None,
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(now - registry::STAGED_MESSAGE_BATCH_QUANTUM),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(now + Duration::from_nanos(1)),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(started),
+            now,
+            now + PEER_REFRESH_MARGIN,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(started),
+            now,
+            proof_fresh_until,
+            now + headroom,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(started),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            false,
+            true,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(started),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            false,
+            true,
+        ));
+        assert!(!can_continue(
+            Some(started),
+            now,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
     fn stream_transfer_preserves_operation_and_moves_its_proof_once() {
         let cancelled = AtomicBool::new(false);
         let original_deadline = Instant::now() + Duration::from_secs(20);
@@ -4952,6 +5172,44 @@ mod stream_operation_transfer_tests {
             );
         assert!(next_stream_peer.is_none());
         assert!(!maintenance.is_same_admission(&replacement_identity));
+    }
+
+    #[test]
+    fn normal_terminal_stream_restores_exact_admission_without_rebasing() {
+        let cancelled = AtomicBool::new(false);
+        let original_deadline = Instant::now() + Duration::from_secs(20);
+        let replacement_deadline = original_deadline + Duration::from_secs(5);
+        let mut maintenance = super::super::OwnerOperation::new(original_deadline, &cancelled);
+        let original_identity = maintenance.retained_identity();
+        let mut maintenance_aborted = std::cell::Cell::new(false);
+        let mut peer = Some(original_identity.clone());
+        let (stream_operation, stream_aborted, _) = transfer_maintenance_to_stream(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            &mut peer,
+            super::super::OwnerOperation::new(replacement_deadline, &cancelled),
+        );
+        let replacement_identity = maintenance.retained_identity();
+
+        restore_terminal_stream_operation(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            stream_operation,
+            stream_aborted,
+        );
+
+        assert!(maintenance.is_same_admission(&original_identity));
+        assert_eq!(maintenance.deadline(), original_deadline);
+        assert!(!maintenance.is_same_admission(&replacement_identity));
+        assert!(!maintenance_aborted.get());
+
+        let successor_unit = super::super::OwnerOperation::new(
+            original_deadline + Duration::from_secs(1),
+            &cancelled,
+        );
+        assert!(!successor_unit.is_same_admission(&original_identity));
+        cancelled.store(true, Ordering::Release);
+        assert!(maintenance.check().is_err());
     }
 
     #[test]

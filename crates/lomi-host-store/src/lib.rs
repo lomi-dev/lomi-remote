@@ -71,6 +71,7 @@ struct VerifiedGeneration {
 
 const AUTHORIZATION_REJECTION_KEY: &str = "authorization_rejection";
 const DEFERRED_LOGIN_KEY: &str = "deferred_login_intent";
+const HOST_SELF_RETIREMENT_KEY: &str = "host_self_retirement_intent";
 const MAX_SHELL_PROFILE_CWD_SUFFIX_BYTES: usize = 4096;
 const MAX_REGISTERED_SHELL_PROFILES_PER_WORKSPACE: usize = 31;
 const MAX_SHELL_PROFILES_PER_WORKSPACE: usize = 32;
@@ -88,6 +89,21 @@ struct AuthorizationRejection {
 struct DeferredLoginRecord {
     version: u32,
     intent: LoginIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSelfRetirementJournal {
+    pub generation: u64,
+    pub trigger_operation_id: Option<OperationId>,
+    pub intent: HostSelfRetirementIntent,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostSelfRetirementRecord {
+    version: u32,
+    journal: HostSelfRetirementJournal,
 }
 
 fn metadata_value(db: &Connection, key: &str) -> Result<Option<String>> {
@@ -278,6 +294,40 @@ fn read_deferred_login_record(db: &Connection) -> Result<Option<DeferredLoginRec
         .transpose()
 }
 
+fn read_host_self_retirement_record(db: &Connection) -> Result<Option<HostSelfRetirementJournal>> {
+    metadata_value(db, HOST_SELF_RETIREMENT_KEY)?
+        .map(|value| {
+            let record: HostSelfRetirementRecord =
+                serde_json::from_str(&value).map_err(|_| StoreError::Storage)?;
+            let intent = &record.journal.intent;
+            if record.version != 1
+                || intent.prepared_at.0.checked_add(300) != Some(intent.expires_at.0)
+            {
+                return Err(StoreError::Storage);
+            }
+            Ok(record.journal)
+        })
+        .transpose()
+}
+
+fn save_host_self_retirement_record(
+    tx: &Transaction<'_>,
+    journal: &HostSelfRetirementJournal,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![
+            HOST_SELF_RETIREMENT_KEY,
+            json(&HostSelfRetirementRecord {
+                version: 1,
+                journal: journal.clone(),
+            })?
+        ],
+    )?;
+    Ok(())
+}
+
 fn read_login_intent_record(db: &Connection) -> Result<Option<LoginIntent>> {
     metadata_value(db, "login_generation")?
         .map(|value| serde_json::from_str(&value).map_err(|_| StoreError::Storage))
@@ -325,10 +375,24 @@ fn validate_rejection_metadata(
     let active = read_login_intent_record(db)?;
     match rejection {
         None => {
-            if deferred.is_some() || (state.pending_cloud_revoke && active.is_some()) {
+            if state.pending_cloud_revoke && active.is_some() {
                 return Err(StoreError::Storage);
             }
-            Ok((None, None))
+            let deferred_intent = match deferred {
+                None => None,
+                Some(record) if state.pending_cloud_revoke && state.locked => {
+                    if record.intent.generation != state.generation {
+                        return Err(StoreError::Fenced);
+                    }
+                    let current = HostStore::read_auth_configuration(db)?;
+                    if configuration.is_none() || configuration != current.as_ref() {
+                        return Err(StoreError::Fenced);
+                    }
+                    Some(record.intent)
+                }
+                Some(_) => return Err(StoreError::Storage),
+            };
+            Ok((None, deferred_intent))
         }
         Some(rejection) => {
             if rejection.generation != state.generation {
@@ -1649,7 +1713,7 @@ PRAGMA user_version=6;",
             state.locked = true;
             state.pending_cloud_revoke |= reason == AuthorizationFenceReason::LocalLogout;
             save_authorization_state(&tx, state)?;
-            tx.execute("DELETE FROM metadata WHERE key IN ('login_generation','authorization_verified_generation',?1,?2)", params![AUTHORIZATION_REJECTION_KEY, DEFERRED_LOGIN_KEY])?;
+            tx.execute("DELETE FROM metadata WHERE key IN ('login_generation','authorization_verified_generation',?1,?2,?3)", params![AUTHORIZATION_REJECTION_KEY, DEFERRED_LOGIN_KEY, HOST_SELF_RETIREMENT_KEY])?;
             fence_workspaces(&tx, self.limits)?;
             tx.commit()?;
             Ok(state)
@@ -1698,8 +1762,8 @@ PRAGMA user_version=6;",
             state.pending_cloud_revoke = active.is_some();
             save_authorization_state(&tx, state)?;
             tx.execute(
-                "DELETE FROM metadata WHERE key IN ('login_generation','authorization_verified_generation')",
-                [],
+                "DELETE FROM metadata WHERE key IN ('login_generation','authorization_verified_generation',?1)",
+                [HOST_SELF_RETIREMENT_KEY],
             )?;
             fence_workspaces(&tx, self.limits)?;
             save_authorization_rejection(&tx, state.generation, expected_configuration)?;
@@ -1726,7 +1790,7 @@ PRAGMA user_version=6;",
         &mut self,
         expected_generation: u64,
     ) -> Result<AuthorizationState> {
-        let configuration = self.rejection_configuration()?;
+        let configuration = self.auth_configuration()?;
         self.acknowledge_authorization_revoke_with_configuration(
             expected_generation,
             configuration.as_ref(),
@@ -1745,8 +1809,19 @@ PRAGMA user_version=6;",
         if rejection.is_some() && Self::read_auth_configuration(&tx)?.as_ref() != configuration {
             return Err(StoreError::Fenced);
         }
-        let promoted = if rejection.is_some() {
-            Some(deferred.ok_or(StoreError::Fenced)?)
+        let journal = read_host_self_retirement_record(&tx)?;
+        if journal
+            .as_ref()
+            .is_some_and(|journal| journal.generation != expected_generation)
+        {
+            return Err(StoreError::Fenced);
+        }
+        let promoted = if state.pending_cloud_revoke {
+            if rejection.is_some() {
+                Some(deferred.ok_or(StoreError::Fenced)?)
+            } else {
+                deferred
+            }
         } else {
             None
         };
@@ -1757,6 +1832,10 @@ PRAGMA user_version=6;",
             // Same-generation retries after a completed ACK are intentionally
             // inert. A later login may have recorded new cloud authority in
             // this generation, so a duplicate ACK must not clear that history.
+            tx.execute(
+                "DELETE FROM metadata WHERE key=?1",
+                [HOST_SELF_RETIREMENT_KEY],
+            )?;
             tx.commit()?;
             return Ok(state);
         }
@@ -1778,6 +1857,10 @@ PRAGMA user_version=6;",
                 params![AUTHORIZATION_REJECTION_KEY, DEFERRED_LOGIN_KEY],
             )?;
         }
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [HOST_SELF_RETIREMENT_KEY],
+        )?;
         tx.commit()?;
         Ok(state)
     }
@@ -1799,19 +1882,44 @@ PRAGMA user_version=6;",
     pub fn acknowledge_local_authorization_logout(
         &mut self,
         expected_generation: u64,
+        expected_configuration: Option<&ipc::LocalAuthConfiguration>,
     ) -> Result<AuthorizationState> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut state = checked_authorization_generation(&tx, expected_generation)?;
-        let (rejection, deferred) = validate_rejection_metadata(&tx, state, None)?;
-        if rejection.is_some() || deferred.is_some() {
+        if Self::read_auth_configuration(&tx)?.as_ref() != expected_configuration {
+            return Err(StoreError::Fenced);
+        }
+        let (rejection, deferred) =
+            validate_rejection_metadata(&tx, state, expected_configuration)?;
+        if rejection.is_some() || read_host_self_retirement_record(&tx)?.is_some() {
             return Err(StoreError::Fenced);
         }
         if read_cloud_history(&tx)? != Some(false) {
             return Err(StoreError::Fenced);
         }
+        if !state.pending_cloud_revoke {
+            // A same-generation duplicate is inert. It cannot erase newer
+            // cloud history or disturb a login started after the first ACK.
+            tx.commit()?;
+            return Ok(state);
+        }
+        if !state.locked {
+            return Err(StoreError::Fenced);
+        }
+
         state.pending_cloud_revoke = false;
+        if let Some(intent) = deferred {
+            // A pre-cloud-authorization login is promoted without granting
+            // authority. Normal enrollment still owns the later unlock.
+            state.locked = true;
+            tx.execute(
+                "INSERT INTO metadata(key,value) VALUES('login_generation',?1)",
+                [json(&intent)?],
+            )?;
+            tx.execute("DELETE FROM metadata WHERE key=?1", [DEFERRED_LOGIN_KEY])?;
+        }
         save_authorization_state(&tx, state)?;
         tx.commit()?;
         Ok(state)
@@ -1877,7 +1985,7 @@ PRAGMA user_version=6;",
             .map(|v| serde_json::from_str(&v).map_err(|_| StoreError::Storage))
             .transpose()?;
         let state = self.authorization_state()?;
-        let configuration = self.rejection_configuration()?;
+        let configuration = self.auth_configuration()?;
         let (rejection, deferred) =
             validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         if rejection.is_some() || deferred.is_some() {
@@ -1901,13 +2009,6 @@ PRAGMA user_version=6;",
             return Ok(self.public_current()?.configuration()?.authentication);
         }
         Self::read_auth_configuration(&self.db)
-    }
-    fn rejection_configuration(&self) -> Result<Option<ipc::LocalAuthConfiguration>> {
-        if read_authorization_rejection(&self.db)?.is_some() {
-            self.auth_configuration()
-        } else {
-            Ok(None)
-        }
     }
     fn read_auth_configuration(db: &Connection) -> Result<Option<ipc::LocalAuthConfiguration>> {
         let value: Option<String> = db
@@ -1963,7 +2064,7 @@ PRAGMA user_version=6;",
     }
     pub fn login_intent(&self) -> Result<Option<LoginIntent>> {
         let state = self.authorization_state()?;
-        let configuration = self.rejection_configuration()?;
+        let configuration = self.auth_configuration()?;
         let (rejection, _) = validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         if rejection.is_some() {
             return Ok(None);
@@ -1980,9 +2081,103 @@ PRAGMA user_version=6;",
     /// This remains separate from `login_intent` until that ACK is durable.
     pub fn deferred_login_intent(&self) -> Result<Option<LoginIntent>> {
         let state = self.authorization_state()?;
-        let configuration = self.rejection_configuration()?;
+        let configuration = self.auth_configuration()?;
         let (_, deferred) = validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         Ok(deferred)
+    }
+
+    /// Read the exact private retirement journal while its fenced generation
+    /// and selected authentication configuration remain current.
+    pub fn host_self_retirement_journal(
+        &self,
+        expected_generation: u64,
+        expected_configuration: &ipc::LocalAuthConfiguration,
+    ) -> Result<Option<HostSelfRetirementJournal>> {
+        expected_configuration
+            .validate()
+            .map_err(|_| StoreError::Invalid)?;
+        let state = checked_authorization_generation(&self.db, expected_generation)?;
+        if !state.locked || !state.pending_cloud_revoke {
+            return Err(StoreError::Fenced);
+        }
+        if self.auth_configuration()?.as_ref() != Some(expected_configuration) {
+            return Err(StoreError::Fenced);
+        }
+        let (_, _) = validate_rejection_metadata(&self.db, state, Some(expected_configuration))?;
+        read_host_self_retirement_record(&self.db)?
+            .map(|journal| {
+                if journal.generation != expected_generation
+                    || journal.intent.binding.host_id != self.identity.host_id
+                {
+                    return Err(StoreError::Fenced);
+                }
+                Ok(journal)
+            })
+            .transpose()
+    }
+
+    /// Persist or reuse one exact self-retirement purpose before any HTTP send.
+    /// An expired purpose can advance only after a different accepted queued
+    /// login operation has replaced its captured trigger.
+    pub fn prepare_host_self_retirement(
+        &mut self,
+        expected_generation: u64,
+        expected_configuration: &ipc::LocalAuthConfiguration,
+        binding: HostSelfRetirementBinding,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<HostSelfRetirementJournal> {
+        expected_configuration
+            .validate()
+            .map_err(|_| StoreError::Invalid)?;
+        if now == 0 || binding.host_id != self.identity.host_id {
+            return Err(StoreError::Invalid);
+        }
+        let expires_at = now.checked_add(300).ok_or(StoreError::Invalid)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = checked_authorization_generation(&tx, expected_generation)?;
+        if !state.locked || !state.pending_cloud_revoke {
+            return Err(StoreError::Fenced);
+        }
+        if Self::read_auth_configuration(&tx)?.as_ref() != Some(expected_configuration) {
+            return Err(StoreError::Fenced);
+        }
+        let (_, trigger) = validate_rejection_metadata(&tx, state, Some(expected_configuration))?;
+        let trigger_operation_id = trigger.map(|intent| intent.operation_id);
+        let existing = read_host_self_retirement_record(&tx)?;
+        if let Some(existing) = existing {
+            if existing.generation != expected_generation || existing.intent.binding != binding {
+                return Err(StoreError::Fenced);
+            }
+            if now < existing.intent.prepared_at.0 {
+                return Err(StoreError::Fenced);
+            }
+            if now < existing.intent.expires_at.0 {
+                tx.commit()?;
+                return Ok(existing);
+            }
+            if trigger_operation_id.is_none()
+                || trigger_operation_id == existing.trigger_operation_id
+                || operation_id == existing.intent.operation_id
+            {
+                return Err(StoreError::Fenced);
+            }
+        }
+        let journal = HostSelfRetirementJournal {
+            generation: expected_generation,
+            trigger_operation_id,
+            intent: HostSelfRetirementIntent {
+                binding,
+                operation_id,
+                prepared_at: DecimalU64(now),
+                expires_at: DecimalU64(expires_at),
+            },
+        };
+        save_host_self_retirement_record(&tx, &journal)?;
+        tx.commit()?;
+        Ok(journal)
     }
     pub fn begin_login(&mut self, operation_id: OperationId) -> Result<LoginIntent> {
         let configuration = self.auth_configuration()?.ok_or(StoreError::Invalid)?;
@@ -1996,6 +2191,15 @@ PRAGMA user_version=6;",
         }
         if let Some(rejection) = rejection {
             if let Some(intent) = deferred {
+                if intent.operation_id != operation_id {
+                    let updated = LoginIntent {
+                        operation_id,
+                        generation: state.generation,
+                    };
+                    save_deferred_login(&tx, updated)?;
+                    tx.commit()?;
+                    return Ok(updated);
+                }
                 tx.commit()?;
                 return Ok(intent);
             }
@@ -2013,7 +2217,19 @@ PRAGMA user_version=6;",
             return Ok(intent);
         }
         if state.pending_cloud_revoke {
-            return Err(StoreError::Fenced);
+            let intent = LoginIntent {
+                operation_id,
+                generation: state.generation,
+            };
+            if let Some(existing) = deferred {
+                if existing.operation_id == operation_id {
+                    tx.commit()?;
+                    return Ok(existing);
+                }
+            }
+            save_deferred_login(&tx, intent)?;
+            tx.commit()?;
+            return Ok(intent);
         }
         if let Some(intent) = read_login_intent_record(&tx)? {
             if intent.generation != state.generation {
@@ -5853,9 +6069,10 @@ fn clear_exited_sessions(layout: &mut TerminalLayout) -> bool {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod identity_inspection_tests {
     use super::*;
+    use lomi_remote_protocol::ipc::{LocalAuthConfiguration, LocalAuthProvider};
     use std::os::unix::fs::PermissionsExt;
 
     struct TestProfile(PathBuf);
@@ -5867,7 +6084,11 @@ mod identity_inspection_tests {
     }
 
     fn private_test_profile(suffix: &str) -> TestProfile {
-        let path = std::env::temp_dir().join(format!(
+        #[cfg(target_os = "macos")]
+        let temp_root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temp_root = std::env::temp_dir().canonicalize().unwrap();
+        let path = temp_root.join(format!(
             "lomi-host-store-identity-{suffix}-{}",
             Uuid::new_v4()
         ));
@@ -5877,6 +6098,380 @@ mod identity_inspection_tests {
         TestProfile(path)
     }
 
+    fn auth_configuration(origin: &str) -> LocalAuthConfiguration {
+        LocalAuthConfiguration {
+            version: 1,
+            origin: origin.to_owned().try_into().unwrap(),
+            remote_api_origin: None,
+            relay_endpoint: None,
+            client_id: "self-retirement-test".to_owned().try_into().unwrap(),
+            provider: LocalAuthProvider::LinuxSecretService,
+            keychain_path: None,
+            protected_file_acknowledgement: None,
+        }
+    }
+
+    fn test_binding(host_id: HostId) -> HostSelfRetirementBinding {
+        HostSelfRetirementBinding {
+            host_id,
+            account_id: AccountId::from_bytes([4; 16]).unwrap(),
+            host_authorization_id: HostAuthorizationId::from_bytes([5; 16]).unwrap(),
+            expected_host_access_epoch: DecimalU64(2),
+            host_key_fingerprint: [6; 32],
+            refresh_hash: [7; 32],
+        }
+    }
+
+    #[test]
+    fn pending_logout_queues_login_and_retires_only_after_explicit_new_trigger() {
+        let profile = private_test_profile("self-retirement");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let host = store.identity().host_id;
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let generation = store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap()
+            .generation;
+
+        let first_trigger = OperationId::from_bytes([8; 16]).unwrap();
+        assert_eq!(
+            store.begin_login(first_trigger).unwrap(),
+            LoginIntent {
+                operation_id: first_trigger,
+                generation,
+            }
+        );
+        let old_rotation = OperationId::from_bytes([9; 16]).unwrap();
+        let first = store
+            .prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                old_rotation,
+                100,
+            )
+            .unwrap();
+        assert_eq!(first.trigger_operation_id, Some(first_trigger));
+
+        let second_trigger = OperationId::from_bytes([10; 16]).unwrap();
+        store.begin_login(second_trigger).unwrap();
+        let retry = store
+            .prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([11; 16]).unwrap(),
+                200,
+            )
+            .unwrap();
+        assert_eq!(
+            retry, first,
+            "an unexpired purpose is exact across LoginStart"
+        );
+
+        let replacement_operation = OperationId::from_bytes([12; 16]).unwrap();
+        let replacement = store
+            .prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                replacement_operation,
+                400,
+            )
+            .unwrap();
+        assert_eq!(replacement.trigger_operation_id, Some(second_trigger));
+        assert_eq!(replacement.intent.operation_id, replacement_operation);
+        assert_eq!(first.intent.operation_id, old_rotation);
+        assert_ne!(replacement.intent, first.intent);
+
+        let third_trigger = OperationId::from_bytes([13; 16]).unwrap();
+        store.begin_login(third_trigger).unwrap();
+        let replacement_retry = store
+            .prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([14; 16]).unwrap(),
+                500,
+            )
+            .unwrap();
+        assert_eq!(replacement_retry, replacement);
+
+        assert_eq!(
+            store.prepare_host_self_retirement(
+                generation + 1,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([15; 16]).unwrap(),
+                501,
+            ),
+            Err(StoreError::Fenced)
+        );
+        let changed = auth_configuration("https://other.example.test");
+        assert_eq!(
+            store.prepare_host_self_retirement(
+                generation,
+                &changed,
+                test_binding(host),
+                OperationId::from_bytes([16; 16]).unwrap(),
+                501,
+            ),
+            Err(StoreError::Fenced)
+        );
+
+        let acknowledged = store.acknowledge_authorization_revoke(generation).unwrap();
+        assert!(!acknowledged.pending_cloud_revoke);
+        assert!(acknowledged.locked);
+        assert_eq!(
+            store.login_intent().unwrap(),
+            Some(LoginIntent {
+                operation_id: third_trigger,
+                generation,
+            })
+        );
+        assert_eq!(
+            store.host_self_retirement_journal(generation, &configuration),
+            Err(StoreError::Fenced),
+            "ACK and journal removal share one transaction"
+        );
+    }
+
+    #[test]
+    fn local_logout_ack_promotes_only_exact_pristine_deferred_login() {
+        let profile = private_test_profile("local-logout-ack-promotion");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let generation = store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap()
+            .generation;
+        let trigger = OperationId::from_bytes([28; 16]).unwrap();
+        store.begin_login(trigger).unwrap();
+
+        assert_eq!(store.cloud_authorization_may_exist().unwrap(), Some(false));
+        assert_eq!(
+            store.acknowledge_local_authorization_logout(generation + 1, Some(&configuration),),
+            Err(StoreError::Fenced),
+            "a stale generation cannot accept the local ACK"
+        );
+        let wrong_configuration = auth_configuration("https://other.example.test");
+        assert_eq!(
+            store.acknowledge_local_authorization_logout(generation, Some(&wrong_configuration),),
+            Err(StoreError::Fenced),
+            "an ACK is bound to the exact selected setup"
+        );
+
+        let acknowledged = store
+            .acknowledge_local_authorization_logout(generation, Some(&configuration))
+            .unwrap();
+        assert!(!acknowledged.pending_cloud_revoke);
+        assert!(acknowledged.locked);
+        assert_eq!(
+            store.login_intent().unwrap(),
+            Some(LoginIntent {
+                operation_id: trigger,
+                generation,
+            })
+        );
+        assert_eq!(store.deferred_login_intent().unwrap(), None);
+        store.mark_cloud_authorization_possible(generation).unwrap();
+        assert_eq!(
+            store.acknowledge_local_authorization_logout(generation, Some(&configuration)),
+            Err(StoreError::Fenced),
+            "duplicate ACK cannot overwrite later cloud history"
+        );
+        assert_eq!(store.cloud_authorization_may_exist().unwrap(), Some(true));
+        assert_eq!(
+            store.login_intent().unwrap(),
+            Some(LoginIntent {
+                operation_id: trigger,
+                generation,
+            })
+        );
+
+        let profile = private_test_profile("local-logout-ack-rejection");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        store.configure_auth(&configuration).unwrap();
+        store
+            .begin_login(OperationId::from_bytes([29; 16]).unwrap())
+            .unwrap();
+        let rejected = store.fence_rejected_credentials(0, &configuration).unwrap();
+        assert_eq!(
+            store
+                .acknowledge_local_authorization_logout(rejected.generation, Some(&configuration),),
+            Err(StoreError::Fenced),
+            "rejection metadata requires a cloud ACK"
+        );
+        assert!(store.authorization_state().unwrap().pending_cloud_revoke);
+
+        let profile = private_test_profile("local-logout-ack-journal");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let host = store.identity().host_id;
+        store.configure_auth(&configuration).unwrap();
+        let journal_generation = store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap()
+            .generation;
+        store
+            .begin_login(OperationId::from_bytes([30; 16]).unwrap())
+            .unwrap();
+        let journal = store
+            .prepare_host_self_retirement(
+                journal_generation,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([31; 16]).unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(
+            store.acknowledge_local_authorization_logout(journal_generation, Some(&configuration),),
+            Err(StoreError::Fenced),
+            "local logout ACK cannot adopt an unexpected retirement journal"
+        );
+        assert_eq!(
+            store
+                .host_self_retirement_journal(journal_generation, &configuration)
+                .unwrap(),
+            Some(journal)
+        );
+    }
+
+    #[test]
+    fn rejected_login_retry_replaces_only_the_pending_deferred_operation() {
+        let profile = private_test_profile("rejected-login");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let first = OperationId::from_bytes([17; 16]).unwrap();
+        store.begin_login(first).unwrap();
+        let fenced = store.fence_rejected_credentials(0, &configuration).unwrap();
+        let replacement = OperationId::from_bytes([18; 16]).unwrap();
+        assert_eq!(
+            store.begin_login(replacement).unwrap(),
+            LoginIntent {
+                operation_id: replacement,
+                generation: fenced.generation,
+            }
+        );
+        store
+            .acknowledge_authorization_revoke(fenced.generation)
+            .unwrap();
+        assert_eq!(
+            store.login_intent().unwrap(),
+            Some(LoginIntent {
+                operation_id: replacement,
+                generation: fenced.generation,
+            })
+        );
+    }
+
+    #[test]
+    fn expired_retirement_waits_for_a_different_accepted_login_trigger() {
+        let profile = private_test_profile("retirement-expiry");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let host = store.identity().host_id;
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let generation = store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap()
+            .generation;
+        store
+            .begin_login(OperationId::from_bytes([20; 16]).unwrap())
+            .unwrap();
+        let intent = store
+            .prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([21; 16]).unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(
+            store.prepare_host_self_retirement(
+                generation,
+                &configuration,
+                test_binding(host),
+                OperationId::from_bytes([22; 16]).unwrap(),
+                400,
+            ),
+            Err(StoreError::Fenced)
+        );
+        assert_eq!(
+            store
+                .host_self_retirement_journal(generation, &configuration)
+                .unwrap(),
+            Some(intent),
+            "expiry preserves the original purpose until a different LoginStart"
+        );
+    }
+
+    #[test]
+    fn queued_login_metadata_requires_pending_generation_and_selected_configuration() {
+        let profile = private_test_profile("deferred-validation");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let generation = store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap()
+            .generation;
+        let trigger = OperationId::from_bytes([19; 16]).unwrap();
+        store.begin_login(trigger).unwrap();
+        store
+            .db
+            .execute("DELETE FROM metadata WHERE key='auth_configuration'", [])
+            .unwrap();
+        assert_eq!(store.deferred_login_intent(), Err(StoreError::Fenced));
+        assert_eq!(
+            store.host_self_retirement_journal(generation, &configuration),
+            Err(StoreError::Fenced)
+        );
+
+        let profile = private_test_profile("nonpending-deferred");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        store.configure_auth(&configuration).unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                params![
+                    DEFERRED_LOGIN_KEY,
+                    json(&DeferredLoginRecord {
+                        version: 1,
+                        intent: LoginIntent {
+                            operation_id: trigger,
+                            generation: 0,
+                        },
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.deferred_login_intent(), Err(StoreError::Storage));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn identity_read_does_not_decode_auth_configuration() {
         let profile = private_test_profile("auth");
@@ -5901,6 +6496,7 @@ mod identity_inspection_tests {
         assert_eq!(observed, expected);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn identity_read_rejects_pending_wal_without_mutating_it() {
         let profile = private_test_profile("wal");
@@ -5926,6 +6522,7 @@ mod identity_inspection_tests {
         assert_eq!(after, before);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn legacy_repair_identity_read_requires_schema_14_and_never_migrates() {
         let profile = private_test_profile("legacy-v14");

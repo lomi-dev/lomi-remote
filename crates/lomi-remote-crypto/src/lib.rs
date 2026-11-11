@@ -13,8 +13,8 @@ mod channel;
 mod enrollment;
 mod enrollment_wire;
 pub use enrollment_wire::{
-    HostEnrollmentChallengeContext, prepare_host_enrollment_challenge,
-    verify_host_enrollment_proof, verify_host_key_initiation,
+    prepare_host_enrollment_challenge, verify_host_enrollment_proof, verify_host_key_initiation,
+    HostEnrollmentChallengeContext,
 };
 mod grant_v3;
 mod grant_v3_wire;
@@ -22,24 +22,26 @@ pub use grant_v3_wire::verify_grant_proposal_v3;
 mod host_key_enrollment;
 mod host_refresh;
 pub use host_refresh::{
-    HOST_REFRESH_PROOF_DOMAIN, HostRefreshContext, HostRefreshStatement,
-    prepare_host_refresh_statement, verify_host_refresh_proof,
+    host_refresh_credential_hash, host_self_retirement_audience, prepare_host_refresh_statement,
+    prepare_host_self_retirement_statement, verify_host_refresh_proof,
+    verify_host_self_retirement_proof, HostRefreshContext, HostRefreshStatement,
+    HOST_REFRESH_PROOF_DOMAIN,
 };
 mod identity;
 pub use grant_v3::{
-    CONTEXT_V3_DOMAIN, ChannelContextV3, ChannelPurposeV3, CurrentAuthorityV3, GRANT_V3_DOMAIN,
-    GrantPurposeV3, GrantV3, SignedChannelAdmissionV3, SignedGrantV3, TerminalTargetV3,
-    VerifiedChannelContextV3,
+    ChannelContextV3, ChannelPurposeV3, CurrentAuthorityV3, GrantPurposeV3, GrantV3,
+    SignedChannelAdmissionV3, SignedGrantV3, TerminalTargetV3, VerifiedChannelContextV3,
+    CONTEXT_V3_DOMAIN, GRANT_V3_DOMAIN,
 };
 pub use host_key_enrollment::{
-    AccountIndependentHostKey, HOST_KEY_COMMITMENT_DOMAIN, PendingHostIdentity,
-    SignedHostKeyCommitment,
+    AccountIndependentHostKey, PendingHostIdentity, SignedHostKeyCommitment,
+    HOST_KEY_COMMITMENT_DOMAIN,
 };
 mod mailbox;
 mod wire;
-pub use approval::{PeerApproval, Permissions, SignedPeerApproval, pairing_fingerprint};
+pub use approval::{pairing_fingerprint, PeerApproval, Permissions, SignedPeerApproval};
 pub use channel::{Channel, Handshake, TransportFrame};
-pub use enrollment::{ENROLLMENT_PROOF_DOMAIN, EnrollmentChallenge, SignedEnrollmentProof};
+pub use enrollment::{EnrollmentChallenge, SignedEnrollmentProof, ENROLLMENT_PROOF_DOMAIN};
 pub use identity::{Identity, PublicBundle, SignedBundle};
 pub const REMOTE_V2_PRODUCTION_QUALIFIED: bool = false;
 pub use mailbox::{Envelope, EnvelopeMetadata, MailboxPolicy};
@@ -59,11 +61,10 @@ fn random<const N: usize>() -> Result<[u8; N]> {
 pub const LIVE_PRODUCTION_QUALIFIED: bool = true;
 pub const MAILBOX_PRODUCTION_QUALIFIED: bool = false;
 
-
 mod public_identity_wire;
 pub use public_identity_wire::{verify_consumer_window_identity, verify_registered_host_identity};
 mod consumer_window;
 pub use consumer_window::{
-    CONSUMER_WINDOW_PROOF_DOMAIN, ConsumerWindowChallenge, ConsumerWindowChallengeContext,
-    ConsumerWindowProofBinding, prepare_consumer_window_challenge, verify_consumer_window_proof,
+    prepare_consumer_window_challenge, verify_consumer_window_proof, ConsumerWindowChallenge,
+    ConsumerWindowChallengeContext, ConsumerWindowProofBinding, CONSUMER_WINDOW_PROOF_DOMAIN,
 };

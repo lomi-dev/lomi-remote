@@ -10,8 +10,8 @@ use lomi_host_store::{
     Admission, AuthorizationFenceReason, ExternalPermit, Identity, LoginIntent, OperationBinding,
 };
 use lomi_host_store::{
-    AuthorizationState, HostStore, ProjectRecord, StoreError, ValidatedProjectRoot,
-    prepare_project_root,
+    AuthorizationState, HostSelfRetirementJournal, HostStore, ProjectRecord, StoreError,
+    ValidatedProjectRoot, prepare_project_root,
 };
 use lomi_remote_protocol::ipc::LocalAuthConfiguration;
 use lomi_remote_protocol::ipc::LocalStartMode;
@@ -20,9 +20,9 @@ use lomi_remote_protocol::ipc::{
     LocalWorkspacePublication, LocalWorkspaceRename,
 };
 use lomi_remote_protocol::{
-    Capability, CapabilitySet, ConsumerAuthorizationId, DecimalU64, Effect, OperationId,
-    OperationReceipt, OperationResult, OperationState, TerminalContext, WorkspaceContext,
-    WorkspaceId,
+    Capability, CapabilitySet, ConsumerAuthorizationId, DecimalU64, Effect,
+    HostSelfRetirementBinding, OperationId, OperationReceipt, OperationResult, OperationState,
+    TerminalContext, WorkspaceContext, WorkspaceId,
     rpc::{HostProfile, WorkspaceState},
 };
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -221,6 +221,23 @@ impl SharedOwner {
         self.read(operation, HostStore::authorization_state)
     }
 
+    #[cfg(test)]
+    pub(super) fn configure_auth_for_test(
+        &self,
+        configuration: &LocalAuthConfiguration,
+    ) -> Result<(), Error> {
+        self.try_store()?
+            .configure_auth(configuration)
+            .map_err(Error::Store)
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_store_for_test(&self, barrier: Arc<std::sync::Barrier>) {
+        let _store = self.store.lock().unwrap();
+        barrier.wait();
+        barrier.wait();
+    }
+
     /// Identity alone is sufficient for future external provider/keychain
     /// configuration checks. Perform filesystem/provider I/O after this returns.
     pub(super) fn identity(&self, operation: &Operation<'_>) -> Result<Identity, Error> {
@@ -312,6 +329,44 @@ impl SharedOwner {
                 cloud_may_exist: store.cloud_authorization_may_exist()?,
             })
         })
+    }
+
+    pub(super) fn host_self_retirement_journal(
+        &self,
+        operation: &Operation<'_>,
+        generation: u64,
+        configuration: &LocalAuthConfiguration,
+    ) -> Result<Option<HostSelfRetirementJournal>, Error> {
+        self.read(operation, |store| {
+            store.host_self_retirement_journal(generation, configuration)
+        })
+    }
+
+    pub(super) fn begin_host_self_retirement<'d, 'o>(
+        &'d self,
+        operation: &'o Operation<'o>,
+        generation: u64,
+        configuration: LocalAuthConfiguration,
+        binding: HostSelfRetirementBinding,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<HostSelfRetirementWrite<'d, 'o>, Error> {
+        self.begin_classified_store_turn(
+            operation,
+            WriterClass::Remote,
+            Intent::Mutation,
+            move |store| {
+                store.prepare_host_self_retirement(
+                    generation,
+                    &configuration,
+                    binding.clone(),
+                    operation_id,
+                    now,
+                )
+            },
+            expected_auth_generation,
+        )
+        .map(HostSelfRetirementWrite)
     }
 
     /// A fresh Domain gate as well as the current durable authorization view.
@@ -757,6 +812,7 @@ named_turn!(CloudRevokeAckWrite, AuthorizationState);
 named_turn!(LocalLogoutAckWrite, AuthorizationState);
 named_turn!(AuthorizationSealWrite, ());
 named_turn!(CleanShutdownWrite, ());
+named_turn!(HostSelfRetirementWrite, HostSelfRetirementJournal);
 named_turn!(AddProjectWrite, ProjectRecord);
 named_turn!(WorkspaceRenameWrite, ProjectRecord);
 named_turn!(ShellProfileWrite, ());
@@ -1298,12 +1354,18 @@ impl SharedOwner {
         &'d self,
         operation: &'o Operation<'o>,
         generation: u64,
+        expected_configuration: Option<LocalAuthConfiguration>,
     ) -> Result<LocalLogoutAckWrite<'d, 'o>, Error> {
         self.begin_classified_store_turn(
             operation,
             WriterClass::Remote,
             Intent::Mutation,
-            move |store| store.acknowledge_local_authorization_logout(generation),
+            move |store| {
+                store.acknowledge_local_authorization_logout(
+                    generation,
+                    expected_configuration.as_ref(),
+                )
+            },
             expected_auth_generation,
         )
         .map(LocalLogoutAckWrite)
@@ -2495,6 +2557,7 @@ pub(super) enum WorkerReadyError {
     Store(StoreError),
     Provider(lomi_host_auth::Error),
     Http(lomi_host_http::Error),
+    ExpiredBeforeAccept,
     Stale,
 }
 impl From<Error> for WorkerReadyError {
@@ -2556,7 +2619,12 @@ enum WorkerReadyResponse {
 }
 enum WorkerReadyHttp {
     Configured(lomi_host_http::Transport),
+    #[cfg(test)]
+    Fake(WorkerReadyFakeHttp),
 }
+#[cfg(test)]
+type WorkerReadyFakeHttp =
+    Box<dyn FnMut(&WorkerReadyRequest) -> Result<WorkerReadyResponse, lomi_host_http::Error>>;
 pub(super) struct ConfiguredWorkerAttempt<
     'w,
     'p,
@@ -2614,6 +2682,29 @@ impl<'w, 'p, 'i, S: lomi_platform::secrets::SecretStorage + ?Sized>
             base,
             anchor,
         })
+    }
+    #[cfg(test)]
+    fn for_test(
+        auth: &'w mut lomi_host_auth::HostAuth<'p, S>,
+        public_io: &'i super::public_configuration::WorkerPublicIo<'i>,
+        gate: &'i std::sync::atomic::AtomicBool,
+        paused: &'i std::sync::atomic::AtomicBool,
+        base: u64,
+        anchor: std::time::Instant,
+        http: WorkerReadyFakeHttp,
+    ) -> Self {
+        let setup = public_io.setup();
+        Self {
+            trusted: auth.trusted_configuration().clone(),
+            auth,
+            http: WorkerReadyHttp::Fake(http),
+            _public_io: public_io,
+            setup,
+            gate,
+            paused,
+            base,
+            anchor,
+        }
     }
     fn projected_time(&self) -> Result<u64, WorkerReadyError> {
         self.base
@@ -2749,7 +2840,7 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
             Ok(complete) => Ok(complete),
         }
     }
-    fn finish_terminal(&mut self, error: WorkerReadyError) -> Result<bool, WorkerReadyError> {
+    fn finish_terminal(&mut self, mut error: WorkerReadyError) -> Result<bool, WorkerReadyError> {
         let retryable = !self.provider_accept_started
             && matches!(
                 error,
@@ -2762,13 +2853,25 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
                             | lomi_host_http::Error::Timeout
                             | lomi_host_http::Error::Cancelled
                             | lomi_host_http::Error::ResolverUnavailable
+                            | lomi_host_http::Error::GatewayUnavailable
+                            | lomi_host_http::Error::Remote(
+                                lomi_host_http::HostFailure::ServiceUnavailable
+                            )
                     )
+                    | WorkerReadyError::Provider(lomi_host_auth::Error::Expired)
             );
-        if retryable
-            && let Some(writer) = self.writer.as_mut()
-            && let Err(domain::Error::Busy) = writer.try_abandon_worker_verification()
-        {
-            return Err(WorkerReadyError::Domain(domain::Error::Busy));
+        if retryable && let Some(writer) = self.writer.as_mut() {
+            match writer.try_abandon_worker_verification() {
+                Err(domain::Error::Busy) => {
+                    return Err(WorkerReadyError::Domain(domain::Error::Busy));
+                }
+                Ok(()) if error == WorkerReadyError::Provider(lomi_host_auth::Error::Expired) => {
+                    // Recovery requires completed cleanup, never a pending abort.
+                    error = WorkerReadyError::ExpiredBeforeAccept;
+                    self.terminal = Some(error);
+                }
+                _ => {}
+            }
         }
         // No reset of failed_remote: unrelated uncertainty is never recoverable.
         // Any unaccepted provider/Store error or accepted response retains the
@@ -2940,6 +3043,8 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
                 configured_worker_ready_send(transport, request, self.operation)
                     .map_err(WorkerReadyError::Http)
             }
+            #[cfg(test)]
+            WorkerReadyHttp::Fake(send) => send(request).map_err(WorkerReadyError::Http),
         }?;
         // Never resend after this point, even if the next mutex acquisition Busy.
         self.response = Some(response);
@@ -11681,5 +11786,755 @@ mod cloud_publication_fence_tests {
             observe(&owner, 0, Some(&wrong_scope)),
             CloudPublicationFenceObservation::CloseIngress
         ));
+    }
+}
+
+#[cfg(test)]
+mod worker_ready_retry_tests {
+    use super::*;
+    use lomi_host_auth::{Config, HostAuth};
+    use lomi_host_store::{HostStore, Limits, PublicDocument};
+    use lomi_platform::secrets::{
+        ProviderKind, ProviderStatus, SecretBundle, SecretStorage, StorageState,
+    };
+    use lomi_remote_crypto::{
+        HostEnrollmentChallengeContext, prepare_host_enrollment_challenge,
+        verify_host_key_initiation,
+    };
+    use lomi_remote_protocol::{
+        DecimalU64, EnrollmentId, EnrollmentInitiateResult, HostAuthorizationId,
+        HostAuthorizationResult, HostEnrollmentTokenContext, HostId, HostRegisterResult,
+        LocalIpcVersion,
+        ipc::{LocalAuthConfiguration, LocalAuthProvider, LocalFileAcknowledgement},
+    };
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex, atomic::AtomicBool},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    struct MemoryStorage(Arc<Mutex<Option<Vec<u8>>>>);
+    impl SecretStorage for MemoryStorage {
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus {
+                kind: Some(ProviderKind::ProtectedFile),
+                state: StorageState::Available,
+            }
+        }
+        fn load(&self) -> Result<Option<SecretBundle>, lomi_platform::secrets::Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .map(SecretBundle::new)
+                .transpose()
+        }
+        fn replace(&mut self, bundle: &SecretBundle) -> Result<(), lomi_platform::secrets::Error> {
+            *self.0.lock().unwrap() = Some(bundle.expose().to_vec());
+            Ok(())
+        }
+    }
+
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            #[cfg(target_os = "macos")]
+            let temp_root = PathBuf::from("/private/tmp");
+            #[cfg(not(target_os = "macos"))]
+            let temp_root = std::env::temp_dir().canonicalize().unwrap();
+            let path = temp_root.join(format!(
+                "lomi-worker-ready-retry-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(path)
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn wall_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn ready_auth<'a>(
+        storage: &'a mut MemoryStorage,
+        config: Config,
+        host_id: HostId,
+        now: u64,
+    ) -> HostAuth<'a, dyn SecretStorage + 'a> {
+        let mut auth =
+            HostAuth::open(storage as &mut dyn SecretStorage, config.clone(), now).unwrap();
+        auth.initialize().unwrap();
+        let initiation = auth.init_request().unwrap();
+        let committed = verify_host_key_initiation(&initiation).unwrap();
+        let pin = committed.descriptor.commitment().unwrap();
+        auth.accept_initiation(
+            EnrollmentInitiateResult {
+                enrollment_id: EnrollmentId::from_bytes([3; 16]).unwrap(),
+                device_code: "synthetic_device".to_owned().try_into().unwrap(),
+                user_code: "SYNTHETIC-CODE".to_owned().try_into().unwrap(),
+                expires_in_seconds: DecimalU64(600),
+                poll_interval_seconds: DecimalU64(5),
+            },
+            now,
+        )
+        .unwrap();
+        let challenge = prepare_host_enrollment_challenge(
+            &committed,
+            &pin,
+            [4; 16],
+            &HostEnrollmentChallengeContext {
+                enrollment_id: [3; 16],
+                bootstrap_session_id: [5; 16],
+                operation_id: [6; 16],
+                nonce: [7; 32],
+                audience: config.exchange_audience(),
+                expires_at: DecimalU64(now + 500),
+            },
+        )
+        .unwrap();
+        let challenge = challenge
+            .canonical()
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        auth.accept_tls_approval(
+            config.origin(),
+            HostEnrollmentTokenContext {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                challenge: challenge.try_into().unwrap(),
+            },
+            "synthetic_bootstrap".to_owned().try_into().unwrap(),
+            now,
+        )
+        .unwrap();
+        auth.prepare_exchange(now).unwrap();
+        let exchange = auth.exchange_request(now).unwrap();
+        auth.accept_exchange(
+            HostAuthorizationResult {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                host_id,
+                host_authorization_id: HostAuthorizationId::from_bytes([8; 16]).unwrap(),
+                access: "synthetic_access".to_owned().try_into().unwrap(),
+                refresh: "synthetic_refresh".to_owned().try_into().unwrap(),
+                rotation_id: exchange.operation_id,
+                expires_in_seconds: DecimalU64(300),
+            },
+            now,
+        )
+        .unwrap();
+        auth.confirm_registration(HostRegisterResult {
+            host_id,
+            host_access_epoch: DecimalU64(12),
+        })
+        .unwrap();
+        auth
+    }
+
+    fn drive<S: SecretStorage + ?Sized>(
+        turn: &mut SoleWorkerReadyTurn<'_, '_, '_, '_, '_, '_, S>,
+    ) -> Result<(), WorkerReadyError> {
+        for _ in 0..8 {
+            if turn.try_step()? {
+                return Ok(());
+            }
+        }
+        panic!("worker-ready turn exceeded its named stages");
+    }
+
+    #[test]
+    fn gateway_failure_aborts_writer_and_fresh_owner_attempt_reuses_exact_rotation() {
+        let directory = TestDirectory::new();
+        let now = wall_now();
+        let mut store =
+            HostStore::open(&directory.0.join("host.sqlite3"), Limits::default()).unwrap();
+        let identity = store.identity().clone();
+        let config = Config::new(
+            identity.host_id,
+            identity.profile_id,
+            "https://identity.example".into(),
+            "host".to_owned().try_into().unwrap(),
+        )
+        .unwrap();
+        let local = LocalAuthConfiguration {
+            version: 1,
+            origin: "https://identity.example".to_owned().try_into().unwrap(),
+            remote_api_origin: Some("https://remote.example".to_owned().try_into().unwrap()),
+            relay_endpoint: None,
+            client_id: "host".to_owned().try_into().unwrap(),
+            provider: LocalAuthProvider::ProtectedFile,
+            keychain_path: None,
+            protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
+        };
+        store.configure_auth(&local).unwrap();
+        let public = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+            version: 1,
+            revision: 1,
+            authentication: Some(local.clone()),
+        })
+        .unwrap();
+        let public_intent = store.public_prepare(None, &public).unwrap();
+        store
+            .public_finish(public_intent.operation_id, &public)
+            .unwrap();
+        let owner = SharedOwner::new(store).unwrap();
+        let mut storage = MemoryStorage(Arc::new(Mutex::new(None)));
+        let observed_storage = storage.0.clone();
+        let mut auth = ready_auth(&mut storage, config, identity.host_id, now);
+
+        let cancelled = AtomicBool::new(false);
+        let seed_operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        owner.seed_test_ready(&seed_operation, &auth).unwrap();
+
+        let profile = directory.0.join("profile");
+        fs::create_dir(&profile).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let discovery = super::super::platform::LocalDiscovery {
+            version: LocalIpcVersion::CURRENT,
+            profile_id: identity.profile_id,
+            host_id: identity.host_id,
+            runtime_id: owner.try_store().unwrap().runtime_id(),
+            build_id: "worker-ready-tests".to_owned(),
+        };
+        let endpoint = Arc::new(
+            super::super::platform::OwnerEndpoint::bind(
+                super::super::platform::OwnerLock::acquire(&profile).unwrap(),
+                discovery.clone(),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "endpoint setup failed: {error:?}, profile={}, socket_bytes={}",
+                    profile.display(),
+                    profile
+                        .join("host.sock")
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .len()
+                )
+            }),
+        );
+        let setup = super::super::public_configuration::PublicSetup::new(endpoint);
+        let paused = AtomicBool::new(false);
+        let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+        let gate = AtomicBool::new(false);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_requests = requests.clone();
+        let first_attempts = attempts.clone();
+        let first_http: WorkerReadyFakeHttp = Box::new(move |request| {
+            let WorkerReadyRequest::Rotate(request) = request else {
+                panic!("ready authorization must rotate");
+            };
+            first_requests.lock().unwrap().push(request.clone());
+            match first_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => return Err(lomi_host_http::Error::GatewayUnavailable),
+                1 => {
+                    return Err(lomi_host_http::Error::Remote(
+                        lomi_host_http::HostFailure::ServiceUnavailable,
+                    ));
+                }
+                _ => {}
+            }
+            Ok(WorkerReadyResponse::Rotate(HostAuthorizationResult {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                host_id: identity.host_id,
+                host_authorization_id: request.host_authorization_id,
+                access: "rotated_access".to_owned().try_into().unwrap(),
+                refresh: "rotated_refresh".to_owned().try_into().unwrap(),
+                rotation_id: request.rotation_id,
+                expires_in_seconds: DecimalU64(300),
+            }))
+        });
+
+        let first_operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        let mut first_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now,
+            Instant::now(),
+            first_http,
+        );
+        let mut first_turn = first_attempt.begin_ready(&owner, &first_operation).unwrap();
+        assert_eq!(first_turn.try_step(), Ok(false));
+        let original_request = first_turn.attempt.auth.rotation_request(now).unwrap();
+        let original_deadlines = first_turn.attempt.auth.credential_deadlines().unwrap();
+        assert_eq!(
+            first_turn.try_step(),
+            Err(WorkerReadyError::Http(
+                lomi_host_http::Error::GatewayUnavailable
+            ))
+        );
+        drop(first_turn);
+        drop(first_attempt);
+
+        assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+        assert_eq!(auth.rotation_request(now).unwrap(), original_request);
+        assert_eq!(auth.credential_deadlines().unwrap(), original_deadlines);
+        {
+            let store = owner.try_store().unwrap();
+            assert_eq!(store.verified_authorization_generation().unwrap(), Some(0));
+            assert_eq!(store.authorization_state().unwrap().generation, 0);
+            assert_eq!(store.login_intent().unwrap(), None);
+            assert!(store.public_configuration_ready().unwrap());
+        }
+
+        let second_cancelled = AtomicBool::new(false);
+        let second_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &second_cancelled);
+        let second_requests = requests.clone();
+        let second_attempts = attempts.clone();
+        let second_http: WorkerReadyFakeHttp = Box::new(move |request| {
+            let WorkerReadyRequest::Rotate(request) = request else {
+                panic!("ready authorization must retry the same rotation");
+            };
+            second_requests.lock().unwrap().push(request.clone());
+            assert_eq!(
+                second_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            Err(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::ServiceUnavailable,
+            ))
+        });
+        let mut second_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now,
+            Instant::now(),
+            second_http,
+        );
+        let mut second_turn = second_attempt
+            .begin_ready(&owner, &second_operation)
+            .unwrap();
+        assert_eq!(second_turn.try_step(), Ok(false));
+        assert_eq!(
+            second_turn.try_step(),
+            Err(WorkerReadyError::Http(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::ServiceUnavailable,
+            )))
+        );
+        drop(second_turn);
+        drop(second_attempt);
+        assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+        assert_eq!(auth.rotation_request(now).unwrap(), original_request);
+        assert_eq!(auth.credential_deadlines().unwrap(), original_deadlines);
+        {
+            let store = owner.try_store().unwrap();
+            assert_eq!(store.verified_authorization_generation().unwrap(), Some(0));
+            assert_eq!(store.authorization_state().unwrap().generation, 0);
+            assert_eq!(store.login_intent().unwrap(), None);
+            assert!(store.public_configuration_ready().unwrap());
+        }
+
+        let third_cancelled = AtomicBool::new(false);
+        let third_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &third_cancelled);
+        let third_requests = requests.clone();
+        let third_attempts = attempts.clone();
+        let third_http: WorkerReadyFakeHttp = Box::new(move |request| {
+            let WorkerReadyRequest::Rotate(request) = request else {
+                panic!("ready authorization must retry the same rotation");
+            };
+            third_requests.lock().unwrap().push(request.clone());
+            assert_eq!(
+                third_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                2
+            );
+            Ok(WorkerReadyResponse::Rotate(HostAuthorizationResult {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                host_id: identity.host_id,
+                host_authorization_id: request.host_authorization_id,
+                access: "rotated_access".to_owned().try_into().unwrap(),
+                refresh: "rotated_refresh".to_owned().try_into().unwrap(),
+                rotation_id: request.rotation_id,
+                expires_in_seconds: DecimalU64(300),
+            }))
+        });
+        let mut third_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now,
+            Instant::now(),
+            third_http,
+        );
+        let mut third_turn = third_attempt.begin_ready(&owner, &third_operation).unwrap();
+        drive(&mut third_turn).unwrap();
+        drop(third_turn);
+        drop(third_attempt);
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0], original_request);
+        assert_eq!(sent[1], original_request);
+        assert_eq!(sent[2], original_request);
+        assert_eq!(auth.status(), lomi_host_auth::Status::Ready);
+        assert!(!gate.load(std::sync::atomic::Ordering::Acquire));
+        let store = owner.try_store().unwrap();
+        assert_eq!(store.verified_authorization_generation().unwrap(), Some(0));
+        assert_eq!(store.authorization_state().unwrap().generation, 0);
+        assert_eq!(store.login_intent().unwrap(), None);
+        assert!(store.public_configuration_ready().unwrap());
+        drop(store);
+        drop(sent);
+
+        // An expired, already durable rotation must stop before HTTP. Its
+        // writer is safely abandoned, so explicit LoginStart can use the same
+        // Domain immediately while the original rotation remains unchanged.
+        auth.prepare_rotation(now).unwrap();
+        let expired_request = auth.rotation_request(now).unwrap();
+        let expired_deadlines = auth.credential_deadlines().unwrap();
+        let provider_bundle_before_expiry = observed_storage.lock().unwrap().clone();
+        let trusted = auth.trusted_configuration().clone();
+        let expired_cancelled = AtomicBool::new(false);
+        let expired_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &expired_cancelled);
+        let expired_http: WorkerReadyFakeHttp =
+            Box::new(|_| panic!("an expired rotation must not reach HTTP"));
+        let mut expired_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now + 300,
+            Instant::now(),
+            expired_http,
+        );
+        let mut expired_turn = expired_attempt
+            .begin_ready(&owner, &expired_operation)
+            .unwrap();
+        assert_eq!(
+            expired_turn.try_step(),
+            Err(WorkerReadyError::ExpiredBeforeAccept)
+        );
+        drop(expired_turn);
+        drop(expired_attempt);
+        assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+        assert_eq!(auth.credential_deadlines().unwrap(), expired_deadlines);
+        {
+            let store = owner.try_store().unwrap();
+            assert_eq!(store.verified_authorization_generation().unwrap(), Some(0));
+            assert_eq!(store.login_intent().unwrap(), None);
+            assert!(store.public_configuration_ready().unwrap());
+        }
+        drop(auth);
+        assert_eq!(
+            *observed_storage.lock().unwrap(),
+            provider_bundle_before_expiry
+        );
+        let mut auth =
+            HostAuth::open(&mut storage as &mut dyn SecretStorage, trusted.clone(), now).unwrap();
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+        assert_eq!(auth.rotation_request(now).unwrap(), expired_request);
+        assert_eq!(auth.credential_deadlines().unwrap(), expired_deadlines);
+
+        let retry_expired_cancelled = AtomicBool::new(false);
+        let retry_expired_operation = Operation::new(
+            Instant::now() + Duration::from_secs(30),
+            &retry_expired_cancelled,
+        );
+        let retry_expired_http: WorkerReadyFakeHttp =
+            Box::new(|_| panic!("a cleanly expired retry must not reach HTTP"));
+        let mut retry_expired_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now + 300,
+            Instant::now(),
+            retry_expired_http,
+        );
+        let mut retry_expired_turn = retry_expired_attempt
+            .begin_ready(&owner, &retry_expired_operation)
+            .unwrap();
+        assert_eq!(
+            retry_expired_turn.try_step(),
+            Err(WorkerReadyError::ExpiredBeforeAccept)
+        );
+        drop(retry_expired_turn);
+        drop(retry_expired_attempt);
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+        assert_eq!(auth.credential_deadlines().unwrap(), expired_deadlines);
+        assert_eq!(
+            *observed_storage.lock().unwrap(),
+            provider_bundle_before_expiry
+        );
+        drop(auth);
+        let mut auth =
+            HostAuth::open(&mut storage as &mut dyn SecretStorage, trusted, now).unwrap();
+        assert_eq!(auth.rotation_request(now).unwrap(), expired_request);
+        let login_cancelled = AtomicBool::new(false);
+        let login_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &login_cancelled);
+        let mut login = owner
+            .begin_login(
+                &login_operation,
+                OperationId::from_bytes([31; 16]).unwrap(),
+                local.clone(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(login.try_commit().unwrap().generation, 0);
+        assert_eq!(
+            owner
+                .try_store()
+                .unwrap()
+                .login_intent()
+                .unwrap()
+                .unwrap()
+                .generation,
+            0
+        );
+
+        // A real authorization rejection is not a safe preaccept abort. It
+        // keeps the worker fenced and prevents the next owner operation from
+        // reaching HTTP.
+        let auth_cancelled = AtomicBool::new(false);
+        let auth_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &auth_cancelled);
+        let auth_requests = requests.clone();
+        let auth_attempts = attempts.clone();
+        let auth_http: WorkerReadyFakeHttp = Box::new(move |request| {
+            let WorkerReadyRequest::Rotate(request) = request else {
+                panic!("ready authorization must rotate");
+            };
+            auth_requests.lock().unwrap().push(request.clone());
+            assert_eq!(
+                auth_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                3
+            );
+            Err(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::AuthRequired,
+            ))
+        });
+        let mut auth_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now,
+            Instant::now(),
+            auth_http,
+        );
+        let mut auth_turn = auth_attempt.begin_ready(&owner, &auth_operation).unwrap();
+        assert_eq!(auth_turn.try_step(), Ok(false));
+        assert_eq!(
+            auth_turn.try_step(),
+            Err(WorkerReadyError::Http(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::AuthRequired,
+            )))
+        );
+        drop(auth_turn);
+        drop(auth_attempt);
+        assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(auth.status(), lomi_host_auth::Status::Rotating);
+
+        let blocked_cancelled = AtomicBool::new(false);
+        let blocked_operation =
+            Operation::new(Instant::now() + Duration::from_secs(30), &blocked_cancelled);
+        let blocked_http: WorkerReadyFakeHttp =
+            Box::new(|_| panic!("a failed remote owner must not reach HTTP again"));
+        let mut blocked_attempt = ConfiguredWorkerAttempt::for_test(
+            &mut auth,
+            &public_io,
+            &gate,
+            &paused,
+            now,
+            Instant::now(),
+            blocked_http,
+        );
+        let mut blocked_turn = blocked_attempt
+            .begin_ready(&owner, &blocked_operation)
+            .unwrap();
+        assert_eq!(
+            blocked_turn.try_step(),
+            Err(WorkerReadyError::Domain(domain::Error::Stale))
+        );
+        drop(blocked_turn);
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn postaccept_expiry_retains_remote_fence() {
+        for preaccept_busy in [false, true] {
+            let directory = TestDirectory::new();
+            let now = wall_now();
+            let mut store =
+                HostStore::open(&directory.0.join("host.sqlite3"), Limits::default()).unwrap();
+            let identity = store.identity().clone();
+            let config = Config::new(
+                identity.host_id,
+                identity.profile_id,
+                "https://identity.example".into(),
+                "host".to_owned().try_into().unwrap(),
+            )
+            .unwrap();
+            let local = LocalAuthConfiguration {
+                version: 1,
+                origin: "https://identity.example".to_owned().try_into().unwrap(),
+                remote_api_origin: Some("https://remote.example".to_owned().try_into().unwrap()),
+                relay_endpoint: None,
+                client_id: "host".to_owned().try_into().unwrap(),
+                provider: LocalAuthProvider::ProtectedFile,
+                keychain_path: None,
+                protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
+            };
+            store.configure_auth(&local).unwrap();
+            let public = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+                version: 1,
+                revision: 1,
+                authentication: Some(local),
+            })
+            .unwrap();
+            let public_intent = store.public_prepare(None, &public).unwrap();
+            store
+                .public_finish(public_intent.operation_id, &public)
+                .unwrap();
+            let owner = SharedOwner::new(store).unwrap();
+            let mut storage = MemoryStorage(Arc::new(Mutex::new(None)));
+            let mut auth = ready_auth(&mut storage, config, identity.host_id, now);
+            let cancelled = AtomicBool::new(false);
+            let seed_operation =
+                Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+            owner.seed_test_ready(&seed_operation, &auth).unwrap();
+
+            let profile = directory.0.join("profile");
+            fs::create_dir(&profile).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let endpoint = Arc::new(
+                super::super::platform::OwnerEndpoint::bind(
+                    super::super::platform::OwnerLock::acquire(&profile).unwrap(),
+                    super::super::platform::LocalDiscovery {
+                        version: LocalIpcVersion::CURRENT,
+                        profile_id: identity.profile_id,
+                        host_id: identity.host_id,
+                        runtime_id: owner.try_store().unwrap().runtime_id(),
+                        build_id: "worker-ready-tests".to_owned(),
+                    },
+                )
+                .unwrap(),
+            );
+            let setup = super::super::public_configuration::PublicSetup::new(endpoint);
+            let paused = AtomicBool::new(false);
+            let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+            let gate = AtomicBool::new(false);
+            let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let accepted_http = accepted.clone();
+            let http: WorkerReadyFakeHttp = Box::new(move |request| {
+                let WorkerReadyRequest::Rotate(request) = request else {
+                    panic!("ready authorization must rotate");
+                };
+                accepted_http.store(true, std::sync::atomic::Ordering::Release);
+                Ok(WorkerReadyResponse::Rotate(HostAuthorizationResult {
+                    account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                    host_id: identity.host_id,
+                    host_authorization_id: request.host_authorization_id,
+                    access: "rotated_access".to_owned().try_into().unwrap(),
+                    refresh: "rotated_refresh".to_owned().try_into().unwrap(),
+                    rotation_id: request.rotation_id,
+                    expires_in_seconds: DecimalU64(300),
+                }))
+            });
+            let operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+            let mut attempt = ConfiguredWorkerAttempt::for_test(
+                &mut auth,
+                &public_io,
+                &gate,
+                &paused,
+                now,
+                Instant::now(),
+                http,
+            );
+            let mut turn = attempt.begin_ready(&owner, &operation).unwrap();
+            if preaccept_busy {
+                let read_cancelled = AtomicBool::new(false);
+                let read_operation =
+                    Operation::new(Instant::now() + Duration::from_secs(30), &read_cancelled);
+                let read_guard = owner.domain.try_read(&read_operation).unwrap();
+                turn.terminal = Some(WorkerReadyError::Provider(lomi_host_auth::Error::Expired));
+                assert_eq!(
+                    turn.try_step(),
+                    Err(WorkerReadyError::Domain(domain::Error::Busy))
+                );
+                assert_eq!(
+                    turn.pending_abort_error(),
+                    Some(WorkerReadyError::Provider(lomi_host_auth::Error::Expired))
+                );
+                drop(read_guard);
+            } else {
+                assert_eq!(turn.try_step(), Ok(false)); // prepare rotation
+                assert_eq!(turn.try_step(), Ok(false)); // send accepted response
+                assert!(accepted.load(std::sync::atomic::Ordering::Acquire));
+                assert_eq!(turn.try_step(), Ok(false)); // durable clock checkpoint
+                assert_eq!(turn.try_step(), Ok(false)); // provider accepts rotation
+                assert!(turn.provider_accept_started);
+                assert_eq!(turn.attempt.auth.status(), lomi_host_auth::Status::Ready);
+
+                // Advance only the test clock between provider acceptance and Store
+                // publication. This makes the original 300s expiry boundary exact.
+                turn.attempt.base = now + 300;
+                assert_eq!(
+                    turn.try_step(),
+                    Err(WorkerReadyError::Provider(lomi_host_auth::Error::Expired))
+                );
+            }
+            drop(turn);
+            drop(attempt);
+            assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+
+            let retry_cancelled = AtomicBool::new(false);
+            let retry_operation =
+                Operation::new(Instant::now() + Duration::from_secs(30), &retry_cancelled);
+            let no_http: WorkerReadyFakeHttp =
+                Box::new(|_| panic!("postaccept expiry must retain the remote fence"));
+            let mut retry = ConfiguredWorkerAttempt::for_test(
+                &mut auth,
+                &public_io,
+                &gate,
+                &paused,
+                now + 300,
+                Instant::now(),
+                no_http,
+            );
+            let mut retry_turn = retry.begin_ready(&owner, &retry_operation).unwrap();
+            assert_eq!(
+                retry_turn.try_step(),
+                Err(WorkerReadyError::Domain(domain::Error::Stale))
+            );
+            assert!(gate.load(std::sync::atomic::Ordering::Acquire));
+        }
     }
 }

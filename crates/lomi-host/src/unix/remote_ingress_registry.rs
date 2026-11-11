@@ -17,7 +17,7 @@ use std::{
 // channel. Allow eight views plus one overlapping reconnect pair, while
 // remaining below the protocol and Store admission limits.
 const MAX_CHANNELS: usize = 32;
-const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(500);
+pub(super) const STAGED_MESSAGE_BATCH_QUANTUM: Duration = Duration::from_millis(500);
 
 fn terminal_emission_headroom() -> Duration {
     Duration::from_millis(ASSEMBLY_TIMEOUT_MS).saturating_add(super::PEER_REFRESH_MARGIN)
@@ -43,9 +43,17 @@ fn staged_batch_initial_allowed(
         && output_eligibility_live
 }
 
-fn staged_batch_made_progress(advanced: bool, before: Option<usize>, after: Option<usize>) -> bool {
+fn staged_batch_made_progress(
+    advanced: bool,
+    before: Option<usize>,
+    after: Option<usize>,
+    terminal_burst_continues: bool,
+) -> bool {
     advanced
-        && matches!((before, after), (Some(before), Some(after)) if before > 0 && after > 0 && after < before)
+        && matches!((before, after), (Some(before), Some(after))
+            if before > 0
+                && after > 0
+                && (after < before || (before == 1 && terminal_burst_continues)))
 }
 
 fn staged_batch_can_continue(
@@ -533,6 +541,9 @@ impl<'cancel> Registry<'cancel> {
                 first_advanced,
                 staged_remaining_before,
                 staged_remaining_after,
+                self.entries
+                    .get(&channel_id)
+                    .is_some_and(Driver::has_staged_terminal_burst),
             );
 
         while progressed {
@@ -559,7 +570,8 @@ impl<'cancel> Registry<'cancel> {
 
             // The negative-only cloud observation can take time. Recheck the
             // quantum and all live scheduler gates before one more same-message
-            // fragment; a changed gate merely ends batching.
+            // fragment (or an explicitly eligible next terminal message);
+            // a changed gate merely ends batching.
             if !self.staged_batch_ready(
                 channel_id,
                 runtime,
@@ -582,8 +594,14 @@ impl<'cancel> Registry<'cancel> {
                 .get(&channel_id)
                 .and_then(Driver::staged_message_remaining);
             iterations += 1;
-            progressed =
-                staged_batch_made_progress(advanced, Some(before_remaining), after_remaining);
+            progressed = staged_batch_made_progress(
+                advanced,
+                Some(before_remaining),
+                after_remaining,
+                self.entries
+                    .get(&channel_id)
+                    .is_some_and(Driver::has_staged_terminal_burst),
+            );
             staged_remaining_after = after_remaining;
         }
 
@@ -798,12 +816,15 @@ mod tests {
     }
 
     #[test]
-    fn staged_batch_requires_strict_same_message_progress_and_all_live_gates() {
-        assert!(staged_batch_made_progress(true, Some(5), Some(4)));
-        assert!(!staged_batch_made_progress(false, Some(5), Some(4)));
-        assert!(!staged_batch_made_progress(true, Some(5), Some(5)));
-        assert!(!staged_batch_made_progress(true, Some(5), None));
-        assert!(!staged_batch_made_progress(true, Some(1), Some(0)));
+    fn staged_batch_requires_fragment_progress_or_explicit_terminal_burst() {
+        assert!(staged_batch_made_progress(true, Some(5), Some(4), false));
+        assert!(!staged_batch_made_progress(false, Some(5), Some(4), false));
+        assert!(!staged_batch_made_progress(true, Some(5), Some(5), false));
+        assert!(!staged_batch_made_progress(true, Some(5), None, true));
+        assert!(!staged_batch_made_progress(true, Some(1), Some(0), true));
+        assert!(staged_batch_made_progress(true, Some(1), Some(4), true));
+        assert!(!staged_batch_made_progress(true, Some(1), Some(4), false));
+        assert!(!staged_batch_made_progress(true, Some(2), Some(4), true));
 
         let can_continue = |elapsed, iterations, staged, due, writer, live| {
             staged_batch_can_continue(
@@ -868,11 +889,11 @@ mod tests {
     }
 
     #[test]
-    fn staged_batch_finishes_only_the_current_fragment_sequence_within_bounds() {
+    fn staged_batch_finishes_current_sequence_within_fragment_bound() {
         let mut remaining = Some(33);
         let mut iterations = 1;
         let mut fragment_calls = 1;
-        let mut progressed = staged_batch_made_progress(true, Some(34), remaining);
+        let mut progressed = staged_batch_made_progress(true, Some(34), remaining, false);
         while staged_batch_can_continue(
             progressed,
             remaining,
@@ -889,12 +910,12 @@ mod tests {
                 .filter(|count| *count > 0);
             fragment_calls += 1;
             iterations += 1;
-            progressed = staged_batch_made_progress(true, before, remaining);
+            progressed = staged_batch_made_progress(true, before, remaining, false);
         }
         assert_eq!(fragment_calls, 34);
         assert_eq!(
             remaining, None,
-            "completion ends the batch before a next message"
+            "completion ends the batch unless a terminal burst explicitly replenishes it"
         );
         assert!(iterations <= MAX_FRAGMENTS_PER_MESSAGE);
     }

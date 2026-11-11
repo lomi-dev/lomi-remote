@@ -437,18 +437,1111 @@ impl Handle {
 
 #[cfg(test)]
 mod tests {
+    use super::super::shared_owner::SharedOwner;
     use super::{
-        DomainError, IdleScheduler, OwnerError, OwnerOperation, StepError, WorkClass,
+        AuthTransport, DomainError, IdleScheduler, LocalAuthNetwork, LocalAuthPhase,
+        LocalAuthStorage, OwnerError, OwnerOperation, RuntimeWithOperation, StepError, WorkClass,
         await_explicit_retry, cloud, cloud_step_requests_immediate_pass,
         read_owner_status_with_busy_retry, read_owner_status_with_busy_retry_and_wait,
-        remote_ingress,
+        remote_ingress, revoke_step, suspend_expired,
+    };
+    use lomi_host_auth::{Config, HostAuth, Status};
+    use lomi_host_store::{HostStore, Limits};
+    use lomi_platform::secrets::{
+        ProviderKind, ProviderStatus, SecretBundle, SecretStorage, StorageState,
+    };
+    use lomi_remote_crypto::{
+        HostEnrollmentChallengeContext, prepare_host_enrollment_challenge,
+        verify_host_key_initiation,
+    };
+    use lomi_remote_protocol::{
+        DecimalU64, EnrollmentId, EnrollmentInitiateResult, HostAuthorizationId,
+        HostAuthorizationResult, HostEnrollmentTokenContext, HostId, HostRegisterResult,
+        LocalIpcVersion, OperationId,
+        ipc::{
+            LocalAuthConfiguration, LocalAuthProvider, LocalFileAcknowledgement,
+            LocalLoginPresentation,
+        },
     };
     use std::{
-        sync::atomic::{AtomicBool, Ordering},
-        sync::{Arc, mpsc},
+        collections::VecDeque,
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
+        sync::{Arc, Mutex, mpsc},
         thread,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
+    use uuid::Uuid;
+
+    struct RetirementMemoryStorage(
+        Arc<Mutex<Option<Vec<u8>>>>,
+        Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    );
+    impl SecretStorage for RetirementMemoryStorage {
+        fn status(&self) -> ProviderStatus {
+            ProviderStatus {
+                kind: Some(ProviderKind::ProtectedFile),
+                state: StorageState::Available,
+            }
+        }
+        fn load(&self) -> Result<Option<SecretBundle>, lomi_platform::secrets::Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .map(SecretBundle::new)
+                .transpose()
+        }
+        fn replace(&mut self, bundle: &SecretBundle) -> Result<(), lomi_platform::secrets::Error> {
+            *self.0.lock().unwrap() = Some(bundle.expose().to_vec());
+            if let Some(cancelled) = self.1.lock().unwrap().as_ref() {
+                cancelled.store(true, Ordering::Release);
+            }
+            Ok(())
+        }
+    }
+
+    struct RetirementTestDirectory(PathBuf);
+    impl RetirementTestDirectory {
+        fn new() -> Self {
+            #[cfg(target_os = "macos")]
+            let temp_root = PathBuf::from("/private/tmp");
+            #[cfg(not(target_os = "macos"))]
+            let temp_root = std::env::temp_dir().canonicalize().unwrap();
+            let path = temp_root.join(format!(
+                "lomi-self-retirement-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(path)
+        }
+    }
+    impl Drop for RetirementTestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn retirement_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn retirement_configuration() -> LocalAuthConfiguration {
+        LocalAuthConfiguration {
+            version: 1,
+            origin: "https://identity.example".to_owned().try_into().unwrap(),
+            remote_api_origin: None,
+            relay_endpoint: None,
+            client_id: "host".to_owned().try_into().unwrap(),
+            provider: LocalAuthProvider::ProtectedFile,
+            keychain_path: None,
+            protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
+        }
+    }
+
+    fn retirement_ready_auth<'a>(
+        storage: &'a mut RetirementMemoryStorage,
+        config: Config,
+        host_id: HostId,
+        now: u64,
+    ) -> HostAuth<'a, dyn SecretStorage + 'a> {
+        let mut auth =
+            HostAuth::open(storage as &mut dyn SecretStorage, config.clone(), now).unwrap();
+        auth.initialize().unwrap();
+        let initiation = auth.init_request().unwrap();
+        let committed = verify_host_key_initiation(&initiation).unwrap();
+        let pin = committed.descriptor.commitment().unwrap();
+        auth.accept_initiation(
+            EnrollmentInitiateResult {
+                enrollment_id: EnrollmentId::from_bytes([3; 16]).unwrap(),
+                device_code: "synthetic_device".to_owned().try_into().unwrap(),
+                user_code: "SYNTHETIC-CODE".to_owned().try_into().unwrap(),
+                expires_in_seconds: DecimalU64(600),
+                poll_interval_seconds: DecimalU64(5),
+            },
+            now,
+        )
+        .unwrap();
+        let challenge = prepare_host_enrollment_challenge(
+            &committed,
+            &pin,
+            [4; 16],
+            &HostEnrollmentChallengeContext {
+                enrollment_id: [3; 16],
+                bootstrap_session_id: [5; 16],
+                operation_id: [6; 16],
+                nonce: [7; 32],
+                audience: config.exchange_audience(),
+                expires_at: DecimalU64(now + 500),
+            },
+        )
+        .unwrap();
+        let challenge = challenge
+            .canonical()
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        auth.accept_tls_approval(
+            config.origin(),
+            HostEnrollmentTokenContext {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                challenge: challenge.try_into().unwrap(),
+            },
+            "synthetic_bootstrap".to_owned().try_into().unwrap(),
+            now,
+        )
+        .unwrap();
+        auth.prepare_exchange(now).unwrap();
+        let exchange = auth.exchange_request(now).unwrap();
+        auth.accept_exchange(
+            HostAuthorizationResult {
+                account_id: lomi_remote_protocol::AccountId::from_bytes([4; 16]).unwrap(),
+                host_id,
+                host_authorization_id: HostAuthorizationId::from_bytes([8; 16]).unwrap(),
+                access: "synthetic_access".to_owned().try_into().unwrap(),
+                refresh: "synthetic_refresh".to_owned().try_into().unwrap(),
+                rotation_id: exchange.operation_id,
+                expires_in_seconds: DecimalU64(300),
+            },
+            now,
+        )
+        .unwrap();
+        auth.confirm_registration(HostRegisterResult {
+            host_id,
+            host_access_epoch: DecimalU64(12),
+        })
+        .unwrap();
+        auth
+    }
+
+    struct RetirementTransport {
+        provider: Arc<Mutex<Option<Vec<u8>>>>,
+        config: Config,
+        rotation_time: u64,
+        rotation: Option<lomi_remote_protocol::HostAuthorizationRefreshParams>,
+        responses: Mutex<VecDeque<bool>>,
+        response_delays: Mutex<VecDeque<Duration>>,
+        acknowledgement_responses: Mutex<VecDeque<bool>>,
+        after_self_retire: Option<Arc<dyn Fn() + Send + Sync>>,
+        revokes: Mutex<Vec<lomi_remote_protocol::HostRevokeParams>>,
+        acknowledgements: Mutex<Vec<lomi_remote_protocol::HostRevocationAckParams>>,
+        retirements: Mutex<Vec<lomi_remote_protocol::HostSelfRetirementParams>>,
+        refresh_calls: AtomicU64,
+    }
+    impl AuthTransport for RetirementTransport {
+        fn revoke(
+            &self,
+            _host: HostId,
+            request: &lomi_remote_protocol::HostRevokeParams,
+            _access: &lomi_remote_protocol::HostAccessCredential,
+        ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
+            self.revokes.lock().unwrap().push(request.clone());
+            Err(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::AuthRequired,
+            ))
+        }
+        fn revocation_ack(
+            &self,
+            host: HostId,
+            request: &lomi_remote_protocol::HostRevocationAckParams,
+        ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
+            self.acknowledgements.lock().unwrap().push(request.clone());
+            if !self
+                .acknowledgement_responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false)
+            {
+                return Err(lomi_host_http::Error::Remote(
+                    lomi_host_http::HostFailure::AuthRequired,
+                ));
+            }
+            Ok(lomi_remote_protocol::HostRevokeResult {
+                host_id: host,
+                host_access_epoch: DecimalU64(request.expected_host_access_epoch.0 + 1),
+            })
+        }
+        fn self_retire(
+            &self,
+            host: HostId,
+            request: &lomi_remote_protocol::HostSelfRetirementParams,
+        ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
+            let bytes = self.provider.lock().unwrap().clone().unwrap();
+            let mut provider = RetirementMemoryStorage(
+                Arc::new(Mutex::new(Some(bytes))),
+                Arc::new(Mutex::new(None)),
+            );
+            let reopened =
+                HostAuth::open(&mut provider, self.config.clone(), self.rotation_time).unwrap();
+            assert_eq!(reopened.status(), Status::Rotating);
+            if let Some(rotation) = &self.rotation {
+                assert_eq!(
+                    reopened.rotation_request(self.rotation_time).unwrap(),
+                    *rotation,
+                    "self-retirement must leave the old rotation request untouched before ACK"
+                );
+            }
+            self.retirements.lock().unwrap().push(request.clone());
+            if let Some(delay) = self.response_delays.lock().unwrap().pop_front() {
+                thread::sleep(delay);
+            }
+            if !self.responses.lock().unwrap().pop_front().unwrap_or(true) {
+                return Err(lomi_host_http::Error::Timeout);
+            }
+            if let Some(after) = &self.after_self_retire {
+                after();
+            }
+            Ok(lomi_remote_protocol::HostRevokeResult {
+                host_id: host,
+                host_access_epoch: DecimalU64(request.expected_host_access_epoch.0 + 1),
+            })
+        }
+        fn enrollment_revocation_ack(
+            &self,
+            _host: HostId,
+            _request: &lomi_remote_protocol::HostEnrollmentRevocationAckParams,
+        ) -> Result<lomi_remote_protocol::HostEnrollmentRevocationAckResult, lomi_host_http::Error>
+        {
+            Err(lomi_host_http::Error::Remote(
+                lomi_host_http::HostFailure::ResourceNotFound,
+            ))
+        }
+        fn initiate(
+            &self,
+            _request: &lomi_remote_protocol::EnrollmentInitiateParams,
+        ) -> Result<EnrollmentInitiateResult, lomi_host_http::Error> {
+            Err(lomi_host_http::Error::Timeout)
+        }
+        fn poll(
+            &self,
+            _device: &lomi_remote_protocol::DeviceCode,
+        ) -> Result<super::PollOutcome, lomi_host_http::Error> {
+            Err(lomi_host_http::Error::Timeout)
+        }
+        fn exchange(
+            &self,
+            _request: &lomi_remote_protocol::HostAuthorizationExchangeParams,
+        ) -> Result<HostAuthorizationResult, lomi_host_http::Error> {
+            Err(lomi_host_http::Error::Timeout)
+        }
+        fn register(
+            &self,
+            _request: &lomi_remote_protocol::HostRegisterParams,
+            _access: &lomi_remote_protocol::HostAccessCredential,
+        ) -> Result<HostRegisterResult, lomi_host_http::Error> {
+            Err(lomi_host_http::Error::Timeout)
+        }
+        fn refresh(
+            &self,
+            _request: &lomi_remote_protocol::HostAuthorizationRefreshParams,
+        ) -> Result<HostAuthorizationResult, lomi_host_http::Error> {
+            self.refresh_calls.fetch_add(1, Ordering::Relaxed);
+            Err(lomi_host_http::Error::Timeout)
+        }
+    }
+
+    #[test]
+    fn expired_auth_suspension_preserves_available_provider_and_clears_login_data() {
+        #[cfg(target_os = "macos")]
+        let temp_root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temp_root = std::env::temp_dir().canonicalize().unwrap();
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = temp_root.join(format!(
+            "lomi-expired-suspend-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let database = directory.join("host.sqlite3");
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let identity = store.identity().clone();
+        let runtime_id = store.runtime_id();
+        store.enable_authorization(0).unwrap();
+        let owner = SharedOwner::new(store).unwrap();
+        let profile = directory.join("profile");
+        fs::create_dir(&profile).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let endpoint = Arc::new(
+            super::super::platform::OwnerEndpoint::bind(
+                super::super::platform::OwnerLock::acquire(&profile).unwrap(),
+                super::super::platform::LocalDiscovery {
+                    version: LocalIpcVersion::CURRENT,
+                    profile_id: identity.profile_id,
+                    host_id: identity.host_id,
+                    runtime_id,
+                    build_id: "expired-suspend-tests".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let setup = Arc::new(super::super::public_configuration::PublicSetup::new(
+            endpoint,
+        ));
+        let stopping = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+        let gate = AtomicBool::new(false);
+        let retry_requested = AtomicBool::new(false);
+        let (_sender, receiver) = mpsc::channel();
+        let cancelled = AtomicBool::new(false);
+        let operation = OwnerOperation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        let aborted = std::cell::Cell::new(false);
+        let state = Mutex::new(super::initial());
+        {
+            let mut view = state.lock().unwrap();
+            view.status.phase = LocalAuthPhase::Ready;
+            view.status.storage = LocalAuthStorage::Available;
+            view.status.network = LocalAuthNetwork::Available;
+            view.status.locked = false;
+            view.presentation = Some(LocalLoginPresentation {
+                user_code: "SYNTHETIC-CODE".to_owned().try_into().unwrap(),
+                verification_url: "https://identity.example/device"
+                    .to_owned()
+                    .try_into()
+                    .unwrap(),
+                expires_at: DecimalU64(30),
+                next_poll_at: DecimalU64(5),
+            });
+        }
+        let runtime = RuntimeWithOperation {
+            owner: &owner,
+            operation: &operation,
+            public_io: &public_io,
+            state: &state,
+            stopping: &stopping,
+            receiver: &receiver,
+            retry_requested: &retry_requested,
+            gate: &gate,
+            paused: &paused,
+            base: 10,
+            anchor: Instant::now(),
+            aborted: &aborted,
+        };
+        suspend_expired(runtime, 0).unwrap();
+
+        let view = state.lock().unwrap();
+        assert_eq!(view.status.phase, LocalAuthPhase::Locked);
+        assert_eq!(view.status.storage, LocalAuthStorage::Available);
+        assert_eq!(view.status.network, LocalAuthNetwork::Unavailable);
+        assert!(view.status.locked);
+        assert!(view.presentation.is_none());
+        assert!(gate.load(Ordering::Acquire));
+        assert!(owner.authorization_state(&operation).unwrap().locked);
+        drop(view);
+
+        let stale_cancelled = AtomicBool::new(false);
+        let stale_operation =
+            OwnerOperation::new(Instant::now() + Duration::from_secs(30), &stale_cancelled);
+        let stale_aborted = std::cell::Cell::new(false);
+        let stale_runtime = runtime.with_operation(&stale_operation, &stale_aborted);
+        let (before_status, before_presentation) = {
+            let mut view = state.lock().unwrap();
+            view.status.phase = LocalAuthPhase::Refreshing;
+            view.status.storage = LocalAuthStorage::Unavailable;
+            view.status.network = LocalAuthNetwork::Working;
+            view.status.locked = false;
+            (view.status.clone(), view.presentation.clone())
+        };
+        assert!(matches!(
+            suspend_expired(stale_runtime, 99),
+            Err(StepError::Stale)
+        ));
+        let view = state.lock().unwrap();
+        assert_eq!(view.status, before_status);
+        assert_eq!(view.presentation, before_presentation);
+        drop(view);
+        drop(public_io);
+        drop(setup);
+        drop(owner);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn expired_rotation_uses_exact_durable_retirement_and_promotes_normal_enrollment() {
+        use super::super::shared_owner::SharedOwner;
+
+        let directory = RetirementTestDirectory::new();
+        let profile = directory.0.join("profile");
+        let lock = super::super::platform::OwnerLock::acquire(&profile).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let identity = store.identity().clone();
+        let runtime_id = store.runtime_id();
+        let local_configuration = retirement_configuration();
+        store.configure_auth(&local_configuration).unwrap();
+        let config = Config::new(
+            identity.host_id,
+            identity.profile_id,
+            "https://identity.example".into(),
+            "host".to_owned().try_into().unwrap(),
+        )
+        .unwrap();
+        let owner = SharedOwner::new(store).unwrap();
+        let now = retirement_now();
+        let mut storage =
+            RetirementMemoryStorage(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let provider = storage.0.clone();
+        let cancel_on_replace = storage.1.clone();
+        let mut auth = retirement_ready_auth(&mut storage, config.clone(), identity.host_id, now);
+
+        let seed_cancelled = AtomicBool::new(false);
+        let seed_operation =
+            OwnerOperation::new(Instant::now() + Duration::from_secs(60), &seed_cancelled);
+        owner.seed_test_ready(&seed_operation, &auth).unwrap();
+        auth.prepare_rotation(now).unwrap();
+        let old_rotation = auth.rotation_request(now + 1).unwrap();
+        assert_eq!(
+            auth.rotation_request(now + 301),
+            Err(lomi_host_auth::Error::Expired)
+        );
+        assert_eq!(auth.status(), Status::Rotating);
+
+        let endpoint = Arc::new(
+            super::super::platform::OwnerEndpoint::bind(
+                lock,
+                super::super::platform::LocalDiscovery {
+                    version: LocalIpcVersion::CURRENT,
+                    profile_id: identity.profile_id,
+                    host_id: identity.host_id,
+                    runtime_id,
+                    build_id: "self-retirement-integration-tests".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let setup = Arc::new(super::super::public_configuration::PublicSetup::new(
+            endpoint,
+        ));
+        let stopping = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+        let operation_cancelled = Arc::new(AtomicBool::new(false));
+        let operation = OwnerOperation::new(
+            Instant::now() + Duration::from_secs(60),
+            &operation_cancelled,
+        );
+        let mut logout = owner.begin_local_logout(&operation).unwrap();
+        logout.try_commit().unwrap();
+        drop(logout);
+        let generation = owner.authorization_state(&operation).unwrap().generation;
+        let trigger = OperationId::from_bytes([30; 16]).unwrap();
+        owner
+            .begin_login(&operation, trigger, local_configuration.clone(), generation)
+            .unwrap()
+            .try_commit()
+            .unwrap();
+
+        let state = Mutex::new(super::initial());
+        let (sender, receiver) = mpsc::channel();
+        let gate = AtomicBool::new(true);
+        let retry_requested = AtomicBool::new(false);
+        let aborted = std::cell::Cell::new(false);
+        let runtime = RuntimeWithOperation {
+            owner: &owner,
+            operation: &operation,
+            public_io: &public_io,
+            state: &state,
+            stopping: &stopping,
+            receiver: &receiver,
+            retry_requested: &retry_requested,
+            gate: &gate,
+            paused: &paused,
+            base: now + 301,
+            anchor: Instant::now(),
+            aborted: &aborted,
+        };
+        let mut transport = RetirementTransport {
+            provider,
+            config: config.clone(),
+            rotation_time: now + 1,
+            rotation: Some(old_rotation.clone()),
+            responses: Mutex::new(VecDeque::from([false, true])),
+            response_delays: Mutex::new(VecDeque::from([Duration::ZERO, Duration::ZERO])),
+            acknowledgement_responses: Mutex::new(VecDeque::from([false, false, true])),
+            after_self_retire: {
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let hold_owner = owner.clone();
+                Some(Arc::new(move || {
+                    let worker_barrier = barrier.clone();
+                    let worker_owner = hold_owner.clone();
+                    thread::spawn(move || worker_owner.hold_store_for_test(worker_barrier));
+                    // Wait until the second thread owns the Store mutex, then
+                    // release it after the intent deadline crosses during the
+                    // worker's post-response guarded reads.
+                    barrier.wait();
+                    let release_barrier = barrier.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(2));
+                        release_barrier.wait();
+                    });
+                }) as Arc<dyn Fn() + Send + Sync>)
+            },
+            revokes: Mutex::new(Vec::new()),
+            acknowledgements: Mutex::new(Vec::new()),
+            retirements: Mutex::new(Vec::new()),
+            refresh_calls: AtomicU64::new(0),
+        };
+
+        assert!(matches!(
+            revoke_step(&mut auth, &transport, &config, runtime, generation),
+            Err(StepError::Http(lomi_host_http::Error::Timeout))
+        ));
+        let first_journal = owner
+            .host_self_retirement_journal(&operation, generation, &local_configuration)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_journal.trigger_operation_id, Some(trigger));
+        assert_eq!(
+            auth.status(),
+            Status::Rotating,
+            "unknown send does not accept ACK"
+        );
+
+        // Retry the same signed intent one second before its deadline. The
+        // simulated successful HTTP response returns after that deadline.
+        let late_runtime = runtime.with_clock_floor(now + 600);
+        revoke_step(&mut auth, &transport, &config, late_runtime, generation).unwrap();
+        assert_eq!(
+            auth.status(),
+            Status::Rotating,
+            "late result cannot alter provider"
+        );
+        assert_eq!(
+            owner
+                .host_self_retirement_journal(&operation, generation, &local_configuration,)
+                .unwrap(),
+            Some(first_journal.clone()),
+            "late result keeps its exact recovery journal"
+        );
+        assert!(
+            owner
+                .auth_status(&operation)
+                .unwrap()
+                .authorization
+                .pending_cloud_revoke
+        );
+
+        // The next loop resolves a possibly committed result through the
+        // ordinary read-only ACK path. Simulate a process stop after provider
+        // acceptance so a fresh worker turn must finish the Store ACK.
+        *cancel_on_replace.lock().unwrap() = Some(operation_cancelled.clone());
+        let acknowledgement_runtime = runtime.with_clock_floor(now + 602);
+        revoke_step(
+            &mut auth,
+            &transport,
+            &config,
+            acknowledgement_runtime,
+            generation,
+        )
+        .unwrap();
+
+        let requests = transport.retirements.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0], requests[1],
+            "unknown retry resends exact signed intent"
+        );
+        assert_ne!(requests[0].operation_id, old_rotation.rotation_id);
+        drop(requests);
+        assert_eq!(transport.revokes.lock().unwrap().len(), 3);
+        assert_eq!(transport.acknowledgements.lock().unwrap().len(), 3);
+        assert_eq!(transport.refresh_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(auth.status(), Status::Revoked);
+        drop(auth);
+
+        let mut recovered_auth = HostAuth::open(
+            &mut storage as &mut dyn SecretStorage,
+            config.clone(),
+            now + 602,
+        )
+        .unwrap();
+        assert_eq!(recovered_auth.status(), Status::Revoked);
+        let recovery_cancelled = AtomicBool::new(false);
+        let recovery_operation = OwnerOperation::new(
+            Instant::now() + Duration::from_secs(60),
+            &recovery_cancelled,
+        );
+        assert!(
+            owner
+                .auth_status(&recovery_operation)
+                .unwrap()
+                .authorization
+                .pending_cloud_revoke
+        );
+        let recovery_aborted = std::cell::Cell::new(false);
+        let recovery_runtime = RuntimeWithOperation {
+            owner: &owner,
+            operation: &recovery_operation,
+            public_io: &public_io,
+            state: &state,
+            stopping: &stopping,
+            receiver: &receiver,
+            retry_requested: &retry_requested,
+            gate: &gate,
+            paused: &paused,
+            base: now + 602,
+            anchor: Instant::now(),
+            aborted: &recovery_aborted,
+        };
+        revoke_step(
+            &mut recovered_auth,
+            &transport,
+            &config,
+            recovery_runtime,
+            generation,
+        )
+        .unwrap();
+        let state_after = owner.auth_status(&recovery_operation).unwrap();
+        assert_eq!(state_after.authorization.generation, generation);
+        assert!(!state_after.authorization.pending_cloud_revoke);
+        assert!(state_after.authorization.locked);
+        assert_eq!(state_after.deferred_intent, None);
+        assert_eq!(
+            state_after.intent,
+            Some(lomi_host_store::LoginIntent {
+                operation_id: trigger,
+                generation,
+            })
+        );
+        assert_eq!(
+            owner.host_self_retirement_journal(
+                &recovery_operation,
+                generation,
+                &local_configuration,
+            ),
+            Err(OwnerError::Store(lomi_host_store::StoreError::Fenced))
+        );
+
+        drop(recovered_auth);
+        *cancel_on_replace.lock().unwrap() = None;
+        let mut next_auth = HostAuth::open(&mut storage, config.clone(), now + 603).unwrap();
+        next_auth.restart_after_revocation(now + 603).unwrap();
+        let _new_enrollment = next_auth.init_request().unwrap();
+        next_auth
+            .accept_initiation(
+                EnrollmentInitiateResult {
+                    enrollment_id: EnrollmentId::from_bytes([31; 16]).unwrap(),
+                    device_code: "next_device".to_owned().try_into().unwrap(),
+                    user_code: "NEXT-CODE".to_owned().try_into().unwrap(),
+                    expires_in_seconds: DecimalU64(600),
+                    poll_interval_seconds: DecimalU64(5),
+                },
+                now + 603,
+            )
+            .unwrap();
+        assert_eq!(next_auth.status(), Status::AwaitingApproval);
+
+        // Exercise a timely 200 from the new retirement route as well. The
+        // ordinary local enrollment above becomes ready, then a fresh logout
+        // queues another explicit login behind this family's ACK.
+        drop(next_auth);
+        *storage.0.lock().unwrap() = None;
+        let mut ready_again =
+            retirement_ready_auth(&mut storage, config.clone(), identity.host_id, now + 604);
+        let seed_cancelled = AtomicBool::new(false);
+        let seed_operation =
+            OwnerOperation::new(Instant::now() + Duration::from_secs(60), &seed_cancelled);
+        owner
+            .seed_test_ready(&seed_operation, &ready_again)
+            .unwrap();
+
+        let timely_cancelled = AtomicBool::new(false);
+        let timely_operation =
+            OwnerOperation::new(Instant::now() + Duration::from_secs(60), &timely_cancelled);
+        let mut timely_logout = owner.begin_local_logout(&timely_operation).unwrap();
+        let timely_fence = timely_logout.try_commit().unwrap();
+        drop(timely_logout);
+        let timely_generation = timely_fence.generation;
+        let timely_trigger = OperationId::from_bytes([34; 16]).unwrap();
+        owner
+            .begin_login(
+                &timely_operation,
+                timely_trigger,
+                local_configuration.clone(),
+                timely_generation,
+            )
+            .unwrap()
+            .try_commit()
+            .unwrap();
+        ready_again.prepare_rotation(now + 604).unwrap();
+        let timely_rotation = ready_again.rotation_request(now + 605).unwrap();
+        transport.rotation_time = now + 605;
+        transport.rotation = Some(timely_rotation.clone());
+        let timely_aborted = std::cell::Cell::new(false);
+        let timely_runtime = RuntimeWithOperation {
+            owner: &owner,
+            operation: &timely_operation,
+            public_io: &public_io,
+            state: &state,
+            stopping: &stopping,
+            receiver: &receiver,
+            retry_requested: &retry_requested,
+            gate: &gate,
+            paused: &paused,
+            base: now + 606,
+            anchor: Instant::now(),
+            aborted: &timely_aborted,
+        };
+        revoke_step(
+            &mut ready_again,
+            &transport,
+            &config,
+            timely_runtime,
+            timely_generation,
+        )
+        .unwrap();
+        assert_eq!(ready_again.status(), Status::Revoked);
+        let timely_state = owner.auth_status(&timely_operation).unwrap();
+        assert_eq!(timely_state.authorization.generation, timely_generation);
+        assert!(!timely_state.authorization.pending_cloud_revoke);
+        assert!(timely_state.authorization.locked);
+        assert_eq!(timely_state.deferred_intent, None);
+        assert_eq!(
+            timely_state.intent,
+            Some(lomi_host_store::LoginIntent {
+                operation_id: timely_trigger,
+                generation: timely_generation,
+            })
+        );
+        assert_eq!(transport.retirements.lock().unwrap().len(), 3);
+        drop(sender);
+        drop(public_io);
+        drop(setup);
+        drop(owner);
+    }
+
+    #[test]
+    fn pristine_local_logout_ack_promotes_login_before_normal_enrollment() {
+        use super::super::shared_owner::SharedOwner;
+
+        let directory = RetirementTestDirectory::new();
+        let profile = directory.0.join("profile");
+        let lock = super::super::platform::OwnerLock::acquire(&profile).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let identity = store.identity().clone();
+        let runtime_id = store.runtime_id();
+        let local_configuration = retirement_configuration();
+        store.configure_auth(&local_configuration).unwrap();
+        let config = Config::new(
+            identity.host_id,
+            identity.profile_id,
+            "https://identity.example".into(),
+            "host".to_owned().try_into().unwrap(),
+        )
+        .unwrap();
+        let owner = SharedOwner::new(store).unwrap();
+        let now = retirement_now();
+        let mut storage =
+            RetirementMemoryStorage(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let provider = storage.0.clone();
+        let mut auth =
+            HostAuth::open(&mut storage as &mut dyn SecretStorage, config.clone(), now).unwrap();
+        assert_eq!(auth.status(), Status::Empty);
+
+        let cancelled = AtomicBool::new(false);
+        let operation = OwnerOperation::new(Instant::now() + Duration::from_secs(60), &cancelled);
+        let mut logout = owner.begin_local_logout(&operation).unwrap();
+        let fenced = logout.try_commit().unwrap();
+        drop(logout);
+        let generation = fenced.generation;
+        let trigger = OperationId::from_bytes([32; 16]).unwrap();
+        owner
+            .begin_login(&operation, trigger, local_configuration.clone(), generation)
+            .unwrap()
+            .try_commit()
+            .unwrap();
+
+        let endpoint = Arc::new(
+            super::super::platform::OwnerEndpoint::bind(
+                lock,
+                super::super::platform::LocalDiscovery {
+                    version: LocalIpcVersion::CURRENT,
+                    profile_id: identity.profile_id,
+                    host_id: identity.host_id,
+                    runtime_id,
+                    build_id: "local-logout-ack-integration-tests".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let setup = Arc::new(super::super::public_configuration::PublicSetup::new(
+            endpoint,
+        ));
+        let stopping = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+        let state = Mutex::new(super::initial());
+        let (sender, receiver) = mpsc::channel();
+        let gate = AtomicBool::new(true);
+        let retry_requested = AtomicBool::new(false);
+        let aborted = std::cell::Cell::new(false);
+        let runtime = RuntimeWithOperation {
+            owner: &owner,
+            operation: &operation,
+            public_io: &public_io,
+            state: &state,
+            stopping: &stopping,
+            receiver: &receiver,
+            retry_requested: &retry_requested,
+            gate: &gate,
+            paused: &paused,
+            base: now,
+            anchor: Instant::now(),
+            aborted: &aborted,
+        };
+        let transport = RetirementTransport {
+            provider,
+            config: config.clone(),
+            rotation_time: now,
+            rotation: None,
+            responses: Mutex::new(VecDeque::new()),
+            response_delays: Mutex::new(VecDeque::new()),
+            acknowledgement_responses: Mutex::new(VecDeque::new()),
+            after_self_retire: None,
+            revokes: Mutex::new(Vec::new()),
+            acknowledgements: Mutex::new(Vec::new()),
+            retirements: Mutex::new(Vec::new()),
+            refresh_calls: AtomicU64::new(0),
+        };
+
+        revoke_step(&mut auth, &transport, &config, runtime, generation).unwrap();
+        assert!(transport.revokes.lock().unwrap().is_empty());
+        assert!(transport.acknowledgements.lock().unwrap().is_empty());
+        assert!(transport.retirements.lock().unwrap().is_empty());
+        let promoted = owner.auth_status(&operation).unwrap();
+        assert_eq!(promoted.authorization.generation, generation);
+        assert!(!promoted.authorization.pending_cloud_revoke);
+        assert!(promoted.authorization.locked);
+        assert_eq!(promoted.deferred_intent, None);
+        assert_eq!(
+            promoted.intent,
+            Some(lomi_host_store::LoginIntent {
+                operation_id: trigger,
+                generation,
+            })
+        );
+        assert_eq!(
+            owner.auth_history(&operation).unwrap().cloud_may_exist,
+            Some(false)
+        );
+
+        // The promoted intent proceeds through ordinary enrollment while the
+        // authorization fence remains locked pending approval.
+        auth.initialize().unwrap();
+        let _request = auth.init_request().unwrap();
+        auth.accept_initiation(
+            EnrollmentInitiateResult {
+                enrollment_id: EnrollmentId::from_bytes([33; 16]).unwrap(),
+                device_code: "local_ack_device".to_owned().try_into().unwrap(),
+                user_code: "LOCAL-ACK".to_owned().try_into().unwrap(),
+                expires_in_seconds: DecimalU64(600),
+                poll_interval_seconds: DecimalU64(5),
+            },
+            now + 1,
+        )
+        .unwrap();
+        assert_eq!(auth.status(), Status::AwaitingApproval);
+        drop(sender);
+        drop(public_io);
+        drop(setup);
+        drop(owner);
+    }
+
+    #[test]
+    fn self_retirement_response_is_not_accepted_after_generation_or_config_change() {
+        use super::super::shared_owner::SharedOwner;
+
+        for change_configuration in [false, true] {
+            let directory = RetirementTestDirectory::new();
+            let profile = directory.0.join("profile");
+            let lock = super::super::platform::OwnerLock::acquire(&profile).unwrap();
+            let database = lock.prepare_database().unwrap();
+            let mut store = HostStore::open(&database, Limits::default()).unwrap();
+            let identity = store.identity().clone();
+            let runtime_id = store.runtime_id();
+            let local_configuration = retirement_configuration();
+            store.configure_auth(&local_configuration).unwrap();
+            let config = Config::new(
+                identity.host_id,
+                identity.profile_id,
+                "https://identity.example".into(),
+                "host".to_owned().try_into().unwrap(),
+            )
+            .unwrap();
+            let owner = SharedOwner::new(store).unwrap();
+            let now = retirement_now();
+            let mut storage =
+                RetirementMemoryStorage(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+            let provider = storage.0.clone();
+            let mut auth =
+                retirement_ready_auth(&mut storage, config.clone(), identity.host_id, now);
+            let seed_cancelled = AtomicBool::new(false);
+            let seed_operation =
+                OwnerOperation::new(Instant::now() + Duration::from_secs(60), &seed_cancelled);
+            owner.seed_test_ready(&seed_operation, &auth).unwrap();
+            auth.prepare_rotation(now).unwrap();
+            let old_rotation = auth.rotation_request(now + 1).unwrap();
+
+            let operation_cancelled = AtomicBool::new(false);
+            let operation = OwnerOperation::new(
+                Instant::now() + Duration::from_secs(60),
+                &operation_cancelled,
+            );
+            let mut logout = owner.begin_local_logout(&operation).unwrap();
+            let generation = logout.try_commit().unwrap().generation;
+            drop(logout);
+            let trigger = OperationId::from_bytes([35; 16]).unwrap();
+            owner
+                .begin_login(&operation, trigger, local_configuration.clone(), generation)
+                .unwrap()
+                .try_commit()
+                .unwrap();
+
+            let endpoint = Arc::new(
+                super::super::platform::OwnerEndpoint::bind(
+                    lock,
+                    super::super::platform::LocalDiscovery {
+                        version: LocalIpcVersion::CURRENT,
+                        profile_id: identity.profile_id,
+                        host_id: identity.host_id,
+                        runtime_id,
+                        build_id: "stale-self-retirement-tests".to_owned(),
+                    },
+                )
+                .unwrap(),
+            );
+            let setup = Arc::new(super::super::public_configuration::PublicSetup::new(
+                endpoint,
+            ));
+            let stopping = AtomicBool::new(false);
+            let paused = AtomicBool::new(false);
+            let public_io = setup.enter_owned(&paused).unwrap().unwrap();
+            let state = Mutex::new(super::initial());
+            let (sender, receiver) = mpsc::channel();
+            let gate = AtomicBool::new(true);
+            let retry_requested = AtomicBool::new(false);
+            let aborted = std::cell::Cell::new(false);
+            let runtime = RuntimeWithOperation {
+                owner: &owner,
+                operation: &operation,
+                public_io: &public_io,
+                state: &state,
+                stopping: &stopping,
+                receiver: &receiver,
+                retry_requested: &retry_requested,
+                gate: &gate,
+                paused: &paused,
+                base: now + 2,
+                anchor: Instant::now(),
+                aborted: &aborted,
+            };
+
+            let owner_after = owner.clone();
+            let changed_configuration = LocalAuthConfiguration {
+                remote_api_origin: Some("https://remote.example".to_owned().try_into().unwrap()),
+                ..local_configuration.clone()
+            };
+            let after_self_retire: Arc<dyn Fn() + Send + Sync> = if change_configuration {
+                Arc::new(move || {
+                    owner_after
+                        .configure_auth_for_test(&changed_configuration)
+                        .unwrap();
+                })
+            } else {
+                Arc::new(move || {
+                    let cancelled = AtomicBool::new(false);
+                    let stale_operation =
+                        OwnerOperation::new(Instant::now() + Duration::from_secs(60), &cancelled);
+                    let mut logout = owner_after.begin_local_logout(&stale_operation).unwrap();
+                    logout.try_commit().unwrap();
+                })
+            };
+            let transport = RetirementTransport {
+                provider,
+                config: config.clone(),
+                rotation_time: now + 1,
+                rotation: Some(old_rotation),
+                responses: Mutex::new(VecDeque::from([true])),
+                response_delays: Mutex::new(VecDeque::new()),
+                acknowledgement_responses: Mutex::new(VecDeque::new()),
+                after_self_retire: Some(after_self_retire),
+                revokes: Mutex::new(Vec::new()),
+                acknowledgements: Mutex::new(Vec::new()),
+                retirements: Mutex::new(Vec::new()),
+                refresh_calls: AtomicU64::new(0),
+            };
+
+            assert!(revoke_step(&mut auth, &transport, &config, runtime, generation).is_err());
+            assert_eq!(auth.status(), Status::Rotating);
+            assert_eq!(transport.retirements.lock().unwrap().len(), 1);
+            assert!(transport.refresh_calls.load(Ordering::Relaxed) == 0);
+            if change_configuration {
+                let changed = owner
+                    .auth_selection(&operation)
+                    .unwrap()
+                    .configuration
+                    .unwrap();
+                assert_eq!(
+                    changed.remote_api_origin.as_ref().unwrap().as_str(),
+                    "https://remote.example"
+                );
+                assert!(
+                    owner
+                        .auth_status(&operation)
+                        .unwrap()
+                        .authorization
+                        .pending_cloud_revoke
+                );
+                assert!(
+                    owner
+                        .host_self_retirement_journal(&operation, generation, &changed)
+                        .unwrap()
+                        .is_some()
+                );
+            } else {
+                let current = OwnerOperation::new(
+                    Instant::now() + Duration::from_secs(60),
+                    &operation_cancelled,
+                );
+                assert_eq!(
+                    owner.authorization_state(&current).unwrap().generation,
+                    generation + 1
+                );
+                assert!(
+                    owner
+                        .authorization_state(&current)
+                        .unwrap()
+                        .pending_cloud_revoke
+                );
+                assert_eq!(
+                    owner.host_self_retirement_journal(&current, generation, &local_configuration,),
+                    Err(OwnerError::Store(lomi_host_store::StoreError::Fenced))
+                );
+            }
+            drop(sender);
+            drop(public_io);
+            drop(setup);
+            drop(owner);
+        }
+    }
 
     #[test]
     fn actor_wait_tracks_cloud_and_reserved_stage_progress() {
@@ -1131,6 +2224,33 @@ fn suspend(runtime: Runtime<'_>) {
         let _ = commit_worker_turn!(turn, runtime);
     }
 }
+fn suspend_expired(runtime: Runtime<'_>, generation: u64) -> Result<(), StepError> {
+    runtime.gate.store(true, Ordering::Release);
+    let state = worker_read!(
+        runtime,
+        runtime.owner.authorization_state(runtime.operation)
+    )?;
+    if state.generation != generation || state.pending_cloud_revoke {
+        return Err(StepError::Stale);
+    }
+    if !state.locked {
+        let mut turn = runtime
+            .owner
+            .begin_suspend_authorization(runtime.operation, generation)?;
+        commit_worker_turn!(turn, runtime)?;
+    }
+    runtime.check()?;
+    let mut view = runtime
+        .state
+        .lock()
+        .map_err(|_| StepError::Auth(lomi_host_auth::Error::Sealed))?;
+    view.status.phase = LocalAuthPhase::Locked;
+    view.status.storage = LocalAuthStorage::Available;
+    view.status.network = LocalAuthNetwork::Unavailable;
+    view.status.locked = true;
+    view.presentation = None;
+    Ok(())
+}
 fn storage(value: secrets::StorageState) -> LocalAuthStorage {
     match value {
         secrets::StorageState::Available => LocalAuthStorage::Available,
@@ -1180,6 +2300,18 @@ pub(super) trait AuthTransport {
         &self,
         _host: lomi_remote_protocol::HostId,
         _request: &lomi_remote_protocol::HostRevocationAckParams,
+    ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
+        Err(lomi_host_http::Error::Remote(
+            lomi_host_http::HostFailure::AuthRequired,
+        ))
+    }
+
+    /// Injected transports deny self-retirement unless they opt into the
+    /// purpose-specific proof route. This response never counts as an ACK.
+    fn self_retire(
+        &self,
+        _host: lomi_remote_protocol::HostId,
+        _request: &lomi_remote_protocol::HostSelfRetirementParams,
     ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
         Err(lomi_host_http::Error::Remote(
             lomi_host_http::HostFailure::AuthRequired,
@@ -1236,6 +2368,14 @@ impl AuthTransport for Transport {
         request: &lomi_remote_protocol::HostRevocationAckParams,
     ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
         Transport::revocation_ack(self, host, request)
+    }
+
+    fn self_retire(
+        &self,
+        host: lomi_remote_protocol::HostId,
+        request: &lomi_remote_protocol::HostSelfRetirementParams,
+    ) -> Result<lomi_remote_protocol::HostRevokeResult, lomi_host_http::Error> {
+        Transport::self_retire(self, host, request)
     }
 
     fn enrollment_revocation_ack(
@@ -1425,12 +2565,11 @@ fn ready_from_existing_worker(
     let retained_enrollment =
         auth.status() == Status::Unconfirmed && auth.enrollment_revocation_ack_request(now).is_ok();
     let map = |error| match error {
-        WorkerReadyError::Provider(lomi_host_auth::Error::Expired) if retained_rotation => {
-            StepError::ExpiredRotation
-        }
-        WorkerReadyError::Provider(lomi_host_auth::Error::Expired) if retained_enrollment => {
+        WorkerReadyError::ExpiredBeforeAccept if retained_rotation => StepError::ExpiredRotation,
+        WorkerReadyError::ExpiredBeforeAccept if retained_enrollment => {
             StepError::ExpiredEnrollment
         }
+        WorkerReadyError::ExpiredBeforeAccept => StepError::Auth(lomi_host_auth::Error::Expired),
         WorkerReadyError::Provider(error) => StepError::Auth(error),
         WorkerReadyError::Http(error) => StepError::Http(error),
         WorkerReadyError::Domain(_) | WorkerReadyError::Stale => StepError::Stale,
@@ -2902,9 +4041,14 @@ fn run_with_apis_inner(
                         }
                     }
                 }
-                suspend(runtime);
-                auth_failed(state, lomi_host_auth::Error::Expired, gate);
-                return;
+                match suspend_expired(runtime, fence.generation) {
+                    Ok(()) => return,
+                    Err(StepError::Stale) => continue,
+                    Err(_) => {
+                        set_failed(state, LocalAuthStorage::Unavailable, gate);
+                        return;
+                    }
+                }
             }
             Err(StepError::ExpiredRotation)
                 if fence.pending_cloud_revoke && auth.status() == Status::Rotating =>
@@ -2973,9 +4117,14 @@ fn run_with_apis_inner(
                     publication_barrier.reset();
                     ingress.discard();
                 }
-                suspend(runtime);
-                auth_failed(state, lomi_host_auth::Error::Expired, gate);
-                return;
+                match suspend_expired(runtime, fence.generation) {
+                    Ok(()) => return,
+                    Err(StepError::Stale) => continue,
+                    Err(_) => {
+                        set_failed(state, LocalAuthStorage::Unavailable, gate);
+                        return;
+                    }
+                }
             }
             Err(StepError::Http(_)) => {
                 network(state, LocalAuthNetwork::Unavailable);
@@ -3143,9 +4292,12 @@ fn acknowledge_revoke(
             .begin_acknowledge_authorization_revoke(runtime.operation, generation)?;
         commit_worker_turn!(turn, runtime)
     } else {
-        let mut turn = runtime
-            .owner
-            .begin_acknowledge_local_authorization_logout(runtime.operation, generation)?;
+        let selected = worker_read!(runtime, runtime.owner.auth_selection(runtime.operation))?;
+        let mut turn = runtime.owner.begin_acknowledge_local_authorization_logout(
+            runtime.operation,
+            generation,
+            selected.configuration,
+        )?;
         commit_worker_turn!(turn, runtime)
     };
     match result {
@@ -3313,42 +4465,10 @@ fn revoke_step(
                             lomi_host_http::HostFailure::AuthRequired
                             | lomi_host_http::HostFailure::ResourceNotFound,
                         )) => {
-                            // Closed proof/route denial is not an ACK. Retain
-                            // the exact historical rotation recovery behavior;
-                            // its retry identity and original deadline remain
-                            // in HostAuth. Generic HTTP status failures are not
-                            // classified as endpoint absence.
-                            let now = observed(runtime)?;
-                            if !pending_current(runtime, generation)
-                                || stopping.load(Ordering::Acquire)
-                            {
+                            if stopping.load(Ordering::Acquire) {
                                 return Ok(());
                             }
-                            if auth.status() == Status::Ready {
-                                auth.prepare_rotation(now)?;
-                            } else {
-                                runtime.check()?;
-                                let request = match auth.rotation_request(now) {
-                                    Ok(request) => request,
-                                    Err(lomi_host_auth::Error::Expired)
-                                        if auth.status() == Status::Rotating =>
-                                    {
-                                        // Keep the exact old rotation and wait
-                                        // for another idempotent revoke/ACK
-                                        // probe. Never refresh expired proof.
-                                        return Err(StepError::ExpiredRotation);
-                                    }
-                                    Err(error) => return Err(error.into()),
-                                };
-                                let result = transport.refresh(&request)?;
-                                let now = observed(runtime)?;
-                                if pending_current(runtime, generation)
-                                    && !stopping.load(Ordering::Acquire)
-                                {
-                                    runtime.check()?;
-                                    auth.accept_rotation(result, now)?;
-                                }
-                            }
+                            retire_pending_family(auth, transport, config, runtime, generation)?;
                         }
                         Err(error) => return Err(error.into()),
                     }
@@ -3370,6 +4490,112 @@ fn revoke_step(
     }
     Ok(())
 }
+
+fn retire_pending_family(
+    auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
+    transport: &dyn AuthTransport,
+    config: &Config,
+    runtime: Runtime<'_>,
+    generation: u64,
+) -> Result<(), StepError> {
+    let now = observed(runtime)?;
+    if !pending_current(runtime, generation) {
+        return Ok(());
+    }
+    let selected = worker_read!(runtime, runtime.owner.auth_selection(runtime.operation))?;
+    let Some(selected_configuration) = selected.configuration.clone() else {
+        return Err(lomi_host_auth::Error::InvalidState.into());
+    };
+    let selected_trusted = configuration(&selected.identity, &selected_configuration)
+        .map_err(|_| StepError::Auth(lomi_host_auth::Error::InvalidConfig))?;
+    if selected_trusted != *config {
+        return Ok(());
+    }
+    let status = worker_read!(runtime, runtime.owner.auth_status(runtime.operation))?;
+    if status.authorization.generation != generation || !status.authorization.pending_cloud_revoke {
+        return Ok(());
+    }
+    let binding = auth.self_retirement_binding()?;
+    let existing = worker_read!(
+        runtime,
+        runtime.owner.host_self_retirement_journal(
+            runtime.operation,
+            generation,
+            &selected_configuration,
+        )
+    )?;
+    let trigger = status.deferred_intent.map(|intent| intent.operation_id);
+    if let Some(journal) = &existing
+        && now >= journal.intent.expires_at.0
+        && (journal.trigger_operation_id == trigger || trigger.is_none())
+    {
+        network(runtime.state, LocalAuthNetwork::Unavailable);
+        let _ = wait_pending_proof_reprobe(
+            runtime,
+            generation,
+            &selected_configuration,
+            status.deferred_intent,
+            Instant::now() + Duration::from_secs(5),
+        )?;
+        return Ok(());
+    }
+
+    let operation_id = OperationId::from_bytes(*uuid::Uuid::new_v4().as_bytes())
+        .map_err(|_| StepError::Auth(lomi_host_auth::Error::InvalidResponse))?;
+    let mut turn = runtime.owner.begin_host_self_retirement(
+        runtime.operation,
+        generation,
+        selected_configuration.clone(),
+        binding,
+        operation_id,
+        now,
+    )?;
+    let journal = commit_worker_turn!(turn, runtime)?;
+    let request = auth.self_retirement_request(&journal.intent, now)?;
+    let host = journal.intent.binding.host_id;
+    network(runtime.state, LocalAuthNetwork::Working);
+    runtime.check()?;
+    let result = transport.self_retire(host, &request)?;
+
+    let now = observed(runtime)?;
+    let status = worker_read!(runtime, runtime.owner.auth_status(runtime.operation))?;
+    let selected_after = worker_read!(runtime, runtime.owner.auth_selection(runtime.operation))?;
+    let journal_after = worker_read!(
+        runtime,
+        runtime.owner.host_self_retirement_journal(
+            runtime.operation,
+            generation,
+            &selected_configuration,
+        )
+    )?;
+    if status.authorization.generation != generation
+        || !status.authorization.pending_cloud_revoke
+        || selected_after.configuration.as_ref() != Some(&selected_configuration)
+        || configuration(&selected_after.identity, &selected_configuration)
+            .map_err(|_| StepError::Auth(lomi_host_auth::Error::InvalidConfig))?
+            != *config
+        || journal_after.as_ref() != Some(&journal)
+    {
+        return Ok(());
+    }
+    runtime.check()?;
+    // The guarded Store reads above can wait on an owner turn. Re-sample the
+    // monotonic projection after those reads so acceptance cannot use a
+    // pre-wait timestamp for an intent that expired while they were blocked.
+    let acceptance_now = now
+        .max(runtime.projected_time())
+        .max(status.authorization.clock_floor);
+    if acceptance_now >= journal.intent.expires_at.0 {
+        // The late response may have committed remotely. Keep the provider and
+        // durable intent untouched so the next read-only ACK probe can repair it.
+        network(runtime.state, LocalAuthNetwork::Unavailable);
+        return Ok(());
+    }
+    auth.accept_self_retirement(config.origin(), &request, result, acceptance_now)?;
+    acknowledge_revoke(runtime, generation, true)?;
+    Ok(())
+}
+
 fn observed(runtime: Runtime<'_>) -> Result<u64, StepError> {
     runtime.check()?;
     let now = runtime.projected_time();

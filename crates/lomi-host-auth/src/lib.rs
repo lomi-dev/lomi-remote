@@ -20,7 +20,7 @@
 use lomi_platform::secrets::{self, MAX_BUNDLE_BYTES, SecretBundle, SecretStorage, StorageState};
 use lomi_remote_crypto::{
     EnrollmentChallenge, Identity, PendingHostIdentity, SignedBundle, SignedHostKeyCommitment,
-    verify_host_enrollment_proof,
+    host_refresh_credential_hash, verify_host_enrollment_proof,
 };
 use lomi_remote_protocol::{ipc::IpcProfileId, *};
 use serde::{Deserialize, Serialize};
@@ -788,6 +788,120 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
             expected_host_access_epoch: DecimalU64(epoch),
             refresh: wire(credentials.refresh.as_str().to_owned())?,
         })
+    }
+    /// Capture the immutable family fields used by a separately durable,
+    /// purpose-specific self-retirement intent.
+    pub fn self_retirement_binding(&self) -> Result<HostSelfRetirementBinding> {
+        let r = self.current()?;
+        validate(r, &self.config)?;
+        let (account, signed, credentials, epoch) = match &r.lifecycle {
+            State::Ready {
+                account,
+                signed,
+                credentials,
+                epoch,
+            }
+            | State::Rotating {
+                account,
+                signed,
+                credentials,
+                epoch,
+                ..
+            } => (*account, signed, credentials, *epoch),
+            _ => return Err(Error::InvalidState),
+        };
+        if epoch == 0 || epoch > i64::MAX as u64 {
+            return Err(Error::InvalidState);
+        }
+        Ok(HostSelfRetirementBinding {
+            host_id: r.config.host,
+            account_id: account,
+            host_authorization_id: credentials.family,
+            expected_host_access_epoch: DecimalU64(epoch),
+            host_key_fingerprint: crypto(signed.bundle.fingerprint())?,
+            refresh_hash: crypto(host_refresh_credential_hash(credentials.refresh.as_str()))?,
+        })
+    }
+    /// Sign only an intent whose full family binding still matches the
+    /// validated provider record. The caller persists this intent before send.
+    pub fn self_retirement_request(
+        &self,
+        intent: &HostSelfRetirementIntent,
+        now: u64,
+    ) -> Result<HostSelfRetirementParams> {
+        self.observe(now)?;
+        let r = self.current()?;
+        validate(r, &self.config)?;
+        let (signed, credentials, epoch) = match &r.lifecycle {
+            State::Ready {
+                signed,
+                credentials,
+                epoch,
+                ..
+            }
+            | State::Rotating {
+                signed,
+                credentials,
+                epoch,
+                ..
+            } => (signed, credentials, *epoch),
+            _ => return Err(Error::InvalidState),
+        };
+        if self.self_retirement_binding()? != intent.binding
+            || epoch == 0
+            || epoch > i64::MAX as u64
+            || intent.prepared_at.0 == 0
+            || intent.expires_at.0 == 0
+            || intent.prepared_at.0.checked_add(300) != Some(intent.expires_at.0)
+            || intent.prepared_at.0 > now.checked_add(30).ok_or(Error::InvalidResponse)?
+            || now >= intent.expires_at.0
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let identity = crypto(Identity::import_secret_seed_blob(&r.seed.0, signed))?;
+        let proof = crypto(identity.sign_host_self_retirement_proof(
+            credentials.family.to_bytes(),
+            intent.operation_id.to_bytes(),
+            credentials.refresh.as_str(),
+            r.config.origin(),
+            epoch,
+            intent.prepared_at.0,
+            intent.expires_at.0,
+        ))?;
+        Ok(HostSelfRetirementParams {
+            host_authorization_id: credentials.family,
+            operation_id: intent.operation_id,
+            expected_host_access_epoch: DecimalU64(epoch),
+            prepared_at: intent.prepared_at,
+            expires_at: intent.expires_at,
+            refresh: wire(credentials.refresh.as_str().to_owned())?,
+            proof,
+        })
+    }
+    /// Accept only the exact signed request while it is still valid. The
+    /// authenticated provider transition remains the existing Revoked commit.
+    pub fn accept_self_retirement(
+        &mut self,
+        authenticated_origin: &str,
+        original: &HostSelfRetirementParams,
+        result: HostRevokeResult,
+        now: u64,
+    ) -> Result<()> {
+        if authenticated_origin != self.config.origin()
+            || result.host_access_epoch.0 > i64::MAX as u64
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let intent = HostSelfRetirementIntent {
+            binding: self.self_retirement_binding()?,
+            operation_id: original.operation_id,
+            prepared_at: original.prepared_at,
+            expires_at: original.expires_at,
+        };
+        if self.self_retirement_request(&intent, now)? != *original {
+            return Err(Error::InvalidResponse);
+        }
+        self.accept_tls_revocation(authenticated_origin, result, now)
     }
     /// Accept a proof-only acknowledgement only for the exact retained family,
     /// refresh value, and verified epoch used by the original request. A delayed
@@ -1773,4 +1887,230 @@ fn decode(b: &SecretBundle, config: &Config) -> Result<Record> {
     let r: Record = serde_json::from_slice(b.expose()).map_err(|_| Error::InvalidBundle)?;
     validate(&r, config)?;
     Ok(r)
+}
+
+#[cfg(test)]
+mod self_retirement_tests {
+    use super::*;
+    use lomi_platform::secrets::{ProviderKind, ProviderStatus};
+    use std::{cell::RefCell, rc::Rc};
+
+    const NOW: u64 = 1_700_000_000;
+    const HOST: &str = "11111111-1111-4111-8111-111111111111";
+    const ACCOUNT: &str = "22222222-2222-4222-8222-222222222222";
+    const FAMILY: &str = "33333333-3333-4333-8333-333333333333";
+    const ROTATION: &str = "44444444-4444-4444-8444-444444444444";
+    const RETIREMENT: &str = "55555555-5555-4555-8555-555555555555";
+
+    #[derive(Clone)]
+    struct MemoryStorage(Rc<RefCell<Option<Vec<u8>>>>);
+
+    impl SecretStorage for MemoryStorage {
+        fn status(&self) -> lomi_platform::secrets::ProviderStatus {
+            ProviderStatus {
+                kind: Some(ProviderKind::ProtectedFile),
+                state: StorageState::Available,
+            }
+        }
+
+        fn load(&self) -> std::result::Result<Option<SecretBundle>, secrets::Error> {
+            self.0
+                .borrow()
+                .as_ref()
+                .map(|bytes| SecretBundle::new(bytes.clone()))
+                .transpose()
+        }
+
+        fn replace(&mut self, bundle: &SecretBundle) -> std::result::Result<(), secrets::Error> {
+            *self.0.borrow_mut() = Some(bundle.expose().to_vec());
+            Ok(())
+        }
+    }
+
+    fn test_config() -> Config {
+        Config::new(
+            HostId::try_from(HOST.to_owned()).unwrap(),
+            IpcProfileId::from_bytes([0x66; 16]).unwrap(),
+            "https://auth.lomi.dev".to_owned(),
+            PublicClientId::try_from("lomi-test-client".to_owned()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn ready_storage(config: &Config) -> MemoryStorage {
+        let host_id = config.host.to_bytes();
+        let account = AccountId::try_from(ACCOUNT.to_owned()).unwrap();
+        let family = HostAuthorizationId::try_from(FAMILY.to_owned()).unwrap();
+        let pending = crypto(PendingHostIdentity::generate(host_id, 1)).unwrap();
+        let commitment = crypto(pending.signed_commitment()).unwrap();
+        let pin = crypto(commitment.descriptor.commitment()).unwrap();
+        let seed = crypto(pending.export_secret_seed_blob()).unwrap();
+        let identity = crypto(pending.finalize(account.to_bytes(), &pin)).unwrap();
+        let signed = identity.public_bundle();
+        let operation = OperationId::try_from(ROTATION.to_owned()).unwrap();
+        let credentials = Credentials {
+            account,
+            host: config.host,
+            family,
+            access: Text::new("initial_access_credential".to_owned()),
+            refresh: Text::new("initial_refresh_credential".to_owned()),
+            operation,
+            expires: NOW + 300,
+        };
+        let record = Record {
+            version: 3,
+            observed_at: NOW,
+            config: config.clone(),
+            seed: Seed(seed),
+            commitment,
+            pin,
+            account_pin: Some(AccountPin {
+                account: Some(account),
+            }),
+            lifecycle: State::Ready {
+                account,
+                signed,
+                credentials,
+                epoch: 2,
+            },
+        };
+        let bytes = encode(&record).unwrap().expose().to_vec();
+        MemoryStorage(Rc::new(RefCell::new(Some(bytes))))
+    }
+
+    #[test]
+    fn exact_retirement_survives_provider_reopen_without_changing_rotation_record() {
+        let config = test_config();
+        let mut storage = ready_storage(&config);
+        let operation = OperationId::try_from(RETIREMENT.to_owned()).unwrap();
+        let retirement_now = NOW + 301;
+        let (request, intent, stored_rotation) = {
+            let observer = storage.clone();
+            let mut auth = HostAuth::open(&mut storage, config.clone(), NOW).unwrap();
+            auth.prepare_rotation(NOW).unwrap();
+            auth.rotation_request(NOW).unwrap();
+            let stored_rotation = observer.0.borrow().as_ref().unwrap().clone();
+            let binding = auth.self_retirement_binding().unwrap();
+            let intent = HostSelfRetirementIntent {
+                binding,
+                operation_id: operation,
+                prepared_at: DecimalU64(retirement_now),
+                expires_at: DecimalU64(retirement_now + 300),
+            };
+            let request = auth
+                .self_retirement_request(&intent, retirement_now)
+                .unwrap();
+            assert_eq!(
+                observer.0.borrow().as_ref().unwrap().as_slice(),
+                stored_rotation.as_slice()
+            );
+            (request, intent, stored_rotation)
+        };
+        {
+            let observer = storage.clone();
+            let mut reopened =
+                HostAuth::open(&mut storage, config.clone(), retirement_now).unwrap();
+            assert_eq!(
+                reopened.rotation_request(retirement_now),
+                Err(Error::Expired)
+            );
+            assert_eq!(
+                reopened
+                    .self_retirement_request(&intent, retirement_now)
+                    .unwrap(),
+                request
+            );
+            assert_eq!(
+                observer.0.borrow().as_ref().unwrap().as_slice(),
+                stored_rotation.as_slice()
+            );
+
+            let mut stale = request.clone();
+            stale.expected_host_access_epoch = DecimalU64(3);
+            assert_eq!(
+                reopened.accept_self_retirement(
+                    config.origin(),
+                    &stale,
+                    HostRevokeResult {
+                        host_id: config.host,
+                        host_access_epoch: DecimalU64(3),
+                    },
+                    retirement_now,
+                ),
+                Err(Error::InvalidResponse)
+            );
+            assert_eq!(
+                observer.0.borrow().as_ref().unwrap().as_slice(),
+                stored_rotation.as_slice()
+            );
+            reopened
+                .accept_self_retirement(
+                    config.origin(),
+                    &request,
+                    HostRevokeResult {
+                        host_id: config.host,
+                        host_access_epoch: DecimalU64(3),
+                    },
+                    retirement_now,
+                )
+                .unwrap();
+            assert_eq!(reopened.status(), Status::Revoked);
+        }
+        assert_ne!(
+            storage.0.borrow().as_ref().unwrap().as_slice(),
+            stored_rotation.as_slice()
+        );
+        let reopened = HostAuth::open(&mut storage, config, retirement_now).unwrap();
+        assert_eq!(reopened.status(), Status::Revoked);
+    }
+
+    #[test]
+    fn self_retirement_request_rejects_rebound_and_expired_intents() {
+        let config = test_config();
+        let mut storage = ready_storage(&config);
+        let auth = HostAuth::open(&mut storage, config, NOW).unwrap();
+        let binding = auth.self_retirement_binding().unwrap();
+        let intent = HostSelfRetirementIntent {
+            binding,
+            operation_id: OperationId::try_from(RETIREMENT.to_owned()).unwrap(),
+            prepared_at: DecimalU64(NOW),
+            expires_at: DecimalU64(NOW + 300),
+        };
+        let future = HostSelfRetirementIntent {
+            prepared_at: DecimalU64(NOW + 31),
+            expires_at: DecimalU64(NOW + 331),
+            ..intent.clone()
+        };
+        assert!(auth.self_retirement_request(&future, NOW).is_err());
+        assert!(auth.self_retirement_request(&intent, NOW + 300).is_err());
+        drop(auth);
+        let mut storage = ready_storage(&test_config());
+        let auth = HostAuth::open(&mut storage, test_config(), NOW).unwrap();
+        let mut tampered = Vec::new();
+        let mut changed = intent.clone();
+        changed.binding.host_id =
+            HostId::try_from("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned()).unwrap();
+        tampered.push(changed);
+        let mut changed = intent.clone();
+        changed.binding.account_id =
+            AccountId::try_from("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned()).unwrap();
+        tampered.push(changed);
+        let mut changed = intent.clone();
+        changed.binding.host_authorization_id =
+            HostAuthorizationId::try_from("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned())
+                .unwrap();
+        tampered.push(changed);
+        let mut changed = intent.clone();
+        changed.binding.expected_host_access_epoch = DecimalU64(3);
+        tampered.push(changed);
+        let mut changed = intent.clone();
+        changed.binding.host_key_fingerprint[0] ^= 1;
+        tampered.push(changed);
+        let mut changed = intent;
+        changed.binding.refresh_hash[0] ^= 1;
+        tampered.push(changed);
+        for intent in tampered {
+            assert!(auth.self_retirement_request(&intent, NOW).is_err());
+        }
+    }
 }

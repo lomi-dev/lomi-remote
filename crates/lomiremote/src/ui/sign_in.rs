@@ -5,8 +5,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use lomi_remote_protocol::{
     DecimalU64, OperationId,
     ipc::{
-        LocalAuthPhase, LocalAuthStorage, LocalCall, LocalLoginAccepted, LocalLoginPresentation,
-        LocalLoginStart, LocalLoginStatus, LocalResult,
+        LocalAuthNetwork, LocalAuthPhase, LocalAuthStorage, LocalCall, LocalLoginAccepted,
+        LocalLoginPresentation, LocalLoginStart, LocalLoginStatus, LocalResult,
     },
 };
 use ratatui::{
@@ -326,7 +326,7 @@ impl SignIn {
             self.request_configuration();
             return;
         }
-        if self.is_revoking() {
+        if self.is_revoking() && !self.can_retry_pending_revoke() {
             self.modal_open = true;
             self.focus = Focus::Close;
             return;
@@ -388,7 +388,11 @@ impl SignIn {
     }
 
     fn issue_login_start(&mut self, backend: &mut impl Backend, now: Instant) {
-        if self.ready() || self.is_revoking() || self.is_locked() || self.needs_configuration() {
+        if self.ready()
+            || (self.is_revoking() && !self.can_retry_pending_revoke())
+            || self.is_locked()
+            || self.needs_configuration()
+        {
             self.start_requested = false;
             return;
         }
@@ -426,6 +430,19 @@ impl SignIn {
     }
 
     fn accept_login_start(&mut self, accepted: LocalLoginAccepted, now: Instant) {
+        if self.is_revoking() {
+            self.clear_presentation();
+            self.presentation_requested = false;
+            self.presentation_expired = false;
+            self.active_operation_id = None;
+            self.active_generation = None;
+            self.start_operation_id = None;
+            self.start_accepted_at = Some(now);
+            self.login_error = None;
+            self.modal_open = false;
+            self.status_message = Some("Sign-in will continue when sign-out finishes.");
+            return;
+        }
         let accepted_context = LoginContext {
             generation: accepted.generation,
             operation_id: accepted.operation_id,
@@ -641,13 +658,17 @@ impl SignIn {
         }
 
         if self.is_revoking() {
+            let start_accepted_at = self.start_accepted_at;
             self.clear_secrets();
+            self.start_accepted_at = start_accepted_at;
             self.start_operation_id = None;
             self.modal_open = false;
             self.login_error = None;
-            self.status_message = Some(
-                "Account access is being revoked. Sign-in is unavailable until that finishes.",
-            );
+            self.status_message = Some(if self.can_retry_pending_revoke() {
+                "Finishing sign-out. Try signing in again to reconnect."
+            } else {
+                "Account access is being revoked. Sign-in is unavailable until that finishes."
+            });
             return;
         }
         if self.is_locked() {
@@ -937,6 +958,14 @@ impl SignIn {
         })
     }
 
+    fn can_retry_pending_revoke(&self) -> bool {
+        self.status.as_ref().is_some_and(|status| {
+            (status.pending_cloud_revoke || status.phase == LocalAuthPhase::PendingRevoke)
+                && status.network == LocalAuthNetwork::Unavailable
+                && status.storage == LocalAuthStorage::Available
+        })
+    }
+
     fn is_locked(&self) -> bool {
         // `locked` is the Host's authorization gate and is expected during
         // sign-in. Only storage locking prevents access to the credential
@@ -1002,7 +1031,10 @@ impl SignIn {
     }
 
     fn can_start_login(&self) -> bool {
-        if self.needs_configuration() || self.is_revoking() || self.is_locked() {
+        if self.needs_configuration()
+            || (self.is_revoking() && !self.can_retry_pending_revoke())
+            || self.is_locked()
+        {
             return false;
         }
         if self.has_active_login() && !self.presentation_expired {
@@ -1125,9 +1157,11 @@ impl SignIn {
             return Some(message);
         }
         if self.is_revoking() {
-            return Some(
-                "Account access is being revoked. Sign-in is unavailable until that finishes.",
-            );
+            return Some(if self.can_retry_pending_revoke() {
+                "Finishing sign-out. Try signing in again to reconnect."
+            } else {
+                "Account access is being revoked. Sign-in is unavailable until that finishes."
+            });
         }
         if self.is_locked() {
             return Some("Credential storage is locked. Unlock it or run the setup wizard.");
@@ -1185,7 +1219,9 @@ impl SignIn {
             u16::from(area.height > 0),
         );
         if !button.is_empty() {
-            let label = if self.has_active_login() && !self.presentation_expired {
+            let label = if self.can_retry_pending_revoke() {
+                "Try signing in again"
+            } else if self.has_active_login() && !self.presentation_expired {
                 "Continue sign in"
             } else {
                 "Sign in"
@@ -1308,7 +1344,7 @@ impl SignIn {
                 );
                 let primary_label = match action {
                     Some(PrimaryAction::OpenBrowser) => "Open browser",
-                    Some(PrimaryAction::StartLogin) => "Try sign in again",
+                    Some(PrimaryAction::StartLogin) => "Try signing in again",
                     None => unreachable!(),
                 };
                 draw_button(
@@ -1971,6 +2007,44 @@ mod tests {
         sign_in.poll(&mut backend);
         assert_eq!(backend.start_operation_ids, [original_operation_id; 2]);
         assert_eq!(sign_in.start_operation_id, Some(original_operation_id));
+    }
+
+    #[test]
+    fn pending_revoke_offers_only_explicit_debounced_sign_in_retry() {
+        let mut pending = status(LocalAuthPhase::PendingRevoke);
+        pending.pending_cloud_revoke = true;
+        pending.network = LocalAuthNetwork::Unavailable;
+        let mut backend = FakeBackend {
+            status: Some(pending),
+            ..FakeBackend::default()
+        };
+        let mut sign_in = SignIn::default();
+        sign_in.poll(&mut backend);
+        assert_eq!(sign_in.primary_action(), Some(PrimaryAction::StartLogin));
+        assert!(!sign_in.ready());
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| sign_in.draw(frame)).unwrap();
+        assert!(text(&terminal).contains("Try signing in again"));
+
+        sign_in.handle_key(key(KeyCode::Enter), &mut backend);
+        sign_in.poll(&mut backend);
+        assert_eq!(backend.start_calls, 1);
+        let first_operation = backend.start_operation_ids[0];
+        assert!(sign_in.start_accepted_at.is_some());
+
+        sign_in.handle_key(key(KeyCode::Enter), &mut backend);
+        sign_in.poll(&mut backend);
+        assert_eq!(
+            backend.start_calls, 1,
+            "accepted retry keeps the normal debounce"
+        );
+
+        sign_in.start_accepted_at = Some(Instant::now() - START_STATUS_GRACE);
+        sign_in.handle_key(key(KeyCode::Enter), &mut backend);
+        sign_in.poll(&mut backend);
+        assert_eq!(backend.start_calls, 2);
+        assert_ne!(backend.start_operation_ids[1], first_operation);
     }
 
     #[test]
