@@ -1330,4 +1330,4 @@ fn verify_expired(
 
 #[cfg(test)]
 #[path = "channel_tests.rs"]
-mod tests;
+pub(super) mod tests;

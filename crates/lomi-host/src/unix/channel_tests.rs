@@ -1,17 +1,25 @@
 use super::*;
+use lomi_host_auth::peer_policy::{LocalWorkspace, RemoteOrigin};
 use lomi_host_auth::{Config, HostAuth};
-use lomi_host_store::{CloudPairingScope, HostStore, Limits, PairingDecisionPreparation};
+use lomi_host_store::{
+    AcknowledgedWorkspaceGrant, CloudPairingScope, HostStore, Limits, OperationBinding,
+    PairingDecisionPreparation,
+};
 use lomi_platform::secrets::{
     ProviderKind, ProviderStatus, SecretBundle, SecretStorage, StorageState,
 };
 use lomi_remote_crypto::{
-    ChannelContextV3, ChannelPurposeV3, GrantPurposeV3, GrantV3, HostEnrollmentChallengeContext,
-    Identity, Role, prepare_host_enrollment_challenge, verify_host_key_initiation,
+    ChannelContextV3, ChannelPurposeV3, CurrentAuthorityV3, GrantPurposeV3, GrantV3, Handshake,
+    HostEnrollmentChallengeContext, Identity, Role, SignedBundle, SignedChannelAdmissionV3,
+    SignedGrantV3, prepare_host_enrollment_challenge, verify_host_key_initiation,
 };
 use lomi_remote_protocol::{
-    DecimalU64, HostAuthorizationResult, HostEnrollmentTokenContext, HostId, HostRegisterResult,
-    LocalIpcVersion,
+    Capability, CapabilitySet, DecimalU64, HostAuthorizationResult, HostEnrollmentTokenContext,
+    HostId, HostRegisterResult, LocalIpcVersion, OperationId, OperationResult, OperationState,
+    StoredOperationRights, TerminalContext, TerminalProfile, WorkspaceContext,
+    http::{PublicationTerminals, PublishedTerminal},
     ipc::{LocalAuthConfiguration, LocalAuthProvider, LocalFileAcknowledgement},
+    rpc::{PaneState, TerminalLayout, TerminalPane, TerminalTab},
 };
 use std::{
     collections::BTreeMap,
@@ -74,12 +82,140 @@ struct Calls {
     get: usize,
     admit: usize,
 }
-struct TestApi {
+pub(in crate::unix::auth) struct TestApi {
     pending: Mutex<ChannelPendingResult>,
     pending_error: Option<lomi_host_http::Error>,
     by_id: BTreeMap<ChannelId, ChannelAdmissionInputs>,
     calls: Mutex<Calls>,
     pending_delay: Mutex<Duration>,
+    pub(in crate::unix::auth) terminal: Option<TerminalFixture>,
+    pub(in crate::unix::auth) cancelled: Arc<AtomicBool>,
+}
+
+pub(in crate::unix::auth) struct TerminalFixture {
+    pub(in crate::unix::auth) coordinator: Arc<Coordinator>,
+    pub(in crate::unix::auth) source: AcknowledgedWorkspaceGrant,
+    pub(in crate::unix::auth) context: ChannelContextV3,
+    pub(in crate::unix::auth) signed_grant: SignedGrantV3,
+    pub(in crate::unix::auth) admission: SignedChannelAdmissionV3,
+    pub(in crate::unix::auth) consumer: Identity,
+    pub(in crate::unix::auth) host: lomi_host_auth::PublicHostIdentity,
+    pub(in crate::unix::auth) origin: RemoteOrigin,
+    pub(in crate::unix::auth) workspace: WorkspaceContext,
+    pub(in crate::unix::auth) local: LocalWorkspace,
+    pub(in crate::unix::auth) publication: lomi_host_store::HostAcknowledgedPublication,
+    pub(in crate::unix::auth) terminal: TerminalContext,
+}
+
+pub(in crate::unix::auth) fn establish_terminal_connection(
+    auth: &HostAuth<'_, dyn SecretStorage + '_>,
+    runtime: Runtime<'_>,
+    eligibility: &PeerEligibility,
+    fixture: &TerminalFixture,
+) -> (
+    super::super::remote_connection::RemoteConnectionState,
+    lomi_remote_crypto::Channel,
+) {
+    let context = &fixture.context;
+    let host_bundle = SignedBundle::from_wire(&fixture.host.identity).unwrap();
+    let consumer_bundle = fixture.consumer.public_bundle();
+    let consumer_proof = consumer_bundle.to_wire().unwrap();
+    let consumer_pin = consumer_bundle.bundle.fingerprint().unwrap();
+    let grant = &context.grant;
+    let authority = CurrentAuthorityV3 {
+        host_authorization_id: grant.host_authorization_id,
+        consumer_authorization_id: grant.consumer_authorization_id,
+        account_session_id: grant.account_session_id.clone(),
+        access_epoch: grant.access_epoch,
+        grant_revision: grant.grant_revision,
+        workspace_epoch: grant.workspace_epoch,
+        runtime_id: grant.runtime_id,
+        runtime_generation: grant.runtime_generation,
+        terminal_membership: None,
+    };
+    let peer = super::super::remote_connection::PeerRead {
+        origin: &fixture.origin,
+        request_started: eligibility.heartbeat.request_started,
+        wall_at_request_start: eligibility.heartbeat.wall_at_request_start,
+        original_heartbeat: &eligibility.heartbeat,
+        consumer_window: WindowIdentityId::from_bytes(grant.consumer_id).unwrap(),
+        consumer_identity: &consumer_proof,
+        consumer_pin,
+        signed_grant: &fixture.signed_grant,
+        authority: &authority,
+        authority_expires_at: grant.expires_at,
+    };
+    let facts = super::super::remote_connection::OwnerFacts {
+        protected_host: &fixture.host,
+        origin: &fixture.origin,
+        scope: &eligibility.binding.scope,
+        runtime: &eligibility.binding.server_runtime,
+        heartbeat: &eligibility.heartbeat,
+        acknowledged: &fixture.publication,
+        local: &fixture.local,
+        running: &[],
+        auth_ready: true,
+        access_expires_at: auth.credential_deadlines().unwrap().access_expires_at,
+        refresh_at: auth.credential_deadlines().unwrap().refresh_at,
+        authorization_locked: false,
+        pending_login: false,
+        pending_logout: false,
+        pending_revoke: false,
+        pending_publication: false,
+        peer_revoked: false,
+        gate_denied: runtime.gate,
+        paused: runtime.paused,
+        stopping: runtime.stopping,
+        cancelled: runtime.operation.cancellation_latch(),
+    };
+    let canonical = context.canonical().unwrap();
+    let mut sample = || super::super::remote_connection::TrustedNow {
+        wall: Duration::from_secs(runtime.projected_time()),
+        monotonic: Instant::now(),
+    };
+    let mut pending = super::super::remote_connection::PendingRemoteConnection::begin(
+        auth,
+        super::super::remote_connection::AdmissionInputs {
+            canonical_context: &canonical,
+            signed_grant: &fixture.signed_grant,
+            admission: &fixture.admission,
+            peer,
+        },
+        &facts,
+        &mut sample,
+    )
+    .unwrap();
+    let verified = fixture
+        .admission
+        .verify(
+            &fixture.signed_grant,
+            context,
+            &host_bundle,
+            &fixture.host.fingerprint,
+            &consumer_bundle,
+            &consumer_pin,
+            &authority,
+            runtime.projected_time(),
+        )
+        .unwrap();
+    let mut initiator = Handshake::new_v3(
+        true,
+        &fixture.consumer,
+        verified,
+        &host_bundle,
+        &fixture.host.fingerprint,
+        runtime.projected_time(),
+    )
+    .unwrap();
+    let first = initiator.write().unwrap();
+    pending.read(&first, &facts, &mut sample).unwrap();
+    let second = pending.write(&facts, &mut sample).unwrap();
+    initiator.read(&second).unwrap();
+    let third = initiator.write().unwrap();
+    pending.read(&third, &facts, &mut sample).unwrap();
+    let host = pending.finish(&facts, &mut sample).unwrap();
+    let consumer = initiator.finish().unwrap();
+    (host, consumer)
 }
 impl TestApi {
     fn calls(&self) -> Calls {
@@ -147,6 +283,35 @@ fn with_fixture(
         &TestApi,
     ),
 ) {
+    with_fixture_mode(count, duplicate, false, test)
+}
+
+pub(in crate::unix::auth) fn with_terminal_fixture(
+    test: impl FnOnce(
+        &mut HostAuth<'_, dyn SecretStorage + '_>,
+        &Config,
+        Runtime<'_>,
+        &PeerEligibility,
+        &SharedOwner,
+        &TestApi,
+    ),
+) {
+    with_fixture_mode(1, false, true, test)
+}
+
+fn with_fixture_mode(
+    count: usize,
+    duplicate: bool,
+    terminal_mode: bool,
+    test: impl FnOnce(
+        &mut HostAuth<'_, dyn SecretStorage + '_>,
+        &Config,
+        Runtime<'_>,
+        &PeerEligibility,
+        &SharedOwner,
+        &TestApi,
+    ),
+) {
     assert!((1..=3).contains(&count));
     let directory = TestDirectory::new();
     let database = directory.0.join("host.sqlite3");
@@ -170,6 +335,20 @@ fn with_fixture(
         protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
     };
     store.configure_auth(&local_config).unwrap();
+    let profile = directory.0.join("profile");
+    let mut profile_lock = if terminal_mode {
+        fs::create_dir(&profile).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let lock = platform::OwnerLock::acquire(&profile).unwrap();
+        public_configuration::startup(&mut store, lock.profile()).unwrap();
+        Some(lock)
+    } else {
+        None
+    };
 
     let mut storage = MemoryStorage(None);
     let mut auth = HostAuth::open(
@@ -250,12 +429,22 @@ fn with_fixture(
     store.enable_authorization(0).unwrap();
     let workspace_root = directory.0.join("workspace");
     fs::create_dir(&workspace_root).unwrap();
-    let project = store
+    let mut terminal_service = terminal_mode.then(lomi_terminal::TerminalService::new);
+    let mut project = store
         .add_project(
             &workspace_root,
             "channel tests".to_owned().try_into().unwrap(),
         )
         .unwrap();
+    let terminal_context = if let Some(service) = terminal_service.as_ref() {
+        let terminal = seed_running_terminal(&mut store, &project, service);
+        Some(terminal)
+    } else {
+        None
+    };
+    if terminal_mode {
+        project = store.workspace(project.state.context.workspace_id).unwrap();
+    }
     store
         .share(project.state.context.workspace_id, project.fence)
         .unwrap();
@@ -285,6 +474,26 @@ fn with_fixture(
         .acknowledged_host_publication(&state)
         .unwrap()
         .unwrap();
+    let local = LocalWorkspace {
+        workspace_id: project.state.context.workspace_id,
+        workspace_epoch: project.state.context.workspace_epoch,
+        fence: project.fence,
+        consent: project.consent,
+        running_terminals: PublicationTerminals::try_from(
+            terminal_context
+                .as_ref()
+                .map(|terminal| {
+                    vec![PublishedTerminal {
+                        pane_id: terminal.pane_id,
+                        session_id: terminal.session_id,
+                        session_epoch: terminal.session_epoch,
+                    }]
+                })
+                .unwrap_or_default(),
+        )
+        .unwrap(),
+        capability_ceiling: None,
+    };
     let host = auth.public_host_identity(wall).unwrap();
     let consumer =
         Identity::generate(host.account_id.to_bytes(), [3; 16], Role::Device, 1).unwrap();
@@ -326,7 +535,18 @@ fn with_fixture(
         workspace_epoch: project.state.context.workspace_epoch.to_bytes(),
         runtime_id: runtime_binding.runtime_id.to_bytes(),
         runtime_generation: runtime_binding.runtime_generation.0,
-        capabilities: vec![Capability::WorkspaceRead].try_into().unwrap(),
+        capabilities: if terminal_mode {
+            vec![
+                Capability::WorkspaceRead,
+                Capability::TerminalObserve,
+                Capability::TerminalControl,
+                Capability::TerminalManage,
+            ]
+            .try_into()
+            .unwrap()
+        } else {
+            vec![Capability::WorkspaceRead].try_into().unwrap()
+        },
         nonce: [10; 32],
         expires_at: wall + 120,
         purpose: GrantPurposeV3::Workspace,
@@ -372,18 +592,36 @@ fn with_fixture(
             wall,
         )
         .unwrap();
+    let source = store
+        .acknowledged_workspace_grants()
+        .unwrap()
+        .into_iter()
+        .find(|source| {
+            source.intent.preparation.pairing_id == pairing_intent.preparation.pairing_id
+        })
+        .unwrap();
 
-    let worker = SharedOwner::new(store).unwrap();
-    let cancelled = AtomicBool::new(false);
+    let coordinator_stopping = Arc::new(AtomicBool::new(false));
+    let (coordinator, worker) = match terminal_service.take() {
+        Some(service) => {
+            let coordinator = Arc::new(
+                Coordinator::with_terminals(store, coordinator_stopping.clone(), service).unwrap(),
+            );
+            (Some(coordinator.clone()), coordinator.owner.clone())
+        }
+        None => (None, SharedOwner::new(store).unwrap()),
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
     let operation =
-        owner_domain::Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        owner_domain::Operation::new(Instant::now() + Duration::from_secs(30), cancelled.as_ref());
     worker.seed_test_ready(&operation, &auth).unwrap();
+    let runtime_base = wall_now();
     let started = Instant::now();
     let heartbeat = cloud::HeartbeatObservation {
         scope: scope.clone(),
         runtime: runtime_binding.clone(),
         request_started: started,
-        wall_at_request_start: wall,
+        wall_at_request_start: runtime_base,
         lease_ms: 30_000,
         freshness_ms: 5_000,
     };
@@ -396,6 +634,7 @@ fn with_fixture(
 
     let mut channels = Vec::new();
     let mut by_id = BTreeMap::new();
+    let mut established_context = None;
     for index in 0..count {
         let channel_id = ChannelId::from_bytes([31 + index as u8; 16]).unwrap();
         let context = ChannelContextV3 {
@@ -409,6 +648,9 @@ fn with_fixture(
             issued_at: wall,
             expires_at: wall + 30,
         };
+        if index == 0 {
+            established_context = Some(context.clone());
+        }
         let context_value = serde_json::to_value(&context).unwrap();
         let inputs = ChannelAdmissionInputs {
             expected_context: hex(&context.canonical().unwrap()).try_into().unwrap(),
@@ -420,6 +662,33 @@ fn with_fixture(
         by_id.insert(channel_id, inputs.clone());
         channels.push(PendingChannel { channel_id, inputs });
     }
+    let terminal = match coordinator {
+        Some(coordinator) => {
+            let context = established_context.clone().unwrap();
+            Some(TerminalFixture {
+                coordinator,
+                source,
+                context: context.clone(),
+                signed_grant: SignedGrantV3::from_wire(&signed_wire).unwrap(),
+                admission: auth.sign_channel_admission_v3(&context, wall).unwrap(),
+                consumer,
+                host: eligibility.identity.clone(),
+                origin: RemoteOrigin::new(&config, "https://remote.example".into()).unwrap(),
+                workspace: WorkspaceContext {
+                    workspace_id: project.state.context.workspace_id,
+                    workspace_epoch: project.state.context.workspace_epoch,
+                    runtime_id: runtime_binding.runtime_id,
+                    runtime_generation: runtime_binding.runtime_generation,
+                    host_access_epoch: runtime_binding.host_access_epoch,
+                    grant_revision: authority.grant_revision,
+                },
+                local,
+                publication: eligibility.publication.clone(),
+                terminal: terminal_context.clone().unwrap(),
+            })
+        }
+        None => None,
+    };
     let api = TestApi {
         pending: Mutex::new(ChannelPendingResult {
             channels: PendingChannels::try_from(channels).unwrap(),
@@ -432,16 +701,22 @@ fn with_fixture(
             admit: 0,
         }),
         pending_delay: Mutex::new(Duration::ZERO),
+        terminal,
+        cancelled: cancelled.clone(),
     };
 
-    let profile = directory.0.join("profile");
-    fs::create_dir(&profile).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let owner_lock = platform::OwnerLock::acquire(&profile).unwrap();
+    let owner_lock = match profile_lock.take() {
+        Some(lock) => lock,
+        None => {
+            fs::create_dir(&profile).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            platform::OwnerLock::acquire(&profile).unwrap()
+        }
+    };
     let endpoint = Arc::new(
         platform::OwnerEndpoint::bind(
             owner_lock,
@@ -459,7 +734,7 @@ fn with_fixture(
     let paused = AtomicBool::new(false);
     let public_io = setup.enter_owned(&paused).unwrap().unwrap();
     let state_view = Mutex::new(initial());
-    let stopping = AtomicBool::new(false);
+    let stopping = coordinator_stopping;
     let (_sender, receiver) = mpsc::channel::<Command>();
     let retry_requested = AtomicBool::new(false);
     let gate = AtomicBool::new(false);
@@ -475,11 +750,114 @@ fn with_fixture(
         retry_requested: &retry_requested,
         gate: &gate,
         paused: &paused,
-        base: wall,
+        base: runtime_base,
         anchor,
         aborted: &aborted,
     };
     test(&mut auth, &config, runtime, &eligibility, &worker, &api);
+}
+
+fn seed_running_terminal(
+    store: &mut HostStore,
+    project: &lomi_host_store::ProjectRecord,
+    service: &lomi_terminal::TerminalService,
+) -> TerminalContext {
+    let pane_id = PaneId::from_bytes([0x93; 16]).unwrap();
+    let session_id = TerminalSessionId::from_bytes([0x91; 16]).unwrap();
+    let session_epoch = SessionEpoch::from_bytes([0x92; 16]).unwrap();
+    let operation_id = OperationId::from_bytes([0x94; 16]).unwrap();
+    let mut next = project.state.clone();
+    next.domain_revision = DecimalU64(next.domain_revision.0 + 1);
+    let terminal = TerminalContext {
+        workspace: next.context.clone(),
+        pane_id,
+        session_id,
+        session_epoch,
+        profile: TerminalProfile::ExperimentalRustGridV1,
+    };
+    next.tabs.0.push(TerminalTab {
+        tab_id: TabId::from_bytes([0x95; 16]).unwrap(),
+        name: "terminal renew fixture".to_owned().try_into().unwrap(),
+        layout: TerminalLayout::Pane {
+            pane: TerminalPane {
+                pane_id,
+                session: Some(terminal.clone()),
+                state: PaneState::Running,
+            },
+        },
+    });
+    let rights = StoredOperationRights::new(
+        operation_id,
+        ConsumerAuthorizationId::from_bytes([5; 16]).unwrap(),
+        project.state.context.workspace_id,
+        Method::TerminalCreate,
+        CapabilitySet::try_from(vec![
+            Capability::WorkspaceRead,
+            Capability::TerminalObserve,
+            Capability::TerminalManage,
+        ])
+        .unwrap(),
+        false,
+    )
+    .unwrap();
+    let call = lomi_remote_protocol::rpc::RpcCall::TerminalCreate(
+        lomi_remote_protocol::rpc::TerminalCreateParams {
+            mutation: MutationContext {
+                operation_id,
+                context: WorkspaceContext {
+                    workspace_id: project.state.context.workspace_id,
+                    workspace_epoch: project.state.context.workspace_epoch,
+                    runtime_id: project.state.context.runtime_id,
+                    runtime_generation: project.state.context.runtime_generation,
+                    host_access_epoch: DecimalU64(12),
+                    grant_revision: DecimalU64(2),
+                },
+                expected_revision: project.state.domain_revision,
+            },
+            tab_name: "terminal renew fixture".to_owned().try_into().unwrap(),
+            profile_id: "default".to_owned().try_into().unwrap(),
+        },
+    );
+    let binding = OperationBinding {
+        rights,
+        parameter_hash: lomi_host_store::parameter_hash(&call).unwrap(),
+    };
+    let (admission, permit) = store
+        .admit_start_external(&binding, project.state.domain_revision)
+        .unwrap();
+    assert!(admission.newly_admitted);
+    let permit = permit.expect("new terminal effect has its permit");
+    service
+        .spawn(
+            session_id,
+            session_epoch,
+            &lomi_terminal::SpawnProfile {
+                executable: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exec /bin/sleep 60".into()],
+                cwd: project.local_root.clone(),
+                environment: Vec::new(),
+                shell_integration: None,
+                rows: 24,
+                cols: 80,
+                history: 0,
+            },
+        )
+        .unwrap();
+    store
+        .complete_external(
+            &permit,
+            OperationState::Succeeded,
+            Effect::Committed,
+            Some(OperationResult::Terminal {
+                domain_revision: next.domain_revision,
+                pane_id,
+                session_id,
+                session_epoch,
+            }),
+            Some(next),
+        )
+        .unwrap();
+    terminal
 }
 
 fn wall_now() -> u64 {

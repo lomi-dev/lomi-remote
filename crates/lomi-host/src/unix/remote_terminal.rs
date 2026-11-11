@@ -127,6 +127,11 @@ fn lease_result(context: TerminalContext, lease: &ControlLease) -> TerminalLease
     }
 }
 impl RemoteTerminalState {
+    #[cfg(test)]
+    pub(super) fn principal_for_test(&self) -> &AuthenticatedConnection {
+        &self.principal
+    }
+
     /// Reports retained snapshot/delta bytes without advancing a subscription
     /// or consuming a queued terminal event.
     pub(super) fn has_immediate_output(&self) -> bool {
@@ -1109,6 +1114,33 @@ impl RemoteTerminalState {
                 .retain(|_, (context, _)| context != &frame.terminal);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl RemoteTerminalState {
+    pub(super) fn seed_test_lease(
+        &mut self,
+        connection: &RemoteConnectionState,
+        context: TerminalContext,
+        lease: ControlLease,
+    ) -> Result<TerminalLeaseResult, RemoteError> {
+        self.ready(connection)?;
+        let coordinator = self
+            .coordinator
+            .upgrade()
+            .ok_or_else(|| fault(ErrorCode::ServiceUnavailable))?;
+        if !coordinator.terminals.lease_is_current(
+            context.session_id,
+            context.session_epoch,
+            &self.principal,
+            &lease,
+        ) {
+            return Err(fault(ErrorCode::ControlRequired));
+        }
+        let result = lease_result(context.clone(), &lease);
+        self.leases.insert(lease.wire_token(), (context, lease));
+        Ok(result)
     }
 }
 

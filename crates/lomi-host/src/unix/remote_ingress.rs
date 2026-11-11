@@ -25,6 +25,121 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(test))]
+type IngressSocket = RelayConnection;
+#[cfg(test)]
+enum IngressSocket {
+    Relay(RelayConnection),
+    Memory(MemoryIngressSocket),
+}
+#[cfg(test)]
+#[derive(Default)]
+struct MemoryIngressSocket {
+    incoming: VecDeque<Vec<u8>>,
+    sent: Vec<Vec<u8>>,
+    closed: bool,
+    cancel_before_send: Option<std::sync::Arc<AtomicBool>>,
+    fail_after_write: bool,
+}
+#[cfg(test)]
+impl IngressSocket {
+    fn relay(socket: RelayConnection) -> Self {
+        Self::Relay(socket)
+    }
+    fn memory(incoming: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        Self::Memory(MemoryIngressSocket {
+            incoming: incoming.into_iter().collect(),
+            ..MemoryIngressSocket::default()
+        })
+    }
+    fn close(&mut self) {
+        match self {
+            Self::Relay(socket) => socket.close(),
+            Self::Memory(socket) => socket.closed = true,
+        }
+    }
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Relay(socket) => socket.is_closed(),
+            Self::Memory(socket) => socket.closed,
+        }
+    }
+    fn poll_binary(
+        &mut self,
+        deadline: Instant,
+        check: &(dyn Fn() -> Result<(), BudgetStop> + Sync),
+    ) -> Result<Poll<Vec<u8>>, lomi_host_http::Error> {
+        match self {
+            Self::Relay(socket) => socket.poll_binary(deadline, check),
+            Self::Memory(socket) => {
+                if socket.closed {
+                    return Err(lomi_host_http::Error::RelayClosed);
+                }
+                if Instant::now() >= deadline || check().is_err() {
+                    return Err(lomi_host_http::Error::Cancelled);
+                }
+                Ok(socket
+                    .incoming
+                    .pop_front()
+                    .map_or(Poll::Pending, Poll::Ready))
+            }
+        }
+    }
+    fn send_binary(
+        &mut self,
+        bytes: &[u8],
+        deadline: Instant,
+        check: &(dyn Fn() -> Result<(), BudgetStop> + Sync),
+    ) -> Result<(), lomi_host_http::Error> {
+        match self {
+            Self::Relay(socket) => socket.send_binary(bytes, deadline, check),
+            Self::Memory(socket) => {
+                if let Some(cancelled) = socket.cancel_before_send.take() {
+                    cancelled.store(true, Ordering::Release);
+                }
+                if socket.closed {
+                    return Err(lomi_host_http::Error::RelayClosed);
+                }
+                if bytes.is_empty() || Instant::now() >= deadline || check().is_err() {
+                    socket.closed = true;
+                    return Err(lomi_host_http::Error::Cancelled);
+                }
+                socket.sent.push(bytes.to_vec());
+                if socket.fail_after_write {
+                    socket.closed = true;
+                    return Err(lomi_host_http::Error::RelayClosed);
+                }
+                Ok(())
+            }
+        }
+    }
+    fn sent(&self) -> &[Vec<u8>] {
+        match self {
+            Self::Relay(_) => &[],
+            Self::Memory(socket) => &socket.sent,
+        }
+    }
+}
+#[cfg(not(test))]
+fn ingress_socket(socket: RelayConnection) -> IngressSocket {
+    socket
+}
+#[cfg(test)]
+fn ingress_socket(socket: RelayConnection) -> IngressSocket {
+    IngressSocket::relay(socket)
+}
+#[cfg(test)]
+fn relay_socket_mut(socket: &mut IngressSocket) -> &mut RelayConnection {
+    match socket {
+        IngressSocket::Relay(socket) => socket,
+        IngressSocket::Memory(_) => unreachable!("receipt publication requires a relay socket"),
+    }
+}
+#[cfg(not(test))]
+fn relay_socket_mut(socket: &mut IngressSocket) -> &mut RelayConnection {
+    socket
+}
+
 #[path = "remote_ingress_registry.rs"]
 mod registry;
 pub(super) use registry::Registry;
@@ -57,18 +172,6 @@ macro_rules! invalid_at {
 macro_rules! owner_error_at {
     () => {
         peer::owner_error
-    };
-}
-
-macro_rules! peer_boundary_at {
-    ($label:literal, $result:expr) => {
-        $result
-    };
-}
-
-macro_rules! invalid_none_at {
-    ($label:literal, $option:expr) => {
-        $option.ok_or(peer::PeerError::Invalid)
     };
 }
 
@@ -515,7 +618,7 @@ struct Connection<'cancel> {
     started_git_outputs: VecDeque<QueuedStartedOutput<'cancel>>,
     /// Reserved output bytes for a pending asynchronous Git response.
     git_output_reservation: usize,
-    socket: RelayConnection,
+    socket: IngressSocket,
     maintenance: super::OwnerOperation<'cancel>,
     suspended: bool,
     maintenance_aborted: std::cell::Cell<bool>,
@@ -1174,7 +1277,7 @@ impl<'cancel> Driver<'cancel> {
             watch_call: None,
             started_git_outputs: VecDeque::new(),
             git_output_reservation: 0,
-            socket,
+            socket: ingress_socket(socket),
             source,
             workspace,
             crypto: Crypto::ReadFirst(pending),
@@ -3429,21 +3532,15 @@ impl<'cancel> Connection<'cancel> {
                 aborted: &response.aborted,
                 ..runtime
             };
-            let current = peer_boundary_at!(
-                "response.current-proof",
-                current_proof(
-                    response.peer.take(),
-                    auth,
-                    request_runtime,
-                    eligibility,
-                    &self.source,
-                    self.peer_cutoff,
-                )
+            let current = current_proof(
+                response.peer.take(),
+                auth,
+                request_runtime,
+                eligibility,
+                &self.source,
+                self.peer_cutoff,
             )?;
-            let evidence = peer_boundary_at!(
-                "response.evidence",
-                request_runtime.remote_worker_evidence(auth, eligibility)
-            )?;
+            let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
             let frame = {
                 let turn = peer::owner_turn(request_runtime, || {
                     request_runtime.owner.try_remote_workspace_turn(
@@ -3484,8 +3581,9 @@ impl<'cancel> Connection<'cancel> {
                     .map_err(invalid_at!())?
             };
             self.peer_cutoff = current.fresh_until();
-            let send_deadline =
-                invalid_none_at!("response.io-deadline", current.io_deadline(&evidence))?;
+            let send_deadline = current
+                .io_deadline(&evidence)
+                .ok_or(peer::PeerError::Invalid)?;
             drop(evidence);
             if let Some(frame) = frame {
                 let operation = &response.operation;
@@ -3530,21 +3628,15 @@ impl<'cancel> Connection<'cancel> {
                 aborted: &stream.aborted,
                 ..runtime
             };
-            let current = peer_boundary_at!(
-                "stream.current-proof",
-                current_proof(
-                    stream.peer.take(),
-                    auth,
-                    stream_runtime,
-                    eligibility,
-                    &self.source,
-                    self.peer_cutoff,
-                )
+            let current = current_proof(
+                stream.peer.take(),
+                auth,
+                stream_runtime,
+                eligibility,
+                &self.source,
+                self.peer_cutoff,
             )?;
-            let evidence = peer_boundary_at!(
-                "stream.evidence",
-                stream_runtime.remote_worker_evidence(auth, eligibility)
-            )?;
+            let evidence = stream_runtime.remote_worker_evidence(auth, eligibility)?;
             let Crypto::Established(crypto) = &mut self.crypto else {
                 return Err(peer::PeerError::Invalid);
             };
@@ -3593,7 +3685,9 @@ impl<'cancel> Connection<'cancel> {
                     .ok_or(peer::PeerError::Invalid)?;
                 turn.seal_frame(crypto, &frame).map_err(invalid_at!())?
             };
-            let deadline = invalid_none_at!("stream.io-deadline", current.io_deadline(&evidence))?;
+            let deadline = current
+                .io_deadline(&evidence)
+                .ok_or(peer::PeerError::Invalid)?;
             self.peer_cutoff = current.fresh_until();
             let operation = &stream.operation;
             let owner = runtime.owner;
@@ -3832,11 +3926,10 @@ impl<'cancel> Connection<'cancel> {
                                 )
                             })?;
                             if current.observed_at() > self.applied_observation {
-                                turn.refresh_peer(&mut crypto).map_err(invalid_at!())?;
+                                turn.refresh_peer(&mut crypto).map_err(invalid)?;
                                 self.applied_observation = current.observed_at();
                             }
-                            turn.open_frame(&mut crypto, &bytes)
-                                .map_err(invalid_at!())?
+                            turn.open_frame(&mut crypto, &bytes).map_err(invalid)?
                         };
                         if let Some(message) = self
                             .assembler
@@ -3997,35 +4090,76 @@ impl<'cancel> Connection<'cancel> {
             }
         }
         if let Some((request, received)) = request {
-            // A request uses a different admission. Do not later try to refresh
-            // the channel from an older maintenance observation.
-            self.peer = None;
-            let deadline = received
+            let terminal_renew = matches!(&request.call, RpcCall::TerminalRenew(_));
+            let request_deadline = received
                 .checked_add(Duration::from_millis(request.timeout_ms.get()))
                 .ok_or(peer::PeerError::Invalid)?
                 .min(worker_deadline);
-            let operation =
-                super::OwnerOperation::new(deadline, cancelled.ok_or(peer::PeerError::Invalid)?);
-            let aborted = std::cell::Cell::new(false);
+            let (mut operation, aborted, cached_peer) = if terminal_renew {
+                let replacement_maintenance = super::OwnerOperation::new(
+                    worker_deadline,
+                    cancelled.ok_or(peer::PeerError::Invalid)?,
+                );
+                let (operation, aborted, peer) = transfer_maintenance_to_stream(
+                    &mut self.maintenance,
+                    &mut self.maintenance_aborted,
+                    &mut self.peer,
+                    replacement_maintenance,
+                );
+                (operation, aborted, peer)
+            } else {
+                // Other RPCs use a different admission and cannot refresh the
+                // channel from this maintenance observation.
+                self.peer = None;
+                (
+                    super::OwnerOperation::new(
+                        request_deadline,
+                        cancelled.ok_or(peer::PeerError::Invalid)?,
+                    ),
+                    std::cell::Cell::new(false),
+                    None,
+                )
+            };
+            if terminal_renew {
+                operation.cap_deadline(request_deadline);
+            }
             let request_runtime = Runtime {
                 operation: &operation,
                 aborted: &aborted,
                 ..runtime
             };
-            let current = peer_boundary_at!(
-                "request.current-get",
-                peer::Worker::default().read_current_pairing_bounded(
+            let (current, evidence) = if terminal_renew {
+                let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
+                if let Some(current) = terminal_renew_cached_proof(
+                    cached_peer,
+                    request_runtime,
+                    self.peer_cutoff,
+                    &evidence,
+                ) {
+                    (current, evidence)
+                } else {
+                    drop(evidence);
+                    let current = peer::Worker::default().read_current_pairing_bounded(
+                        auth,
+                        request_runtime,
+                        eligibility,
+                        self.source.clone(),
+                        self.peer_cutoff,
+                    )?;
+                    let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
+                    (current, evidence)
+                }
+            } else {
+                let current = peer::Worker::default().read_current_pairing_bounded(
                     auth,
                     request_runtime,
                     eligibility,
                     self.source.clone(),
                     self.peer_cutoff,
-                )
-            )?;
-            let evidence = peer_boundary_at!(
-                "request.evidence",
-                request_runtime.remote_worker_evidence(auth, eligibility)
-            )?;
+                )?;
+                let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
+                (current, evidence)
+            };
             let Crypto::Established(crypto) = &mut self.crypto else {
                 return Err(peer::PeerError::Invalid);
             };
@@ -4144,20 +4278,15 @@ impl<'cancel> Connection<'cancel> {
                 // Store cancellation can race authorization maintenance. A
                 // response always re-enters the ordinary current-pairing and
                 // WorkspaceRead/stored-rights gates before disclosure.
-                let response_current = peer_boundary_at!(
-                    "operation.response-current-get",
-                    peer::Worker::default().read_current_pairing_bounded(
-                        auth,
-                        request_runtime,
-                        eligibility,
-                        self.source.clone(),
-                        self.peer_cutoff,
-                    )
+                let response_current = peer::Worker::default().read_current_pairing_bounded(
+                    auth,
+                    request_runtime,
+                    eligibility,
+                    self.source.clone(),
+                    self.peer_cutoff,
                 )?;
-                let response_evidence = peer_boundary_at!(
-                    "operation.response-evidence",
-                    request_runtime.remote_worker_evidence(auth, eligibility)
-                )?;
+                let response_evidence =
+                    request_runtime.remote_worker_evidence(auth, eligibility)?;
                 {
                     let turn = peer::owner_turn(request_runtime, || {
                         request_runtime.owner.try_remote_workspace_turn(
@@ -4295,7 +4424,7 @@ impl<'cancel> Connection<'cancel> {
                         };
                         let sealed = frame.seal(crypto).map_err(rename_invalid)?;
                         sealed
-                            .send(crypto, &mut self.socket)
+                            .send(crypto, relay_socket_mut(&mut self.socket))
                             .map_err(invalid_at!())?;
                         // Any subsequent request still needs ordinary fresh
                         // authority after publication; never replay this result.
@@ -4519,8 +4648,58 @@ impl<'cancel> Connection<'cancel> {
                 }
             };
             self.peer_cutoff = current.fresh_until();
-            drop(evidence);
             let bytes = serde_json::to_vec(&response).map_err(invalid_at!())?;
+            if terminal_renew && frame_count(bytes.len()) == 1 {
+                self.encoder
+                    .begin(MessageKind::RpcResponse, bytes)
+                    .map_err(invalid_at!())?;
+                let frame = {
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            &current,
+                            &self.workspace,
+                        )
+                    })?;
+                    let Crypto::Established(crypto) = &mut self.crypto else {
+                        return Err(peer::PeerError::Invalid);
+                    };
+                    if current.observed_at() > self.applied_observation {
+                        turn.refresh_peer(crypto).map_err(invalid_at!())?;
+                        self.applied_observation = current.observed_at();
+                    }
+                    turn.check_response(crypto, &request)
+                        .map_err(invalid_at!())?;
+                    self.encoder
+                        .next_frame()
+                        .map_err(invalid_at!())?
+                        .map(|frame| turn.seal_frame(crypto, &frame))
+                        .transpose()
+                        .map_err(invalid_at!())?
+                        .ok_or(peer::PeerError::Invalid)?
+                };
+                let send_deadline = current
+                    .io_deadline(&evidence)
+                    .ok_or(peer::PeerError::Invalid)?;
+                let operation = &operation;
+                let owner = runtime.owner;
+                let continuation = current.continuation();
+                let gate = runtime.gate;
+                let paused = runtime.paused;
+                let stopping = runtime.stopping;
+                let public_pending = &runtime.public_io.setup().pending;
+                let check = || {
+                    watch(operation, gate, paused, stopping, public_pending)?;
+                    owner
+                        .peer_original_boundary(operation, continuation)
+                        .map_err(|_| BudgetStop::Cancelled)
+                };
+                self.socket
+                    .send_binary(&frame, send_deadline, &check)
+                    .map_err(invalid_at!())?;
+                return Ok(true);
+            }
+            drop(evidence);
             let remaining = frame_count(bytes.len());
             self.encoder
                 .begin(MessageKind::RpcResponse, bytes)
@@ -4567,6 +4746,32 @@ fn current_proof(
         source.clone(),
         cutoff,
     )
+}
+
+fn terminal_renew_cached_proof(
+    cached: Option<peer::VerifiedCurrentPeer>,
+    runtime: RuntimeWithOperation<'_, '_>,
+    cutoff: Instant,
+    evidence: &super::RemoteWorkerEvidence<'_, '_, '_, '_>,
+) -> Option<peer::VerifiedCurrentPeer> {
+    let proof = cached?;
+    let deadline = runtime.operation.deadline();
+    (proof.current(evidence)
+        && proof.io_deadline(evidence).is_some_and(|proof_deadline| {
+            terminal_renew_cached_proof_covers(Instant::now(), deadline, cutoff, proof_deadline)
+        }))
+    .then_some(proof)
+}
+
+fn terminal_renew_cached_proof_covers(
+    now: Instant,
+    operation_deadline: Instant,
+    peer_cutoff: Instant,
+    proof_deadline: Instant,
+) -> bool {
+    now < operation_deadline
+        && peer_cutoff >= operation_deadline
+        && proof_deadline >= operation_deadline
 }
 
 fn terminal_call(call: &RpcCall) -> bool {
@@ -5242,6 +5447,389 @@ mod stream_operation_transfer_tests {
         assert!(cancelled_stream.check().is_err());
         cancelled.store(false, Ordering::Release);
         assert!(cancelled_stream.check().is_err());
+    }
+}
+
+#[cfg(test)]
+mod terminal_renew_fast_path_tests {
+    use super::*;
+    use lomi_remote_protocol::{
+        ApplicationMajor, TimeoutMs,
+        message_framing::{MessageEncoder, MessageKind},
+        rpc::{RequestKind, RpcResponse, RpcResult, TerminalLeaseParams},
+    };
+
+    #[test]
+    fn renewal_moves_the_same_admission_and_sticky_abort_while_only_shortening_deadline() {
+        let cancelled = AtomicBool::new(false);
+        let now = Instant::now();
+        let original_deadline = now + Duration::from_secs(10);
+        let mut maintenance = super::super::OwnerOperation::new(original_deadline, &cancelled);
+        let original_identity = maintenance.retained_identity();
+        let mut maintenance_aborted = std::cell::Cell::new(true);
+        let mut peer = Some(original_identity.clone());
+        let (mut request, aborted, request_peer) = transfer_maintenance_to_stream(
+            &mut maintenance,
+            &mut maintenance_aborted,
+            &mut peer,
+            super::super::OwnerOperation::new(now + Duration::from_secs(30), &cancelled),
+        );
+
+        request.cap_deadline(now + Duration::from_secs(3));
+        assert!(request.is_same_admission(&original_identity));
+        assert_eq!(request.deadline(), now + Duration::from_secs(3));
+        assert!(aborted.get());
+        assert!(
+            request_peer
+                .as_ref()
+                .is_some_and(|proof| request.is_same_admission(proof))
+        );
+        assert!(peer.is_none());
+
+        request.cap_deadline(now + Duration::from_secs(20));
+        assert_eq!(request.deadline(), now + Duration::from_secs(3));
+        cancelled.store(true, Ordering::Release);
+        assert!(request.check().is_err());
+    }
+
+    #[test]
+    fn cached_renewal_proof_skips_prefetch_margin_only_when_all_real_bounds_cover() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(1_500);
+        let covered_until = now + Duration::from_millis(2_000);
+
+        assert!(terminal_renew_cached_proof_covers(
+            now,
+            deadline,
+            covered_until,
+            covered_until,
+        ));
+        assert!(!terminal_renew_cached_proof_covers(
+            now,
+            deadline,
+            deadline - Duration::from_nanos(1),
+            covered_until,
+        ));
+        assert!(!terminal_renew_cached_proof_covers(
+            now,
+            deadline,
+            covered_until,
+            deadline - Duration::from_nanos(1),
+        ));
+        assert!(!terminal_renew_cached_proof_covers(
+            deadline,
+            deadline,
+            covered_until,
+            covered_until,
+        ));
+    }
+
+    fn encrypted_request(
+        channel: &mut lomi_remote_crypto::Channel,
+        context: &lomi_remote_crypto::ChannelContextV3,
+        request: &RpcRequest,
+    ) -> Vec<u8> {
+        let mut encoder = MessageEncoder::new();
+        encoder
+            .begin(
+                MessageKind::RpcRequest,
+                serde_json::to_vec(request).unwrap(),
+            )
+            .unwrap();
+        let frame = encoder.next_frame().unwrap().unwrap();
+        channel.seal_binary(context.channel_id, &frame).unwrap()
+    }
+
+    fn decode_encrypted_response(
+        channel: &mut lomi_remote_crypto::Channel,
+        context: &lomi_remote_crypto::ChannelContextV3,
+        frame: &[u8],
+    ) -> RpcResponse {
+        let plain = channel.open_binary(context.channel_id, frame).unwrap();
+        let mut assembler = MessageAssembler::new();
+        let message = assembler.push(&plain, 0).unwrap().unwrap();
+        assert_eq!(message.kind, MessageKind::RpcResponse);
+        lomi_remote_protocol::rpc::decode_response(&message.bytes).unwrap()
+    }
+
+    fn with_established_terminal_renew<'a>(
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'a>,
+        eligibility: &PeerEligibility,
+        fixture: &super::super::channel::tests::TerminalFixture,
+        test: impl FnOnce(
+            &mut Connection<'a>,
+            &mut lomi_remote_crypto::Channel,
+            &lomi_remote_protocol::TerminalContext,
+            &lomi_remote_protocol::rpc::TerminalLeaseResult,
+        ),
+    ) {
+        let cancelled = runtime.operation.cancellation_latch();
+        let maintenance =
+            super::super::OwnerOperation::new(runtime.operation.deadline(), cancelled);
+        let maintenance_aborted = std::cell::Cell::new(false);
+        let admission_runtime = RuntimeWithOperation {
+            operation: &maintenance,
+            aborted: &maintenance_aborted,
+            ..runtime
+        };
+        let (established, mut consumer) =
+            super::super::channel::tests::establish_terminal_connection(
+                auth,
+                admission_runtime,
+                eligibility,
+                fixture,
+            );
+        let mut remote_terminal = RemoteTerminalState::new(
+            std::sync::Arc::downgrade(&fixture.coordinator),
+            &established,
+        )
+        .unwrap();
+        let principal = remote_terminal.principal_for_test();
+        let attachment = fixture
+            .coordinator
+            .terminals
+            .attach(
+                fixture.terminal.session_id,
+                fixture.terminal.session_epoch,
+                principal,
+            )
+            .unwrap();
+        attachment
+            .acknowledge(principal, attachment.snapshot.sequence.0)
+            .unwrap();
+        let lease = fixture
+            .coordinator
+            .terminals
+            .claim(
+                fixture.terminal.session_id,
+                fixture.terminal.session_epoch,
+                principal,
+            )
+            .unwrap();
+        let mut terminal = fixture.terminal.clone();
+        terminal.workspace = fixture.workspace.clone();
+        let initial = remote_terminal
+            .seed_test_lease(&established, terminal.clone(), lease)
+            .unwrap();
+
+        let mut connection = Connection {
+            coordinator: std::sync::Arc::downgrade(&fixture.coordinator),
+            terminal: Some(remote_terminal),
+            watch: None,
+            watch_generation: 0,
+            workspace_stream: None,
+            workspace_stream_call: None,
+            next_stream_class: 0,
+            stream: None,
+            watch_call: None,
+            started_git_outputs: VecDeque::new(),
+            git_output_reservation: 0,
+            socket: IngressSocket::memory([]),
+            maintenance,
+            suspended: false,
+            maintenance_aborted,
+            peer: None,
+            source: fixture.source.clone(),
+            workspace: fixture.workspace.clone(),
+            crypto: Crypto::Established(established),
+            assembler: MessageAssembler::new(),
+            encoder: MessageEncoder::new(),
+            origin: Instant::now(),
+            peer_cutoff: eligibility.heartbeat.request_started
+                + Duration::from_millis(eligibility.heartbeat.freshness_ms),
+            applied_observation: Instant::now(),
+            started_git_peer: None,
+            response: None,
+            git_read: None,
+            git_mutation: None,
+        };
+        let request = RpcRequest {
+            v: ApplicationMajor::try_from(2).unwrap(),
+            r#type: RequestKind::Request,
+            request_id: "renew-fast-path".to_owned().try_into().unwrap(),
+            timeout_ms: TimeoutMs::new(1200).unwrap(),
+            call: RpcCall::TerminalRenew(TerminalLeaseParams {
+                terminal: terminal.clone(),
+                lease: initial.lease.clone(),
+            }),
+        };
+        let encrypted = encrypted_request(&mut consumer, &fixture.context, &request);
+        let IngressSocket::Memory(socket) = &mut connection.socket else {
+            unreachable!("renew tests use their in-memory relay boundary");
+        };
+        socket.incoming.push_back(encrypted);
+
+        test(&mut connection, &mut consumer, &terminal, &initial);
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn established_encrypted_renew_reuses_current_proof_and_sends_in_same_turn() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                with_established_terminal_renew(
+                    auth,
+                    runtime,
+                    eligibility,
+                    fixture,
+                    |connection, consumer, terminal, initial| {
+                        super::super::peer::with_test_pairing_get(
+                            fixture.source.response.clone(),
+                            |get_count| {
+                                let started = Instant::now();
+                                let outcome = connection.turn(
+                                    auth,
+                                    runtime,
+                                    eligibility,
+                                    Some(runtime.operation.cancellation_latch()),
+                                );
+                                assert!(
+                                    matches!(&outcome, Ok(true)),
+                                    "Connection::turn must admit the real terminal renewal"
+                                );
+                                assert_eq!(
+                                    get_count.get(),
+                                    1,
+                                    "one current GET, no renew duplicate"
+                                );
+                                assert_eq!(connection.socket.sent().len(), 1);
+                                assert!(started.elapsed() < Duration::from_millis(1500));
+                                let sent = connection.socket.sent();
+                                let response =
+                                    decode_encrypted_response(consumer, &fixture.context, &sent[0]);
+                                let RpcResponse::Result {
+                                    request_id,
+                                    result: RpcResult::TerminalRenew(renewed),
+                                    ..
+                                } = response
+                                else {
+                                    panic!("successful terminal.renew response expected");
+                                };
+                                assert_eq!(String::from(request_id), "renew-fast-path");
+                                assert_eq!(renewed.terminal, *terminal);
+                                assert_eq!(renewed.lease.token, initial.lease.token);
+                                assert_eq!(renewed.lease.version.0, initial.lease.version.0);
+                                assert_eq!(renewed.next_input_id.0, initial.next_input_id.0);
+                                assert_eq!(renewed.next_input_seq.0.0, initial.next_input_seq.0.0);
+                                assert_eq!(
+                                    renewed.next_resize_seq.0.0,
+                                    initial.next_resize_seq.0.0
+                                );
+                                assert_eq!(renewed.expires_in_ms.get(), 5000);
+                            },
+                        );
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn cancellation_at_physical_send_watch_suppresses_renew_response() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                with_established_terminal_renew(
+                    auth,
+                    runtime,
+                    eligibility,
+                    fixture,
+                    |connection, _consumer, _terminal, _initial| {
+                        match &mut connection.socket {
+                            IngressSocket::Memory(socket) => {
+                                socket.cancel_before_send = Some(api.cancelled.clone());
+                            }
+                            IngressSocket::Relay(_) => {
+                                unreachable!("renew tests use their in-memory relay boundary");
+                            }
+                        }
+                        super::super::peer::with_test_pairing_get(
+                            fixture.source.response.clone(),
+                            |get_count| {
+                                let outcome = connection.turn(
+                                    auth,
+                                    runtime,
+                                    eligibility,
+                                    Some(runtime.operation.cancellation_latch()),
+                                );
+                                assert!(outcome.is_err(), "unexpected turn outcome: {outcome:?}");
+                                assert_eq!(get_count.get(), 1);
+                                let IngressSocket::Memory(socket) = &connection.socket else {
+                                    unreachable!("renew tests use their in-memory relay boundary");
+                                };
+                                assert!(socket.closed, "send watch not reached: {outcome:?}");
+                                assert!(socket.sent.is_empty());
+                                assert!(connection.response.is_none());
+                            },
+                        );
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn failed_physical_renew_send_closes_connection_without_replay() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                with_established_terminal_renew(
+                    auth,
+                    runtime,
+                    eligibility,
+                    fixture,
+                    |connection, _consumer, _terminal, _initial| {
+                        match &mut connection.socket {
+                            IngressSocket::Memory(socket) => socket.fail_after_write = true,
+                            IngressSocket::Relay(_) => {
+                                unreachable!("renew tests use their in-memory relay boundary");
+                            }
+                        }
+                        super::super::peer::with_test_pairing_get(
+                            fixture.source.response.clone(),
+                            |get_count| {
+                                let outcome = connection.turn(
+                                    auth,
+                                    runtime,
+                                    eligibility,
+                                    Some(runtime.operation.cancellation_latch()),
+                                );
+                                assert!(outcome.is_err(), "unexpected turn outcome: {outcome:?}");
+                                assert_eq!(get_count.get(), 1);
+                                let IngressSocket::Memory(socket) = &connection.socket else {
+                                    unreachable!("renew tests use their in-memory relay boundary");
+                                };
+                                assert!(socket.closed, "send not reached: {outcome:?}");
+                                assert_eq!(socket.sent.len(), 1);
+                                assert!(connection.response.is_none());
+
+                                // The physical outcome was ambiguous after one frame
+                                // write; a closed connection cannot replay that result.
+                                assert!(
+                                    connection
+                                        .turn(
+                                            auth,
+                                            runtime,
+                                            eligibility,
+                                            Some(runtime.operation.cancellation_latch()),
+                                        )
+                                        .is_err()
+                                );
+                                let IngressSocket::Memory(socket) = &connection.socket else {
+                                    unreachable!("renew tests use their in-memory relay boundary");
+                                };
+                                assert_eq!(socket.sent.len(), 1);
+                                assert!(connection.response.is_none());
+                            },
+                        );
+                    },
+                );
+            },
+        );
     }
 }
 

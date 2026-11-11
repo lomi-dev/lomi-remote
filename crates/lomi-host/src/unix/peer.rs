@@ -18,6 +18,55 @@ use lomi_remote_crypto::{
 use lomi_remote_protocol::{http::*, *};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PAIRING_GET: std::cell::RefCell<Option<(
+        PairingResult,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    )>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_test_pairing_get<T>(
+    response: PairingResult,
+    test: impl FnOnce(std::rc::Rc<std::cell::Cell<usize>>) -> T,
+) -> T {
+    let count = std::rc::Rc::new(std::cell::Cell::new(0));
+    TEST_PAIRING_GET.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "test Pairing GET shim already active"
+        );
+        *slot.borrow_mut() = Some((response, count.clone()));
+    });
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_PAIRING_GET.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    let reset = Reset;
+    let result = test(count);
+    drop(reset);
+    result
+}
+
+#[cfg(test)]
+fn take_test_pairing_get(
+    check: &impl Fn() -> Result<(), lomi_host_http::BudgetStop>,
+) -> Option<Result<PairingResult, lomi_host_http::Error>> {
+    TEST_PAIRING_GET.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let (response, count) = slot.as_mut()?;
+        count.set(count.get().saturating_add(1));
+        Some(
+            check()
+                .map(|()| response.clone())
+                .map_err(|_| lomi_host_http::Error::Cancelled),
+        )
+    })
+}
+
 pub(super) trait PeerApi {
     fn pending(
         &self,
@@ -178,6 +227,7 @@ pub(super) struct Worker {
     scheduled_item_consumed: bool,
     cached_first_due: bool,
 }
+#[cfg_attr(test, derive(Debug))]
 pub(super) enum PeerError {
     Invalid,
     Fatal(StepError),
@@ -1532,10 +1582,17 @@ impl Worker {
             .checked_add(runtime.anchor.elapsed().as_secs())
             .ok_or(PeerError::Invalid)?;
         let started = Instant::now();
+        #[cfg(test)]
+        let response = take_test_pairing_get(&check).unwrap_or_else(|| {
+            transport
+                .with_budget(operation.deadline().min(cutoff), &check)
+                .pairing_get(source.intent.preparation.pairing_id, &access)
+        });
+        #[cfg(not(test))]
         let response = transport
             .with_budget(operation.deadline().min(cutoff), &check)
-            .pairing_get(source.intent.preparation.pairing_id, &access)
-            .map_err(|_| PeerError::Invalid)?;
+            .pairing_get(source.intent.preparation.pairing_id, &access);
+        let response = response.map_err(|_| PeerError::Invalid)?;
 
         check_peer_runtime(runtime)?;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
