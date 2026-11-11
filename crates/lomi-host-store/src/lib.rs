@@ -1985,7 +1985,7 @@ PRAGMA user_version=6;",
             .map(|v| serde_json::from_str(&v).map_err(|_| StoreError::Storage))
             .transpose()?;
         let state = self.authorization_state()?;
-        let configuration = self.auth_configuration()?;
+        let configuration = self.rejection_metadata_configuration()?;
         let (rejection, deferred) =
             validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         if rejection.is_some() || deferred.is_some() {
@@ -2009,6 +2009,19 @@ PRAGMA user_version=6;",
             return Ok(self.public_current()?.configuration()?.authentication);
         }
         Self::read_auth_configuration(&self.db)
+    }
+    // Public configuration preparation must remain readable without auth fences.
+    fn rejection_metadata_configuration(&self) -> Result<Option<ipc::LocalAuthConfiguration>> {
+        let present: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN (?1,?2))",
+            params![AUTHORIZATION_REJECTION_KEY, DEFERRED_LOGIN_KEY],
+            |row| row.get(0),
+        )?;
+        if present {
+            self.auth_configuration()
+        } else {
+            Ok(None)
+        }
     }
     fn read_auth_configuration(db: &Connection) -> Result<Option<ipc::LocalAuthConfiguration>> {
         let value: Option<String> = db
@@ -2064,7 +2077,7 @@ PRAGMA user_version=6;",
     }
     pub fn login_intent(&self) -> Result<Option<LoginIntent>> {
         let state = self.authorization_state()?;
-        let configuration = self.auth_configuration()?;
+        let configuration = self.rejection_metadata_configuration()?;
         let (rejection, _) = validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         if rejection.is_some() {
             return Ok(None);
@@ -2081,7 +2094,7 @@ PRAGMA user_version=6;",
     /// This remains separate from `login_intent` until that ACK is durable.
     pub fn deferred_login_intent(&self) -> Result<Option<LoginIntent>> {
         let state = self.authorization_state()?;
-        let configuration = self.auth_configuration()?;
+        let configuration = self.rejection_metadata_configuration()?;
         let (_, deferred) = validate_rejection_metadata(&self.db, state, configuration.as_ref())?;
         Ok(deferred)
     }
@@ -6469,6 +6482,116 @@ mod identity_inspection_tests {
             )
             .unwrap();
         assert_eq!(store.deferred_login_intent(), Err(StoreError::Storage));
+    }
+
+    #[test]
+    fn public_prepare_keeps_auth_getters_readable_without_rejection_metadata() {
+        let profile = private_test_profile("public-prepare-auth-getters");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let current = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+            version: 1,
+            revision: 1,
+            authentication: None,
+        })
+        .unwrap();
+        let initial = store.public_prepare(None, &current).unwrap();
+        store.public_finish(initial.operation_id, &current).unwrap();
+        let active = LoginIntent {
+            operation_id: OperationId::from_bytes([32; 16]).unwrap(),
+            generation: store.authorization_state().unwrap().generation,
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO metadata(key,value) VALUES('login_generation',?1)",
+                [json(&active).unwrap()],
+            )
+            .unwrap();
+        let desired = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+            version: 1,
+            revision: 2,
+            authentication: Some(auth_configuration("https://auth.example.test")),
+        })
+        .unwrap();
+        store.public_prepare(Some(&current), &desired).unwrap();
+
+        assert_eq!(store.verified_authorization_generation().unwrap(), None);
+        assert_eq!(store.login_intent().unwrap(), Some(active));
+        assert_eq!(store.deferred_login_intent().unwrap(), None);
+    }
+
+    #[test]
+    fn public_prepare_still_fences_auth_getters_with_rejection_metadata() {
+        let profile = private_test_profile("public-prepare-rejection-getters");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        let configuration = auth_configuration("https://auth.example.test");
+        store.configure_auth(&configuration).unwrap();
+        let current = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+            version: 1,
+            revision: 1,
+            authentication: Some(configuration.clone()),
+        })
+        .unwrap();
+        let initial = store.public_prepare(None, &current).unwrap();
+        store.public_finish(initial.operation_id, &current).unwrap();
+        let generation = store.authorization_state().unwrap().generation;
+        store
+            .begin_login(OperationId::from_bytes([33; 16]).unwrap())
+            .unwrap();
+        store
+            .fence_rejected_credentials(generation, &configuration)
+            .unwrap();
+        assert!(store.deferred_login_intent().unwrap().is_some());
+
+        let desired = PublicDocument::encode(&lomi_platform::public_config::Configuration {
+            version: 1,
+            revision: 2,
+            authentication: Some(configuration),
+        })
+        .unwrap();
+        store.public_prepare(Some(&current), &desired).unwrap();
+
+        assert_eq!(
+            store.verified_authorization_generation(),
+            Err(StoreError::Fenced)
+        );
+        assert_eq!(store.login_intent(), Err(StoreError::Fenced));
+        assert_eq!(store.deferred_login_intent(), Err(StoreError::Fenced));
+    }
+
+    #[test]
+    fn malformed_pending_rejection_markers_still_fail_closed() {
+        let profile = private_test_profile("malformed-pending-rejection-markers");
+        let lock = lomi_platform::unix::OwnerLock::acquire(&profile.0).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        store
+            .configure_auth(&auth_configuration("https://auth.example.test"))
+            .unwrap();
+        store
+            .fence_authorization(AuthorizationFenceReason::LocalLogout)
+            .unwrap();
+
+        for key in [AUTHORIZATION_REJECTION_KEY, DEFERRED_LOGIN_KEY] {
+            store
+                .db
+                .execute("INSERT INTO metadata(key,value) VALUES(?1,'{}')", [key])
+                .unwrap();
+            assert_eq!(
+                store.verified_authorization_generation(),
+                Err(StoreError::Storage)
+            );
+            assert_eq!(store.login_intent(), Err(StoreError::Storage));
+            assert_eq!(store.deferred_login_intent(), Err(StoreError::Storage));
+            store
+                .db
+                .execute("DELETE FROM metadata WHERE key=?1", [key])
+                .unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]

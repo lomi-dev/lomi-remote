@@ -12537,4 +12537,71 @@ mod worker_ready_retry_tests {
             assert!(gate.load(std::sync::atomic::Ordering::Acquire));
         }
     }
+
+    #[test]
+    fn owned_fresh_public_configuration_prepares_and_finishes() {
+        let directory = TestDirectory::new();
+        let profile = directory.0.join("profile");
+        fs::create_dir(&profile).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let lock = super::super::platform::OwnerLock::acquire(&profile).unwrap();
+        let database = lock.prepare_database().unwrap();
+        let mut store = HostStore::open(&database, Limits::default()).unwrap();
+        super::super::public_configuration::startup(&mut store, lock.profile()).unwrap();
+        let owner = SharedOwner::new(store).unwrap();
+        let identity = owner.try_store().unwrap().identity().clone();
+        let endpoint = Arc::new(
+            super::super::platform::OwnerEndpoint::bind(
+                lock,
+                super::super::platform::LocalDiscovery {
+                    version: LocalIpcVersion::CURRENT,
+                    profile_id: identity.profile_id,
+                    host_id: identity.host_id,
+                    runtime_id: owner.try_store().unwrap().runtime_id(),
+                    build_id: "public-configuration-tests".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let setup = super::super::public_configuration::PublicSetup::new(endpoint);
+        let authentication = LocalAuthConfiguration {
+            version: 1,
+            origin: "https://identity.example".to_owned().try_into().unwrap(),
+            remote_api_origin: Some("https://remote.example".to_owned().try_into().unwrap()),
+            relay_endpoint: None,
+            client_id: "host".to_owned().try_into().unwrap(),
+            provider: LocalAuthProvider::ProtectedFile,
+            keychain_path: None,
+            protected_file_acknowledgement: Some(LocalFileAcknowledgement::OsPermissionsOnly),
+        };
+        let cancelled = AtomicBool::new(false);
+        let operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        let mut turn = owner
+            .begin_public_configuration(&operation, authentication.clone())
+            .unwrap();
+
+        setup.configure_owned(&mut turn).unwrap();
+
+        let store = owner.try_store().unwrap();
+        assert!(store.public_configuration_ready().unwrap());
+        let state = store.public_configuration_state().unwrap().unwrap();
+        assert!(state.prepared.is_none());
+        assert_eq!(
+            state
+                .current
+                .unwrap()
+                .configuration()
+                .unwrap()
+                .authentication,
+            Some(authentication.clone())
+        );
+        assert_eq!(store.auth_configuration().unwrap(), Some(authentication));
+        assert_eq!(store.verified_authorization_generation().unwrap(), None);
+        assert_eq!(store.login_intent().unwrap(), None);
+        assert_eq!(store.deferred_login_intent().unwrap(), None);
+    }
 }
