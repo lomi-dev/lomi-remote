@@ -460,7 +460,7 @@ fn read_cloud_history(db: &Connection) -> Result<Option<bool>> {
     .transpose()
 }
 #[cfg(target_os = "linux")]
-const VERSION: i64 = 15;
+const VERSION: i64 = 16;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const VERSION: i64 = 14;
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
@@ -1560,6 +1560,18 @@ PRAGMA user_version=6;",
             }
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch("PRAGMA user_version=15;")?;
+            tx.commit()?;
+        }
+        #[cfg(target_os = "linux")]
+        if version < 16 {
+            if version != 0 {
+                // Schema 16 is a rollback fence for Secret Service marker v2.
+                // The schema is unchanged; publish its version to the main
+                // database before provider setup can write a v2 marker.
+                migration_backup(&db, &path.with_extension("before-v16.sqlite"), 15)?;
+            }
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch("PRAGMA user_version=16;")?;
             tx.commit()?;
         }
         #[cfg(any(unix, windows))]
@@ -6690,7 +6702,7 @@ mod identity_inspection_tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-mod schema_15_migration_tests {
+mod schema_16_migration_tests {
     use super::*;
     use rusqlite::OpenFlags;
     use std::os::unix::fs::PermissionsExt;
@@ -6705,7 +6717,7 @@ mod schema_15_migration_tests {
 
     fn private_test_profile() -> TestProfile {
         let path =
-            std::env::temp_dir().join(format!("lomi-host-store-schema-15-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("lomi-host-store-schema-16-{}", Uuid::new_v4()));
         fs::create_dir(&path).expect("create private test profile");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
             .expect("set private test profile mode");
@@ -6752,8 +6764,8 @@ mod schema_15_migration_tests {
     }
 
     #[test]
-    fn schema_14_to_15_preserves_all_tables_rows_and_identity() {
-        assert_eq!(PROFILE_SCHEMA_VERSION, 15);
+    fn schema_15_to_16_preserves_all_tables_rows_and_identity() {
+        assert_eq!(PROFILE_SCHEMA_VERSION, 16);
         let profile = private_test_profile();
         let lock =
             lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
@@ -6765,33 +6777,33 @@ mod schema_15_migration_tests {
             .expect("checkpoint initial store");
         drop(store);
 
-        let writer = Connection::open(&database).expect("open test database for v14 fixture");
+        let writer = Connection::open(&database).expect("open test database for v15 fixture");
         writer
             .pragma_update(None, "journal_mode", "DELETE")
-            .expect("close WAL for v14 fixture");
+            .expect("close WAL for v15 fixture");
         writer
             .execute(
-                "INSERT INTO metadata(key,value) VALUES('schema15_test_marker','preserve-me')",
+                "INSERT INTO metadata(key,value) VALUES('schema16_test_marker','preserve-me')",
                 [],
             )
             .expect("insert migration preservation marker");
         writer
-            .pragma_update(None, "user_version", 14)
-            .expect("mark legacy schema version");
+            .pragma_update(None, "user_version", 15)
+            .expect("mark schema-15 fixture");
         drop(writer);
 
         let before = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open schema-14 snapshot");
+            .expect("open schema-15 snapshot");
         let before_tables = database_rows(
             &before,
             "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
         )
-        .expect("snapshot schema-14 table definitions");
+        .expect("snapshot schema-15 table definitions");
         let before_rows = complete_rows(&before);
         let before_version: i64 = before
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("read schema-14 version");
-        assert_eq!(before_version, 14);
+            .expect("read schema-15 version");
+        assert_eq!(before_version, 15);
         drop(before);
 
         let migrated =
@@ -6800,34 +6812,50 @@ mod schema_15_migration_tests {
         assert_eq!(migrated.identity(), &identity);
         migrated
             .checkpoint_initialization()
-            .expect("checkpoint schema-15 store");
+            .expect("checkpoint schema-16 store");
         drop(migrated);
         lock.sync_database().expect("sync migrated database");
 
         let after = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open schema-15 snapshot");
+            .expect("open schema-16 snapshot");
         let after_tables = database_rows(
             &after,
             "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
         )
-        .expect("snapshot schema-15 table definitions");
+        .expect("snapshot schema-16 table definitions");
         let after_rows = complete_rows(&after);
         let after_version: i64 = after
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("read schema-15 version");
+            .expect("read schema-16 version");
         let marker: String = after
             .query_row(
-                "SELECT value FROM metadata WHERE key='schema15_test_marker'",
+                "SELECT value FROM metadata WHERE key='schema16_test_marker'",
                 [],
                 |row| row.get(0),
             )
             .expect("read preservation marker");
-        assert_eq!(after_version, 15);
-        assert_eq!(after_tables, before_tables, "schema 15 adds no tables");
+        assert_eq!(after_version, 16);
+        assert_eq!(after_tables, before_tables, "schema 16 adds no tables");
         assert_eq!(
             after_rows, before_rows,
-            "schema 15 preserves all table rows"
+            "schema 16 preserves all table rows"
         );
         assert_eq!(marker, "preserve-me");
+
+        let main_header = fs::read(&database).expect("read durable migrated main database");
+        assert_eq!(&main_header[..16], b"SQLite format 3\0");
+        assert_eq!(
+            u32::from_be_bytes(main_header[60..64].try_into().unwrap()),
+            16
+        );
+        let backup = Connection::open_with_flags(
+            database.with_extension("before-v16.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open schema-15 migration backup");
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema-15 backup version");
+        assert_eq!(backup_version, 15);
     }
 }

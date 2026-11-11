@@ -2078,12 +2078,18 @@ fn start_inner(
                 {
                     #[cfg(target_os = "linux")]
                     LocalAuthProvider::LinuxSecretService => {
-                        lomi_platform::secret_service::SecretService::open(
-                            endpoint.profile(),
-                            Selection::SecretService,
-                            endpoint.discovery().profile_id,
+                        lomi_platform::secret_service::HostProfileContext::open(
+                            endpoint.profile().path(),
                         )
-                        .map(|p| Box::new(p) as Box<dyn SecretStorage>)
+                        .and_then(|host_context| {
+                            lomi_platform::secret_service::SecretService::open(
+                                endpoint.profile(),
+                                host_context,
+                                Selection::SecretService,
+                                endpoint.discovery().profile_id,
+                            )
+                            .map(|p| Box::new(p) as Box<dyn SecretStorage>)
+                        })
                     }
                     #[cfg(unix)]
                     LocalAuthProvider::ProtectedFile => platform::secrets::ProtectedFile::open(

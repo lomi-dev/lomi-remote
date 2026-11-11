@@ -351,8 +351,11 @@ impl HostGitCredentials {
                     uuid[8] = (uuid[8] & 0x3f) | 0x80;
                     let id = IpcProfileId::from_bytes(uuid)
                         .map_err(|_| secrets::Error::InvalidStorage)?;
+                    let host_context =
+                        lomi_platform::secret_service::HostProfileContext::open(&self.profile)?;
                     let mut store = lomi_platform::secret_service::SecretService::open(
                         lock.profile(),
+                        host_context,
                         Selection::SecretService,
                         id,
                     )?;

@@ -740,6 +740,12 @@ impl HostStore {
 
 #[cfg(any(unix, windows))]
 impl ProfilePurgeStore {
+    /// Make schema migrations durable before a purge can touch an external
+    /// secret provider. The native owner lock remains held by the caller.
+    pub fn checkpoint_initialization(&self) -> Result<()> {
+        self.store.checkpoint_initialization()
+    }
+
     /// Persist the established local logout fence if remote authorization may
     /// still exist. This deliberately creates no purge journal, allowing the
     /// normal Host revoke worker to reopen and finish its existing ACK flow.

@@ -192,8 +192,12 @@ fn open_provider<'a>(
         LocalAuthProvider::LinuxSecretService => {
             #[cfg(target_os = "linux")]
             {
+                let host_context =
+                    lomi_platform::secret_service::HostProfileContext::open(owner.profile().path())
+                        .map_err(|_| ProfilePurgeError::Busy)?;
                 lomi_platform::secret_service::SecretService::open(
                     owner.profile(),
+                    host_context,
                     Selection::SecretService,
                     profile_id,
                 )
@@ -398,6 +402,14 @@ pub fn purge_host_profile(
         profile_identity,
     )
     .map_err(store_error)?;
+
+    #[cfg(target_os = "linux")]
+    {
+        store.checkpoint_initialization().map_err(store_error)?;
+        owner
+            .sync_database()
+            .map_err(|_| ProfilePurgeError::Storage)?;
+    }
 
     let authorization = store.ensure_revocation_fenced().map_err(store_error)?;
     if authorization.pending_cloud_revoke {

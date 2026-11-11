@@ -1631,7 +1631,7 @@ pub(crate) fn make_initialization_receipt(
     let owner = if state == HostInitializationState::Creating {
         // Keep an interrupted fresh initialization readable by the schema-14
         // CLI. The stable Btrfs binding is only committed with Complete, after
-        // opening and durably checkpointing the schema-15 Store.
+        // opening and durably checkpointing the schema-16 Store.
         host_initialization_owner_v1(lock)?
     } else {
         host_initialization_owner(lock)?
@@ -2081,6 +2081,14 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
     #[cfg(target_os = "linux")]
     if existing_profile && let Some(receipt) = receipt.as_ref() {
         store = promote_linux_btrfs_v1_receipt_after_store_open(&lock, &database, receipt, store)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        store
+            .checkpoint_initialization()
+            .map_err(|error| store_error_for_initialization(error, false))?;
+        lock.sync_database()
+            .map_err(map_initialization_platform_error)?;
     }
     #[cfg(any(unix, windows))]
     {
@@ -3237,8 +3245,8 @@ mod initialization_receipt_tests {
         ));
         assert_eq!(
             schema(&lock, &identity),
-            15,
-            "schema 15 is committed before receipt v2"
+            16,
+            "schema 16 is committed before receipt v2"
         );
         let receipt_before_old_access = lock
             .read_host_initialization_receipt()
@@ -3250,7 +3258,7 @@ mod initialization_receipt_tests {
 
         assert!(
             !initialize_with_legacy_cli().success(),
-            "the installed 0.1.6 CLI rejects schema 15 / receipt v2"
+            "the installed 0.1.6 CLI rejects schema 16 / receipt v2"
         );
         let lock = OwnerLock::acquire_existing(&path).expect("reacquire promoted profile");
         assert_eq!(
