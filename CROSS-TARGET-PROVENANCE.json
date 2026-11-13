@@ -538,7 +538,7 @@
       "workspace-selection.ts": "ce8439b583825f66b72b920202dd90dd2661d314a3f21e4d1669b2c9e0d5b248",
       "workspace.ts": "cdcf13baf14df6ba7c0781bb20c7387d26babda289970f2b432de8eac5df5f9e"
     },
-    "mobileModuleProvenanceSha256": "5cb6502895bad1debfc68dd29775b6c23a49e1668b2bf026a42371cbfde9baeb",
+    "mobileModuleProvenanceSha256": "908c6c47206de316a122782f56f14f2584369d2e314928c04a36784e21436999",
     "mobileProductInputs": {
       "android/build.gradle": "898bb086fbfce04120776b89c4ef22200f6f11d7ea54094ae267adc5946f5ef0",
       "android/src/main/AndroidManifest.xml": "343d5be1ac17cdd45d1a2f2ddc616c509290e655869125a9422a96d88aa66066",
@@ -556,10 +556,10 @@
     },
     "mobileBuildInputs": {
       ".easignore": "75d56e741ed7bb687c0bb566dd89a27376b820a6590ec380d1fba22e0f7d9007",
-      "app.config.ts": "21895d974d521e21ee1377afb49f84ed73681a6d7f7b0f7c19ee318d88df713e",
+      "app.config.ts": "42a49b992be1e0b8e1880a46f22dbb15a3beac8d54c673eacd6908826faa755c",
       "eas.json": "37ec0c7c530e673cf1ed7473d965d891152f0599f055c5e292f9a3c39c8bb8cb",
       "metro.config.js": "cdfc32f6d41954761206a0af18d3df75f454cd04de6954000a540d48d8bcf681",
-      "package.json": "556d252fa64fb94fcc5725604a78b126635c4b8ab663601f44b8845fb61b1cd6",
+      "package.json": "633e45ec221dac226e2b5d38e9da86adde7274b9d26291c7c32c7f444e712fa4",
       "pnpm-lock.yaml": "0dd5dabc7abe06af1831cb408703b5a206058a752c67b979251992a5ad7c81e7",
       "scripts/build-crypto-android.sh": "b84949a0c98fb7ddcc039696ea9f340ee32ae81bd299600975874ca95d314bb8",
       "scripts/build-crypto-ios.sh": "934d86cc41b7c01eff856c37d179c46f801414e911fff69af56e1a23c7d75cf4",
