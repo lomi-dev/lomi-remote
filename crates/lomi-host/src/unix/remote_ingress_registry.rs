@@ -29,14 +29,12 @@ pub(super) fn terminal_emission_retains_operation(deadline: Instant, now: Instan
 
 fn staged_batch_initial_allowed(
     ordinary_yield_pending: bool,
-    due_peer_selected: bool,
     staged_output_live: bool,
     remaining: Option<usize>,
     active_git_writer: bool,
     output_eligibility_live: bool,
 ) -> bool {
     !ordinary_yield_pending
-        && !due_peer_selected
         && staged_output_live
         && remaining.is_some_and(|remaining| remaining > 0)
         && !active_git_writer
@@ -148,7 +146,11 @@ impl<'cancel> Registry<'cancel> {
         }
     }
 
-    fn note_staged_message_transition(&mut self, was_staged: bool, is_staged: bool) {
+    pub(in crate::unix::auth) fn note_staged_message_transition(
+        &mut self,
+        was_staged: bool,
+        is_staged: bool,
+    ) {
         if was_staged && !is_staged {
             self.idle_yield_pending = true;
             self.ordinary_yield_pending = true;
@@ -174,6 +176,34 @@ impl<'cancel> Registry<'cancel> {
         self.entries
             .values()
             .any(|driver| driver.peer_refresh_deadline(now).is_some())
+    }
+
+    /// Peek at the exact next due selection without rotating round-robin
+    /// state. A selected pending candidate or ticketed handoff provides no
+    /// established-connection cutoff hint.
+    pub(in crate::unix::auth) fn next_due_established_peer_cutoff(
+        &self,
+        now: Instant,
+    ) -> Option<Instant> {
+        let entries = &self.entries;
+        peek_selected_established_peer_cutoff(
+            &self.round_robin,
+            |channel_id| {
+                entries
+                    .get(&channel_id)
+                    .and_then(|driver| driver.peer_refresh_deadline(now))
+            },
+            |channel_id| {
+                entries
+                    .get(&channel_id)
+                    .and_then(|driver| driver.established_peer_refresh_deadline(now))
+            },
+            |channel_id| {
+                entries
+                    .get(&channel_id)
+                    .is_some_and(Driver::has_established_connection)
+            },
+        )
     }
 
     pub(in crate::unix::auth) fn has_retained_operation_at(&self, now: Instant) -> bool {
@@ -510,7 +540,6 @@ impl<'cancel> Registry<'cancel> {
             .and_then(Driver::staged_message_remaining);
         let batch_allowed = staged_batch_initial_allowed(
             ordinary_yield_pending_before_selection,
-            due.is_some(),
             staged_output_live,
             staged_remaining_before,
             active_git_writer,
@@ -666,10 +695,9 @@ impl<'cancel> Registry<'cancel> {
     /// refresh leaves this window; a failed or expired refresh closes and
     /// prunes that channel.
     fn next_peer_refresh(&mut self, now: Instant) -> Option<ChannelId> {
-        let round_robin = &self.round_robin;
         let entries = &self.entries;
-        let selected = earliest_peer_refresh(
-            round_robin,
+        next_peer_refresh_channel(
+            &mut self.round_robin,
             |channel_id| {
                 entries
                     .get(&channel_id)
@@ -680,14 +708,7 @@ impl<'cancel> Registry<'cancel> {
                     .get(&channel_id)
                     .is_some_and(Driver::has_established_connection)
             },
-        )?;
-        let index = self
-            .round_robin
-            .iter()
-            .position(|channel_id| *channel_id == selected)?;
-        self.round_robin.remove(index);
-        self.round_robin.push_back(selected);
-        Some(selected)
+        )
     }
 
     fn prune_empty(&mut self, channel_id: ChannelId) {
@@ -761,6 +782,38 @@ fn earliest_peer_refresh(
         .map(|(channel_id, _, _)| channel_id)
 }
 
+fn rotate_peer_refresh(
+    round_robin: &mut VecDeque<ChannelId>,
+    selected: ChannelId,
+) -> Option<ChannelId> {
+    let index = round_robin
+        .iter()
+        .position(|channel_id| *channel_id == selected)?;
+    round_robin.remove(index)?;
+    round_robin.push_back(selected);
+    Some(selected)
+}
+
+fn next_peer_refresh_channel(
+    round_robin: &mut VecDeque<ChannelId>,
+    cutoff: impl FnMut(ChannelId) -> Option<Instant>,
+    established: impl FnMut(ChannelId) -> bool,
+) -> Option<ChannelId> {
+    let selected = earliest_peer_refresh(round_robin, cutoff, established)?;
+    rotate_peer_refresh(round_robin, selected)
+}
+
+fn peek_selected_established_peer_cutoff(
+    round_robin: &VecDeque<ChannelId>,
+    mut cutoff: impl FnMut(ChannelId) -> Option<Instant>,
+    mut established_cutoff: impl FnMut(ChannelId) -> Option<Instant>,
+    mut established: impl FnMut(ChannelId) -> bool,
+) -> Option<Instant> {
+    let selected = earliest_peer_refresh(round_robin, &mut cutoff, &mut established)?;
+    let selected_cutoff = cutoff(selected)?;
+    (established_cutoff(selected) == Some(selected_cutoff)).then_some(selected_cutoff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::{IdleScheduler, WorkClass};
@@ -787,32 +840,106 @@ mod tests {
     }
 
     #[test]
-    fn staged_batch_requires_no_owed_turn_due_refresh_writer_or_dead_output() {
+    fn staged_batch_requires_no_owed_turn_writer_or_dead_output() {
         assert!(staged_batch_initial_allowed(
-            false,
             false,
             true,
             Some(4),
             false,
-            true,
+            true
         ));
-        for (ordinary_yield, due, staged, remaining, writer, live) in [
-            (true, false, true, Some(4), false, true),
-            (false, true, true, Some(4), false, true),
-            (false, false, false, Some(4), false, true),
-            (false, false, true, None, false, true),
-            (false, false, true, Some(4), true, true),
-            (false, false, true, Some(4), false, false),
+        for (ordinary_yield, staged, remaining, writer, live) in [
+            (true, true, Some(4), false, true),
+            (false, false, Some(4), false, true),
+            (false, true, None, false, true),
+            (false, true, Some(4), true, true),
+            (false, true, Some(4), false, false),
         ] {
             assert!(!staged_batch_initial_allowed(
                 ordinary_yield,
-                due,
                 staged,
                 remaining,
                 writer,
                 live,
             ));
         }
+    }
+
+    #[test]
+    fn successful_due_refresh_progress_can_batch_only_after_all_due_work_clears() {
+        let due_channel = ChannelId::from_bytes([41; 16]).unwrap();
+        let mut ordinary_yield_pending = false;
+        let mut round_robin = VecDeque::from([due_channel]);
+        assert_eq!(
+            select_registry_channel(
+                Some(due_channel),
+                &mut ordinary_yield_pending,
+                &mut round_robin,
+                |_| Some(true),
+            ),
+            Some(due_channel),
+            "due refresh keeps initial registry selection priority"
+        );
+        assert!(!ordinary_yield_pending);
+
+        // The first due-selected stage may refresh proof and send a payload
+        // fragment. That progress can begin a bounded batch once every current
+        // due refresh (including sibling entries) has cleared.
+        let initially_allowed =
+            staged_batch_initial_allowed(ordinary_yield_pending, true, Some(4), false, true);
+        assert!(initially_allowed);
+        assert!(!staged_batch_made_progress(false, Some(4), Some(3), false));
+        assert!(!staged_batch_made_progress(true, Some(4), Some(4), false));
+        let progressed = staged_batch_made_progress(true, Some(4), Some(3), false);
+        assert!(progressed);
+        assert!(staged_batch_can_continue(
+            progressed,
+            Some(3),
+            Duration::from_millis(499),
+            1,
+            true,
+            false,
+            false,
+            true,
+        ));
+        assert!(
+            !staged_batch_can_continue(
+                progressed,
+                Some(3),
+                Duration::from_millis(1),
+                1,
+                true,
+                true,
+                false,
+                true,
+            ),
+            "another still-due peer refresh blocks the batch"
+        );
+    }
+
+    #[test]
+    fn owed_ordinary_turn_blocks_batch_even_when_due_selection_wins() {
+        let due_channel = ChannelId::from_bytes([42; 16]).unwrap();
+        let mut ordinary_yield_pending = true;
+        let mut round_robin = VecDeque::from([due_channel]);
+        assert_eq!(
+            select_registry_channel(
+                Some(due_channel),
+                &mut ordinary_yield_pending,
+                &mut round_robin,
+                |_| Some(true),
+            ),
+            Some(due_channel),
+            "due refresh wins the current registry selection"
+        );
+        assert!(ordinary_yield_pending, "the owed ordinary turn is retained");
+        assert!(!staged_batch_initial_allowed(
+            ordinary_yield_pending,
+            true,
+            Some(4),
+            false,
+            true,
+        ));
     }
 
     #[test]
@@ -1319,6 +1446,88 @@ mod tests {
         );
         assert!(ordinary_yield_pending);
         assert_eq!(round_robin, VecDeque::from([staged]));
+    }
+
+    #[test]
+    fn peer_cutoff_peek_is_nonmutating_and_matches_due_selection() {
+        let pending = ChannelId::from_bytes([31; 16]).unwrap();
+        let established = ChannelId::from_bytes([32; 16]).unwrap();
+        let now = Instant::now();
+        let pending_cutoff = now + Duration::from_millis(200);
+        let established_cutoff = now + Duration::from_millis(400);
+        let round_robin = VecDeque::from([pending, established]);
+        let original_order = round_robin.clone();
+
+        let peek = peek_selected_established_peer_cutoff(
+            &round_robin,
+            |id| match id {
+                id if id == pending => Some(pending_cutoff),
+                id if id == established => Some(established_cutoff),
+                _ => None,
+            },
+            |id| (id == established).then_some(established_cutoff),
+            |id| id == established,
+        );
+        assert_eq!(peek, None, "earlier pending work keeps selector priority");
+        assert_eq!(round_robin, original_order, "peek does not rotate state");
+        assert_eq!(
+            peek_selected_established_peer_cutoff(
+                &VecDeque::from([pending]),
+                |_| Some(pending_cutoff),
+                |_| None,
+                |_| false,
+            ),
+            None,
+            "pending-only selection has no connection cutoff hint"
+        );
+
+        let mut selected_order = round_robin.clone();
+        let selected = next_peer_refresh_channel(
+            &mut selected_order,
+            |id| match id {
+                id if id == pending => Some(pending_cutoff),
+                id if id == established => Some(established_cutoff),
+                _ => None,
+            },
+            |id| id == established,
+        );
+        assert_eq!(selected, Some(pending));
+        assert_eq!(selected_order.back(), Some(&pending));
+
+        let tied_order = VecDeque::from([pending, established]);
+        let tied_original = tied_order.clone();
+        let tied_peek = peek_selected_established_peer_cutoff(
+            &tied_order,
+            |id| (id == pending || id == established).then_some(pending_cutoff),
+            |id| (id == established).then_some(pending_cutoff),
+            |id| id == established,
+        );
+        assert_eq!(tied_peek, Some(pending_cutoff));
+        assert_eq!(
+            tied_order, tied_original,
+            "tied peek leaves order untouched"
+        );
+
+        let mut tied_selected_order = tied_order;
+        let tied_selected = next_peer_refresh_channel(
+            &mut tied_selected_order,
+            |id| (id == pending || id == established).then_some(pending_cutoff),
+            |id| id == established,
+        );
+        assert_eq!(tied_selected, Some(established));
+        assert_eq!(tied_selected_order.back(), Some(&established));
+
+        let pending_state_before_connection = now + Duration::from_millis(100);
+        assert_eq!(
+            peek_selected_established_peer_cutoff(
+                &VecDeque::from([established]),
+                |_| Some(pending_state_before_connection),
+                |_| Some(established_cutoff),
+                |_| true,
+            ),
+            None,
+            "an earlier pending state hides the same driver's later connection cutoff"
+        );
     }
 
     #[test]

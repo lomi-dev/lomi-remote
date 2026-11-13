@@ -542,6 +542,7 @@ struct PendingStream<'cancel> {
     /// Only normal terminal producer messages may continue a bounded burst
     /// under this original maintenance admission. Started Git and RPC stream
     /// messages carry no burst marker.
+    burst_pending_first_send: bool,
     burst_started: Option<Instant>,
     remaining: usize,
 }
@@ -592,6 +593,18 @@ fn terminal_burst_can_continue(
                 .checked_add(PEER_REFRESH_MARGIN)
                 .is_some_and(|refresh_by| refresh_by < proof_fresh_until)
     })
+}
+
+fn start_terminal_burst_at_first_send(
+    pending_first_send: &mut bool,
+    burst_started: &mut Option<Instant>,
+    send_started: Instant,
+) {
+    if std::mem::replace(pending_first_send, false) {
+        // Preserve an existing start if state is unexpectedly inconsistent;
+        // later messages must never renew the original burst window.
+        burst_started.get_or_insert(send_started);
+    }
 }
 
 struct QueuedStartedOutput<'cancel> {
@@ -851,6 +864,12 @@ impl<'cancel> Driver<'cancel> {
         self.connection
             .as_ref()
             .is_some_and(Connection::is_established)
+    }
+    pub(super) fn established_peer_refresh_deadline(&self, now: Instant) -> Option<Instant> {
+        self.connection
+            .as_ref()
+            .filter(|connection| connection.is_established())
+            .and_then(|connection| connection.peer_refresh_deadline(now))
     }
     pub(super) fn cancel_started_git(&mut self) {
         if let Some(mutation) = self
@@ -1895,6 +1914,7 @@ impl<'cancel> Connection<'cancel> {
                     kind: MessageKind::TerminalFrame,
                     authorization_call: None,
                     delivery: Some(frame),
+                    burst_pending_first_send: false,
                     burst_started: None,
                     remaining,
                 };
@@ -3702,6 +3722,12 @@ impl<'cancel> Connection<'cancel> {
                     .peer_original_boundary(operation, continuation)
                     .map_err(|_| BudgetStop::Cancelled)
             };
+            let send_started = Instant::now();
+            start_terminal_burst_at_first_send(
+                &mut stream.burst_pending_first_send,
+                &mut stream.burst_started,
+                send_started,
+            );
             self.socket
                 .send_binary(&ciphertext, deadline, &check)
                 .map_err(invalid_at!())?;
@@ -4064,8 +4090,8 @@ impl<'cancel> Connection<'cancel> {
                 let remaining = bytes
                     .len()
                     .div_ceil(lomi_remote_protocol::message_framing::MAX_FRAGMENT_PAYLOAD_LEN);
-                let burst_started =
-                    (kind == MessageKind::TerminalFrame && delivery.is_some()).then(Instant::now);
+                let burst_pending_first_send =
+                    kind == MessageKind::TerminalFrame && delivery.is_some();
                 self.encoder.begin(kind, bytes).map_err(invalid_at!())?;
                 // Serialization follows dropping actor/Domain/Core turns.
                 // Transfer the exact maintenance admission and proof that
@@ -4083,7 +4109,8 @@ impl<'cancel> Connection<'cancel> {
                     kind,
                     authorization_call,
                     delivery,
-                    burst_started,
+                    burst_pending_first_send,
+                    burst_started: None,
                     remaining,
                 });
                 advanced = true;
@@ -4649,7 +4676,16 @@ impl<'cancel> Connection<'cancel> {
             };
             self.peer_cutoff = current.fresh_until();
             let bytes = serde_json::to_vec(&response).map_err(invalid_at!())?;
-            if terminal_renew && frame_count(bytes.len()) == 1 {
+            // Only the response flush is shared; ACK/Claim keep fresh proofs.
+            let terminal_control_response = matches!(
+                &request.call,
+                RpcCall::TerminalRenew(_)
+                    | RpcCall::TerminalAck(_)
+                    | RpcCall::TerminalClaim(_)
+                    | RpcCall::TerminalInput(_)
+                    | RpcCall::TerminalResize(_)
+            );
+            if terminal_control_response && frame_count(bytes.len()) == 1 {
                 self.encoder
                     .begin(MessageKind::RpcResponse, bytes)
                     .map_err(invalid_at!())?;
@@ -5230,7 +5266,60 @@ mod stream_operation_transfer_tests {
     use super::*;
 
     #[test]
-    fn terminal_burst_requires_origin_quantum_proof_and_worker_headroom() {
+    fn normal_terminal_burst_starts_at_first_send_after_staging_delay_and_never_resets() {
+        let staged_at = Instant::now();
+        let first_send = staged_at + Duration::from_millis(800);
+        let mut pending_first_send = true;
+        let mut burst_started = None;
+
+        // Queueing/proof work can exceed one old quantum without consuming
+        // the send-time budget for a normal terminal burst.
+        start_terminal_burst_at_first_send(&mut pending_first_send, &mut burst_started, first_send);
+        assert!(!pending_first_send);
+        assert_eq!(burst_started, Some(first_send));
+
+        let next_frame_send = first_send + Duration::from_millis(200);
+        start_terminal_burst_at_first_send(
+            &mut pending_first_send,
+            &mut burst_started,
+            next_frame_send,
+        );
+        assert_eq!(burst_started, Some(first_send));
+
+        let headroom =
+            Duration::from_millis(lomi_remote_protocol::message_framing::ASSEMBLY_TIMEOUT_MS)
+                .saturating_add(PEER_REFRESH_MARGIN);
+        let operation_deadline = first_send + headroom + Duration::from_secs(2);
+        let proof_fresh_until = first_send + PEER_REFRESH_MARGIN + Duration::from_secs(2);
+        assert!(terminal_burst_can_continue(
+            burst_started,
+            first_send + Duration::from_millis(499),
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+        assert!(!terminal_burst_can_continue(
+            burst_started,
+            first_send + registry::STAGED_MESSAGE_BATCH_QUANTUM,
+            proof_fresh_until,
+            operation_deadline,
+            true,
+            true,
+            true,
+        ));
+
+        // First-send eligibility is explicit; Started-Git streams keep their
+        // existing no-burst behavior.
+        let mut ineligible = false;
+        let mut no_burst = None;
+        start_terminal_burst_at_first_send(&mut ineligible, &mut no_burst, first_send);
+        assert_eq!(no_burst, None);
+    }
+
+    #[test]
+    fn terminal_burst_requires_first_send_quantum_proof_and_worker_headroom() {
         let now = Instant::now();
         let started = now - Duration::from_millis(499);
         let headroom =
@@ -5457,6 +5546,7 @@ mod terminal_renew_fast_path_tests {
         ApplicationMajor, TimeoutMs,
         message_framing::{MessageEncoder, MessageKind},
         rpc::{RequestKind, RpcResponse, RpcResult, TerminalLeaseParams},
+        streams::TerminalStreamFrame,
     };
 
     #[test]
@@ -5525,11 +5615,11 @@ mod terminal_renew_fast_path_tests {
     }
 
     fn encrypted_request(
+        encoder: &mut MessageEncoder,
         channel: &mut lomi_remote_crypto::Channel,
         context: &lomi_remote_crypto::ChannelContextV3,
         request: &RpcRequest,
     ) -> Vec<u8> {
-        let mut encoder = MessageEncoder::new();
         encoder
             .begin(
                 MessageKind::RpcRequest,
@@ -5544,25 +5634,28 @@ mod terminal_renew_fast_path_tests {
         channel: &mut lomi_remote_crypto::Channel,
         context: &lomi_remote_crypto::ChannelContextV3,
         frame: &[u8],
+        assembler: &mut MessageAssembler,
+        origin: Instant,
     ) -> RpcResponse {
         let plain = channel.open_binary(context.channel_id, frame).unwrap();
-        let mut assembler = MessageAssembler::new();
-        let message = assembler.push(&plain, 0).unwrap().unwrap();
+        let elapsed_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let message = assembler.push(&plain, elapsed_ms).unwrap().unwrap();
         assert_eq!(message.kind, MessageKind::RpcResponse);
         lomi_remote_protocol::rpc::decode_response(&message.bytes).unwrap()
     }
 
-    fn with_established_terminal_renew<'a>(
+    fn established_terminal_connection<'a>(
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
         runtime: Runtime<'a>,
         eligibility: &PeerEligibility,
         fixture: &super::super::channel::tests::TerminalFixture,
-        test: impl FnOnce(
-            &mut Connection<'a>,
-            &mut lomi_remote_crypto::Channel,
-            &lomi_remote_protocol::TerminalContext,
-            &lomi_remote_protocol::rpc::TerminalLeaseResult,
-        ),
+        seed_test_lease: bool,
+    ) -> (
+        Connection<'a>,
+        lomi_remote_crypto::Channel,
+        lomi_remote_protocol::TerminalContext,
+        Option<lomi_remote_protocol::rpc::TerminalLeaseResult>,
+        Option<lomi_terminal::Attachment>,
     ) {
         let cancelled = runtime.operation.cancellation_latch();
         let maintenance =
@@ -5573,47 +5666,45 @@ mod terminal_renew_fast_path_tests {
             aborted: &maintenance_aborted,
             ..runtime
         };
-        let (established, mut consumer) =
-            super::super::channel::tests::establish_terminal_connection(
-                auth,
-                admission_runtime,
-                eligibility,
-                fixture,
-            );
+        let (established, consumer) = super::super::channel::tests::establish_terminal_connection(
+            auth,
+            admission_runtime,
+            eligibility,
+            fixture,
+        );
         let mut remote_terminal = RemoteTerminalState::new(
             std::sync::Arc::downgrade(&fixture.coordinator),
             &established,
         )
         .unwrap();
-        let principal = remote_terminal.principal_for_test();
-        let attachment = fixture
-            .coordinator
-            .terminals
-            .attach(
-                fixture.terminal.session_id,
-                fixture.terminal.session_epoch,
-                principal,
-            )
-            .unwrap();
-        attachment
-            .acknowledge(principal, attachment.snapshot.sequence.0)
-            .unwrap();
-        let lease = fixture
-            .coordinator
-            .terminals
-            .claim(
-                fixture.terminal.session_id,
-                fixture.terminal.session_epoch,
-                principal,
-            )
-            .unwrap();
         let mut terminal = fixture.terminal.clone();
         terminal.workspace = fixture.workspace.clone();
-        let initial = remote_terminal
-            .seed_test_lease(&established, terminal.clone(), lease)
-            .unwrap();
+        let (initial, attachment_guard) = if seed_test_lease {
+            let principal = remote_terminal.principal_for_test();
+            let attachment = fixture
+                .coordinator
+                .terminals
+                .attach(terminal.session_id, terminal.session_epoch, principal)
+                .unwrap();
+            attachment
+                .acknowledge(principal, attachment.snapshot.sequence.0)
+                .unwrap();
+            let lease = fixture
+                .coordinator
+                .terminals
+                .claim(terminal.session_id, terminal.session_epoch, principal)
+                .unwrap();
+            let initial = remote_terminal
+                .seed_test_lease(&established, terminal.clone(), lease)
+                .unwrap();
+            // Attachment drop removes the test subscription and revokes its
+            // associated lease; keep it alive through the renewal callback.
+            (Some(initial), Some(attachment))
+        } else {
+            (None, None)
+        };
 
-        let mut connection = Connection {
+        let connection = Connection {
             coordinator: std::sync::Arc::downgrade(&fixture.coordinator),
             terminal: Some(remote_terminal),
             watch: None,
@@ -5644,6 +5735,24 @@ mod terminal_renew_fast_path_tests {
             git_read: None,
             git_mutation: None,
         };
+        (connection, consumer, terminal, initial, attachment_guard)
+    }
+
+    fn with_established_terminal_renew<'a>(
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'a>,
+        eligibility: &PeerEligibility,
+        fixture: &super::super::channel::tests::TerminalFixture,
+        test: impl FnOnce(
+            &mut Connection<'a>,
+            &mut lomi_remote_crypto::Channel,
+            &lomi_remote_protocol::TerminalContext,
+            &lomi_remote_protocol::rpc::TerminalLeaseResult,
+        ),
+    ) {
+        let (mut connection, mut consumer, terminal, initial, _attachment_guard) =
+            established_terminal_connection(auth, runtime, eligibility, fixture, true);
+        let initial = initial.expect("renew test setup seeds a current control lease");
         let request = RpcRequest {
             v: ApplicationMajor::try_from(2).unwrap(),
             r#type: RequestKind::Request,
@@ -5654,13 +5763,330 @@ mod terminal_renew_fast_path_tests {
                 lease: initial.lease.clone(),
             }),
         };
-        let encrypted = encrypted_request(&mut consumer, &fixture.context, &request);
+        let mut request_encoder = MessageEncoder::new();
+        let encrypted = encrypted_request(
+            &mut request_encoder,
+            &mut consumer,
+            &fixture.context,
+            &request,
+        );
         let IngressSocket::Memory(socket) = &mut connection.socket else {
             unreachable!("renew tests use their in-memory relay boundary");
         };
         socket.incoming.push_back(encrypted);
-
         test(&mut connection, &mut consumer, &terminal, &initial);
+    }
+
+    fn with_established_terminal_subscription<'a>(
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'a>,
+        eligibility: &PeerEligibility,
+        fixture: &super::super::channel::tests::TerminalFixture,
+        test: impl FnOnce(
+            &mut Connection<'a>,
+            &mut lomi_remote_crypto::Channel,
+            &lomi_remote_protocol::TerminalContext,
+            &lomi_remote_protocol::streams::TerminalSnapshotMetadata,
+            &mut MessageEncoder,
+            &mut MessageAssembler,
+        ),
+    ) {
+        let (mut connection, mut consumer, terminal, _, _attachment_guard) =
+            established_terminal_connection(auth, runtime, eligibility, fixture, false);
+        let attach_request = RpcRequest {
+            v: ApplicationMajor::try_from(2).unwrap(),
+            r#type: RequestKind::Request,
+            request_id: "terminal-control-setup".to_owned().try_into().unwrap(),
+            timeout_ms: TimeoutMs::new(10_000).unwrap(),
+            call: RpcCall::TerminalAttach(TerminalReadParams {
+                terminal: terminal.clone(),
+            }),
+        };
+        let mut request_encoder = MessageEncoder::new();
+        let encrypted = encrypted_request(
+            &mut request_encoder,
+            &mut consumer,
+            &fixture.context,
+            &attach_request,
+        );
+        let IngressSocket::Memory(socket) = &mut connection.socket else {
+            unreachable!("terminal control tests use their in-memory relay boundary");
+        };
+        socket.incoming.push_back(encrypted);
+
+        let mut metadata = None;
+        let mut snapshot_complete = false;
+        let mut sent_index = 0;
+        let mut assembler = MessageAssembler::new();
+        super::super::peer::with_test_pairing_get(fixture.source.response.clone(), |_get_count| {
+            // One turn sends one physical fragment. The 540 KiB terminal
+            // fixture needs 34 snapshot chunks with four fragments each,
+            // plus the attach response; 64 turns stopped near chunk 15.
+            for _ in 0..256 {
+                let outcome = connection.turn(
+                    auth,
+                    runtime,
+                    eligibility,
+                    Some(runtime.operation.cancellation_latch()),
+                );
+                assert!(outcome.is_ok(), "terminal attach setup failed: {outcome:?}");
+                let IngressSocket::Memory(socket) = &connection.socket else {
+                    unreachable!("terminal control tests use their in-memory relay boundary");
+                };
+                while sent_index < socket.sent.len() {
+                    let ciphertext = &socket.sent[sent_index];
+                    sent_index += 1;
+                    let plaintext = consumer
+                        .open_binary(fixture.context.channel_id, ciphertext)
+                        .unwrap();
+                    let elapsed_ms =
+                        u64::try_from(connection.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let Some(message) = assembler.push(&plaintext, elapsed_ms).unwrap() else {
+                        continue;
+                    };
+                    match message.kind {
+                        MessageKind::RpcResponse => {
+                            let response =
+                                lomi_remote_protocol::rpc::decode_response(&message.bytes).unwrap();
+                            let RpcResponse::Result {
+                                request_id,
+                                result: RpcResult::TerminalAttach(result),
+                                ..
+                            } = response
+                            else {
+                                panic!("terminal.attach response expected: {response:?}");
+                            };
+                            assert_eq!(String::from(request_id), "terminal-control-setup");
+                            assert!(metadata.replace(result).is_none());
+                        }
+                        MessageKind::TerminalFrame => {
+                            let frame: TerminalStreamFrame =
+                                serde_json::from_slice(&message.bytes).unwrap();
+                            if let TerminalStreamFrame::SnapshotComplete(complete) = frame {
+                                let metadata = metadata
+                                    .as_ref()
+                                    .expect("attach metadata precedes snapshot completion");
+                                assert_eq!(complete.terminal, metadata.terminal);
+                                assert_eq!(complete.subscription_id, metadata.subscription_id);
+                                assert_eq!(complete.through_seq, metadata.through_seq);
+                                snapshot_complete = true;
+                            }
+                        }
+                        kind => panic!("unexpected setup message kind: {kind:?}"),
+                    }
+                }
+                if snapshot_complete {
+                    break;
+                }
+            }
+        });
+        let metadata = metadata.expect("encrypted terminal.attach metadata was sent");
+        assert!(
+            snapshot_complete,
+            "initial terminal snapshot did not commit"
+        );
+        assert!(connection.response.is_none());
+        assert!(connection.stream.is_none());
+        test(
+            &mut connection,
+            &mut consumer,
+            &terminal,
+            &metadata,
+            &mut request_encoder,
+            &mut assembler,
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TerminalControlKind {
+        Ack,
+        Claim,
+    }
+
+    impl TerminalControlKind {
+        fn request_id(self) -> &'static str {
+            match self {
+                Self::Ack => "terminal-ack-fast-path",
+                Self::Claim => "terminal-claim-fast-path",
+            }
+        }
+
+        fn request(
+            self,
+            terminal: &lomi_remote_protocol::TerminalContext,
+            metadata: &lomi_remote_protocol::streams::TerminalSnapshotMetadata,
+        ) -> RpcRequest {
+            let call = match self {
+                Self::Ack => RpcCall::TerminalAck(TerminalAckParams {
+                    terminal: terminal.clone(),
+                    subscription_id: metadata.subscription_id.clone(),
+                    through_seq: metadata.through_seq,
+                }),
+                Self::Claim => RpcCall::TerminalClaim(TerminalClaimParams {
+                    terminal: terminal.clone(),
+                    subscription_id: metadata.subscription_id.clone(),
+                    rendered_through_seq: metadata.through_seq,
+                }),
+            };
+            RpcRequest {
+                v: ApplicationMajor::try_from(2).unwrap(),
+                r#type: RequestKind::Request,
+                request_id: self.request_id().to_owned().try_into().unwrap(),
+                timeout_ms: TimeoutMs::new(5000).unwrap(),
+                call,
+            }
+        }
+    }
+
+    fn queue_request(
+        connection: &mut Connection<'_>,
+        consumer: &mut lomi_remote_crypto::Channel,
+        encoder: &mut MessageEncoder,
+        channel_context: &lomi_remote_crypto::ChannelContextV3,
+        request: &RpcRequest,
+    ) {
+        let encrypted = encrypted_request(encoder, consumer, channel_context, request);
+        let IngressSocket::Memory(socket) = &mut connection.socket else {
+            unreachable!("terminal control tests use their in-memory relay boundary");
+        };
+        socket.incoming.push_back(encrypted);
+    }
+
+    fn terminal_request_response_one_turn<'a>(
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'a>,
+        eligibility: &PeerEligibility,
+        fixture: &super::super::channel::tests::TerminalFixture,
+        connection: &mut Connection<'a>,
+        consumer: &mut lomi_remote_crypto::Channel,
+        request_encoder: &mut MessageEncoder,
+        response_assembler: &mut MessageAssembler,
+        request: &RpcRequest,
+    ) -> RpcResponse {
+        connection.peer = None;
+        queue_request(
+            connection,
+            consumer,
+            request_encoder,
+            &fixture.context,
+            request,
+        );
+        let sent_before = connection.socket.sent().len();
+        super::super::peer::with_test_pairing_get(fixture.source.response.clone(), |get_count| {
+            let outcome = connection.turn(
+                auth,
+                runtime,
+                eligibility,
+                Some(runtime.operation.cancellation_latch()),
+            );
+            assert!(
+                matches!(&outcome, Ok(true)),
+                "terminal request did not finish in its current turn: {outcome:?}"
+            );
+            assert_eq!(
+                get_count.get(),
+                2,
+                "maintenance and fresh request pairing reads are required"
+            );
+            assert_eq!(connection.socket.sent().len(), sent_before + 1);
+            assert!(connection.response.is_none());
+        });
+        let IngressSocket::Memory(socket) = &connection.socket else {
+            unreachable!("terminal control tests use their in-memory relay boundary");
+        };
+        decode_encrypted_response(
+            consumer,
+            &fixture.context,
+            &socket.sent[sent_before],
+            response_assembler,
+            connection.origin,
+        )
+    }
+
+    fn claim_terminal_control_lease<'a>(
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'a>,
+        eligibility: &PeerEligibility,
+        fixture: &super::super::channel::tests::TerminalFixture,
+        connection: &mut Connection<'a>,
+        consumer: &mut lomi_remote_crypto::Channel,
+        terminal: &lomi_remote_protocol::TerminalContext,
+        metadata: &lomi_remote_protocol::streams::TerminalSnapshotMetadata,
+        request_encoder: &mut MessageEncoder,
+        response_assembler: &mut MessageAssembler,
+    ) -> lomi_remote_protocol::rpc::TerminalLeaseResult {
+        let request = TerminalControlKind::Claim.request(terminal, metadata);
+        let response = terminal_request_response_one_turn(
+            auth,
+            runtime,
+            eligibility,
+            fixture,
+            connection,
+            consumer,
+            request_encoder,
+            response_assembler,
+            &request,
+        );
+        let RpcResponse::Result {
+            request_id,
+            result: RpcResult::TerminalClaim(lease),
+            ..
+        } = response
+        else {
+            panic!("real terminal.claim result expected: {response:?}");
+        };
+        assert_eq!(
+            String::from(request_id),
+            TerminalControlKind::Claim.request_id()
+        );
+        assert_eq!(lease.terminal, *terminal);
+        lease
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TerminalDataKind {
+        Input,
+        Resize,
+    }
+
+    impl TerminalDataKind {
+        fn request_id(self) -> &'static str {
+            match self {
+                Self::Input => "terminal-input-fast-path",
+                Self::Resize => "terminal-resize-fast-path",
+            }
+        }
+
+        fn request(
+            self,
+            terminal: &lomi_remote_protocol::TerminalContext,
+            lease: &lomi_remote_protocol::rpc::TerminalLeaseResult,
+        ) -> RpcRequest {
+            let call = match self {
+                Self::Input => RpcCall::TerminalInput(TerminalInputParams {
+                    terminal: terminal.clone(),
+                    lease: lease.lease.clone(),
+                    input_id: lease.next_input_id,
+                    input_seq: lease.next_input_seq,
+                    // A printable byte only; this never submits Enter or a command.
+                    bytes: BoundedList(vec![b'x']),
+                }),
+                Self::Resize => RpcCall::TerminalResize(TerminalResizeParams {
+                    terminal: terminal.clone(),
+                    lease: lease.lease.clone(),
+                    resize_seq: lease.next_resize_seq,
+                    columns: TerminalDimension(82),
+                    rows: TerminalDimension(25),
+                }),
+            };
+            RpcRequest {
+                v: ApplicationMajor::try_from(2).unwrap(),
+                r#type: RequestKind::Request,
+                request_id: self.request_id().to_owned().try_into().unwrap(),
+                timeout_ms: TimeoutMs::new(5000).unwrap(),
+                call,
+            }
+        }
     }
 
     #[test]
@@ -5697,8 +6123,14 @@ mod terminal_renew_fast_path_tests {
                                 assert_eq!(connection.socket.sent().len(), 1);
                                 assert!(started.elapsed() < Duration::from_millis(1500));
                                 let sent = connection.socket.sent();
-                                let response =
-                                    decode_encrypted_response(consumer, &fixture.context, &sent[0]);
+                                let mut response_assembler = MessageAssembler::new();
+                                let response = decode_encrypted_response(
+                                    consumer,
+                                    &fixture.context,
+                                    &sent[0],
+                                    &mut response_assembler,
+                                    connection.origin,
+                                );
                                 let RpcResponse::Result {
                                     request_id,
                                     result: RpcResult::TerminalRenew(renewed),
@@ -5722,6 +6154,599 @@ mod terminal_renew_fast_path_tests {
                         );
                     },
                 );
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn established_encrypted_ack_and_claim_flush_after_committed_snapshot() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                for kind in [TerminalControlKind::Ack, TerminalControlKind::Claim] {
+                    with_established_terminal_subscription(
+                        auth,
+                        runtime,
+                        eligibility,
+                        fixture,
+                        |connection,
+                         consumer,
+                         terminal,
+                         metadata,
+                         request_encoder,
+                         response_assembler| {
+                            // These operations must take a fresh request admission and
+                            // pairing read; they cannot borrow the maintenance proof.
+                            connection.peer = None;
+                            let request = kind.request(terminal, metadata);
+                            queue_request(
+                                connection,
+                                consumer,
+                                request_encoder,
+                                &fixture.context,
+                                &request,
+                            );
+                            let sent_before = connection.socket.sent().len();
+                            super::super::peer::with_test_pairing_get(
+                                fixture.source.response.clone(),
+                                |get_count| {
+                                    let outcome = connection.turn(
+                                        auth,
+                                        runtime,
+                                        eligibility,
+                                        Some(runtime.operation.cancellation_latch()),
+                                    );
+                                    assert!(
+                                        matches!(&outcome, Ok(true)),
+                                        "terminal control request did not finish: {outcome:?}"
+                                    );
+                                    assert_eq!(
+                                        get_count.get(),
+                                        2,
+                                        "maintenance and fresh request pairing reads are required"
+                                    );
+                                    assert_eq!(connection.socket.sent().len(), sent_before + 1);
+                                    assert!(connection.response.is_none());
+                                    let response = decode_encrypted_response(
+                                        consumer,
+                                        &fixture.context,
+                                        &connection.socket.sent()[sent_before],
+                                        response_assembler,
+                                        connection.origin,
+                                    );
+                                    let RpcResponse::Result {
+                                        request_id, result, ..
+                                    } = response
+                                    else {
+                                        panic!("terminal control success expected: {response:?}");
+                                    };
+                                    assert_eq!(String::from(request_id), kind.request_id());
+                                    match (kind, result) {
+                                        (TerminalControlKind::Ack, RpcResult::TerminalAck(ack)) => {
+                                            assert_eq!(
+                                                ack.subscription_id,
+                                                metadata.subscription_id
+                                            );
+                                            assert_eq!(ack.through_seq, metadata.through_seq);
+                                        }
+                                        (
+                                            TerminalControlKind::Claim,
+                                            RpcResult::TerminalClaim(lease),
+                                        ) => {
+                                            assert_eq!(lease.terminal, *terminal);
+                                            assert_eq!(lease.expires_in_ms.get(), 5000);
+                                        }
+                                        (_, unexpected) => {
+                                            panic!(
+                                                "unexpected terminal control result: {unexpected:?}"
+                                            )
+                                        }
+                                    }
+                                },
+                            );
+                        },
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn ack_and_claim_send_watch_cancellation_and_ambiguous_write_are_not_replayed() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                for kind in [TerminalControlKind::Ack, TerminalControlKind::Claim] {
+                    for fail_after_write in [false, true] {
+                        with_established_terminal_subscription(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            |connection,
+                             consumer,
+                             terminal,
+                             metadata,
+                             request_encoder,
+                             _response_assembler| {
+                                connection.peer = None;
+                                let request = kind.request(terminal, metadata);
+                                queue_request(
+                                    connection,
+                                    consumer,
+                                    request_encoder,
+                                    &fixture.context,
+                                    &request,
+                                );
+                                let sent_before = connection.socket.sent().len();
+                                match &mut connection.socket {
+                                    IngressSocket::Memory(socket) if fail_after_write => {
+                                        socket.fail_after_write = true;
+                                    }
+                                    IngressSocket::Memory(socket) => {
+                                        socket.cancel_before_send = Some(api.cancelled.clone());
+                                    }
+                                    IngressSocket::Relay(_) => unreachable!(
+                                        "terminal control tests use the in-memory relay boundary"
+                                    ),
+                                }
+                                super::super::peer::with_test_pairing_get(
+                                    fixture.source.response.clone(),
+                                    |get_count| {
+                                        let outcome = connection.turn(
+                                            auth,
+                                            runtime,
+                                            eligibility,
+                                            Some(runtime.operation.cancellation_latch()),
+                                        );
+                                        assert!(
+                                            outcome.is_err(),
+                                            "physical send fault unexpectedly succeeded: {outcome:?}"
+                                        );
+                                        assert_eq!(get_count.get(), 2);
+                                        let IngressSocket::Memory(socket) = &connection.socket
+                                        else {
+                                            unreachable!("terminal control tests use memory socket")
+                                        };
+                                        assert!(socket.closed);
+                                        let expected_writes =
+                                            sent_before + if fail_after_write { 1 } else { 0 };
+                                        assert_eq!(socket.sent.len(), expected_writes);
+                                        assert!(connection.response.is_none());
+
+                                        if !fail_after_write {
+                                            api.cancelled.store(false, Ordering::Release);
+                                        }
+
+                                        // A subsequent turn cannot replay either a
+                                        // suppressed result or an ambiguous write.
+                                        assert!(
+                                            connection
+                                                .turn(
+                                                    auth,
+                                                    runtime,
+                                                    eligibility,
+                                                    Some(runtime.operation.cancellation_latch()),
+                                                )
+                                                .is_err()
+                                        );
+                                        let IngressSocket::Memory(socket) = &connection.socket
+                                        else {
+                                            unreachable!("terminal control tests use memory socket")
+                                        };
+                                        assert_eq!(socket.sent.len(), expected_writes);
+                                        assert!(connection.response.is_none());
+                                    },
+                                );
+                            },
+                        );
+                    }
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn stale_ack_and_mismatched_claim_authority_are_refused_in_same_turn() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                for kind in [TerminalControlKind::Ack, TerminalControlKind::Claim] {
+                    with_established_terminal_subscription(
+                        auth,
+                        runtime,
+                        eligibility,
+                        fixture,
+                        |connection,
+                         consumer,
+                         terminal,
+                         metadata,
+                         request_encoder,
+                         response_assembler| {
+                            connection.peer = None;
+                            let mut request = kind.request(terminal, metadata);
+                            match &mut request.call {
+                                RpcCall::TerminalAck(params) => {
+                                    params.through_seq = lomi_remote_protocol::streams::TerminalSeq(
+                                        DecimalU64(metadata.through_seq.0.0.saturating_add(1)),
+                                    );
+                                }
+                                RpcCall::TerminalClaim(params) => {
+                                    params.subscription_id =
+                                        "other-subscription".to_owned().try_into().unwrap();
+                                }
+                                _ => unreachable!("helper builds only ACK or Claim"),
+                            }
+                            queue_request(
+                                connection,
+                                consumer,
+                                request_encoder,
+                                &fixture.context,
+                                &request,
+                            );
+                            let sent_before = connection.socket.sent().len();
+                            super::super::peer::with_test_pairing_get(
+                                fixture.source.response.clone(),
+                                |get_count| {
+                                    let outcome = connection.turn(
+                                        auth,
+                                        runtime,
+                                        eligibility,
+                                        Some(runtime.operation.cancellation_latch()),
+                                    );
+                                    assert!(matches!(&outcome, Ok(true)));
+                                    assert_eq!(get_count.get(), 2);
+                                    assert_eq!(connection.socket.sent().len(), sent_before + 1);
+                                    assert!(connection.response.is_none());
+                                    let response = decode_encrypted_response(
+                                        consumer,
+                                        &fixture.context,
+                                        &connection.socket.sent()[sent_before],
+                                        response_assembler,
+                                        connection.origin,
+                                    );
+                                    let RpcResponse::Error {
+                                        request_id, error, ..
+                                    } = response
+                                    else {
+                                        panic!("stale authority must be refused: {response:?}");
+                                    };
+                                    assert_eq!(String::from(request_id), kind.request_id());
+                                    assert_eq!(
+                                        error.code(),
+                                        lomi_remote_protocol::ErrorCode::ResyncRequired
+                                    );
+                                },
+                            );
+                        },
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn established_encrypted_input_and_resize_flush_after_real_claim() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                with_established_terminal_subscription(
+                    auth,
+                    runtime,
+                    eligibility,
+                    fixture,
+                    |connection,
+                     consumer,
+                     terminal,
+                     metadata,
+                     request_encoder,
+                     response_assembler| {
+                        let lease = claim_terminal_control_lease(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            terminal,
+                            metadata,
+                            request_encoder,
+                            response_assembler,
+                        );
+                        assert_eq!(lease.expires_in_ms.get(), 5000);
+                        assert!(connection.stream.is_none());
+
+                        let input_request = TerminalDataKind::Input.request(terminal, &lease);
+                        let input_response = terminal_request_response_one_turn(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            request_encoder,
+                            response_assembler,
+                            &input_request,
+                        );
+                        let RpcResponse::Result {
+                            request_id,
+                            result: RpcResult::TerminalInput(receipt),
+                            ..
+                        } = input_response
+                        else {
+                            panic!("terminal.input receipt expected: {input_response:?}");
+                        };
+                        assert_eq!(
+                            String::from(request_id),
+                            TerminalDataKind::Input.request_id()
+                        );
+                        let submitted = lomi_remote_protocol::InputBytes::new(1).unwrap();
+                        receipt
+                            .validate_binding(
+                                terminal.session_id,
+                                terminal.session_epoch,
+                                lease.next_input_id,
+                                lease.next_input_seq.0,
+                                submitted,
+                            )
+                            .unwrap();
+                        assert_eq!(receipt.accepted_bytes(), submitted);
+                        assert!(connection.response.is_none());
+                        assert!(connection.stream.is_none());
+
+                        // The same claimed lease binding remains valid for the
+                        // following resize on this already attached connection.
+                        let resize_request = TerminalDataKind::Resize.request(terminal, &lease);
+                        let resize_response = terminal_request_response_one_turn(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            request_encoder,
+                            response_assembler,
+                            &resize_request,
+                        );
+                        let RpcResponse::Result {
+                            request_id,
+                            result: RpcResult::TerminalResize(resize),
+                            ..
+                        } = resize_response
+                        else {
+                            panic!("terminal.resize receipt expected: {resize_response:?}");
+                        };
+                        assert_eq!(
+                            String::from(request_id),
+                            TerminalDataKind::Resize.request_id()
+                        );
+                        assert_eq!(resize.terminal, *terminal);
+                        assert_eq!(resize.resize_seq, lease.next_resize_seq);
+                        assert_eq!(resize.columns, TerminalDimension(82));
+                        assert_eq!(resize.rows, TerminalDimension(25));
+                        assert!(connection.response.is_none());
+                        assert!(connection.stream.is_none());
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn stale_terminal_input_and_resize_sequences_are_refused_in_one_turn() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                with_established_terminal_subscription(
+                    auth,
+                    runtime,
+                    eligibility,
+                    fixture,
+                    |connection,
+                     consumer,
+                     terminal,
+                     metadata,
+                     request_encoder,
+                     response_assembler| {
+                        let lease = claim_terminal_control_lease(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            terminal,
+                            metadata,
+                            request_encoder,
+                            response_assembler,
+                        );
+                        let input_request = RpcRequest {
+                            v: ApplicationMajor::try_from(2).unwrap(),
+                            r#type: RequestKind::Request,
+                            request_id: "terminal-input-stale-sequence"
+                                .to_owned()
+                                .try_into()
+                                .unwrap(),
+                            timeout_ms: TimeoutMs::new(5000).unwrap(),
+                            call: RpcCall::TerminalInput(TerminalInputParams {
+                                terminal: terminal.clone(),
+                                lease: lease.lease.clone(),
+                                input_id: lease.next_input_id,
+                                input_seq: lomi_remote_protocol::streams::InputSeq(DecimalU64(
+                                    lease.next_input_seq.0.0.saturating_add(1),
+                                )),
+                                bytes: BoundedList(vec![b'x']),
+                            }),
+                        };
+                        let input_response = terminal_request_response_one_turn(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            request_encoder,
+                            response_assembler,
+                            &input_request,
+                        );
+                        let RpcResponse::Error { error, .. } = input_response else {
+                            panic!("stale terminal.input must be rejected: {input_response:?}");
+                        };
+                        assert_eq!(
+                            error.code(),
+                            lomi_remote_protocol::ErrorCode::IdempotencyConflict
+                        );
+
+                        let resize_request = RpcRequest {
+                            v: ApplicationMajor::try_from(2).unwrap(),
+                            r#type: RequestKind::Request,
+                            request_id: "terminal-resize-stale-sequence"
+                                .to_owned()
+                                .try_into()
+                                .unwrap(),
+                            timeout_ms: TimeoutMs::new(5000).unwrap(),
+                            call: RpcCall::TerminalResize(TerminalResizeParams {
+                                terminal: terminal.clone(),
+                                lease: lease.lease.clone(),
+                                resize_seq: lomi_remote_protocol::streams::ResizeSeq(DecimalU64(
+                                    lease.next_resize_seq.0.0.saturating_add(1),
+                                )),
+                                columns: TerminalDimension(82),
+                                rows: TerminalDimension(25),
+                            }),
+                        };
+                        let resize_response = terminal_request_response_one_turn(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            connection,
+                            consumer,
+                            request_encoder,
+                            response_assembler,
+                            &resize_request,
+                        );
+                        let RpcResponse::Error { error, .. } = resize_response else {
+                            panic!("stale terminal.resize must be rejected: {resize_response:?}");
+                        };
+                        assert_eq!(
+                            error.code(),
+                            lomi_remote_protocol::ErrorCode::IdempotencyConflict
+                        );
+                        assert!(connection.response.is_none());
+                        assert!(connection.stream.is_none());
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY backend")]
+    fn input_and_resize_send_failures_are_never_replayed() {
+        super::super::channel::tests::with_terminal_fixture(
+            |auth, _config, runtime, eligibility, _owner, api| {
+                let fixture = api.terminal.as_ref().unwrap();
+                for kind in [TerminalDataKind::Input, TerminalDataKind::Resize] {
+                    for fail_after_write in [false, true] {
+                        with_established_terminal_subscription(
+                            auth,
+                            runtime,
+                            eligibility,
+                            fixture,
+                            |connection,
+                             consumer,
+                             terminal,
+                             metadata,
+                             request_encoder,
+                             response_assembler| {
+                                let lease = claim_terminal_control_lease(
+                                    auth,
+                                    runtime,
+                                    eligibility,
+                                    fixture,
+                                    connection,
+                                    consumer,
+                                    terminal,
+                                    metadata,
+                                    request_encoder,
+                                    response_assembler,
+                                );
+                                let request = kind.request(terminal, &lease);
+                                connection.peer = None;
+                                queue_request(
+                                    connection,
+                                    consumer,
+                                    request_encoder,
+                                    &fixture.context,
+                                    &request,
+                                );
+                                let sent_before = connection.socket.sent().len();
+                                match &mut connection.socket {
+                                    IngressSocket::Memory(socket) if fail_after_write => {
+                                        socket.fail_after_write = true;
+                                    }
+                                    IngressSocket::Memory(socket) => {
+                                        socket.cancel_before_send = Some(api.cancelled.clone());
+                                    }
+                                    IngressSocket::Relay(_) => unreachable!(
+                                        "terminal control tests use their in-memory relay boundary"
+                                    ),
+                                }
+                                super::super::peer::with_test_pairing_get(
+                                    fixture.source.response.clone(),
+                                    |get_count| {
+                                        let outcome = connection.turn(
+                                            auth,
+                                            runtime,
+                                            eligibility,
+                                            Some(runtime.operation.cancellation_latch()),
+                                        );
+                                        assert!(outcome.is_err());
+                                        assert_eq!(get_count.get(), 2);
+                                        let IngressSocket::Memory(socket) = &connection.socket
+                                        else {
+                                            unreachable!("terminal data tests use memory socket")
+                                        };
+                                        assert!(socket.closed);
+                                        let expected_writes =
+                                            sent_before + if fail_after_write { 1 } else { 0 };
+                                        assert_eq!(socket.sent.len(), expected_writes);
+                                        assert!(connection.response.is_none());
+
+                                        if !fail_after_write {
+                                            api.cancelled.store(false, Ordering::Release);
+                                        }
+
+                                        // A cancelled pre-send or ambiguous post-write
+                                        // outcome cannot be replayed on this channel.
+                                        assert!(
+                                            connection
+                                                .turn(
+                                                    auth,
+                                                    runtime,
+                                                    eligibility,
+                                                    Some(runtime.operation.cancellation_latch()),
+                                                )
+                                                .is_err()
+                                        );
+                                        let IngressSocket::Memory(socket) = &connection.socket
+                                        else {
+                                            unreachable!("terminal data tests use memory socket")
+                                        };
+                                        assert_eq!(socket.sent.len(), expected_writes);
+                                        assert!(connection.response.is_none());
+                                    },
+                                );
+                            },
+                        );
+                    }
+                }
             },
         );
     }

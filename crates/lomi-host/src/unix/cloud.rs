@@ -36,6 +36,46 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 fn next_heartbeat_at(completed_at: Instant) -> Option<Instant> {
     completed_at.checked_add(HEARTBEAT_INTERVAL)
 }
+fn cadence_peer_deferral_request(
+    now: Instant,
+    heartbeat: Option<&HeartbeatObservation>,
+    lease_until: Option<Instant>,
+    fresh_until: Option<Instant>,
+    heartbeat_at: Option<Instant>,
+    peer_cutoff: Option<Instant>,
+    attempted_at: Option<Instant>,
+    pending_publication: bool,
+    needs_publication: bool,
+    fresh_runtime_read: bool,
+) -> Option<Instant> {
+    let heartbeat = heartbeat?;
+    let lease_until = lease_until?;
+    let fresh_until = fresh_until?;
+    let heartbeat_at = heartbeat_at?;
+    let peer_cutoff = peer_cutoff?;
+    let request_started = heartbeat.request_started;
+    let observed_lease_until =
+        request_started.checked_add(Duration::from_millis(heartbeat.lease_ms))?;
+    let observed_fresh_until =
+        request_started.checked_add(Duration::from_millis(heartbeat.freshness_ms))?;
+    if request_started > now
+        || attempted_at == Some(request_started)
+        || pending_publication
+        || needs_publication
+        || fresh_runtime_read
+        || lease_until != observed_lease_until
+        || fresh_until != observed_fresh_until
+        || fresh_until > lease_until
+        || heartbeat_at > now
+        || now >= lease_until
+        || now >= fresh_until
+        || peer_cutoff <= now
+        || peer_cutoff >= fresh_until
+    {
+        return None;
+    }
+    Some(request_started)
+}
 #[derive(Default)]
 enum Action {
     #[default]
@@ -60,6 +100,7 @@ pub(super) struct Worker {
     fresh_runtime_scope: Option<CloudRuntimeScope>,
     publication_turn: bool,
     heartbeat_observation: Option<HeartbeatObservation>,
+    heartbeat_deferral_attempt: Option<Instant>,
     logout_epoch_attempt: Option<(u64, [u8; 32])>,
     normal_publication_origin: Option<NormalConfiguredOrigin>,
     normal_worker_identity: std::sync::Arc<()>,
@@ -147,6 +188,7 @@ impl Worker {
         self.pending_publication = None;
         self.normal_publication_origin = None;
         self.heartbeat_observation = None;
+        self.heartbeat_deferral_attempt = None;
         self.eligibility = None;
         self.lease_until = None;
         self.fresh_until = None;
@@ -163,6 +205,7 @@ impl Worker {
         self.pending_publication = None;
         self.normal_publication_origin = None;
         self.heartbeat_observation = None;
+        self.heartbeat_deferral_attempt = None;
         self.eligibility = None;
         self.lease_until = None;
         self.fresh_until = None;
@@ -237,8 +280,15 @@ impl Worker {
         config: &Config,
         runtime: Runtime<'_>,
         generation: u64,
+        next_due_established_peer_cutoff: Option<Instant>,
     ) -> Result<StepOutcome, StepError> {
-        self.run_step(auth, config, runtime, generation)
+        self.run_step(
+            auth,
+            config,
+            runtime,
+            generation,
+            next_due_established_peer_cutoff,
+        )
     }
     fn run_step(
         &mut self,
@@ -246,6 +296,7 @@ impl Worker {
         config: &Config,
         runtime: Runtime<'_>,
         generation: u64,
+        next_due_established_peer_cutoff: Option<Instant>,
     ) -> Result<StepOutcome, StepError> {
         guard(runtime, generation)?;
 
@@ -462,6 +513,27 @@ impl Worker {
                         Ok(()) => {}
                     }
                     Ok(StepOutcome::Network)
+                } else if let Some(peer_cutoff) = self.begin_cadence_peer_deferral(
+                    now,
+                    next_due_established_peer_cutoff,
+                    snapshot.needs_publication,
+                ) {
+                    // Spend this heartbeat's sole deferral attempt before the
+                    // full validator. A deferred/error result cannot retry it
+                    // under a different channel or cutoff.
+                    let outcome = self.peer_eligibility(auth, runtime, generation)?;
+                    self.unit_pending = false;
+                    if matches!(&outcome, StepOutcome::PeerEligible(_)) {
+                        let checked = Instant::now();
+                        if checked >= peer_cutoff
+                            || self.lease_until.is_none_or(|until| checked >= until)
+                            || self.fresh_until.is_none_or(|until| checked >= until)
+                        {
+                            self.eligibility = None;
+                            return Ok(StepOutcome::Deferred);
+                        }
+                    }
+                    Ok(outcome)
                 } else if heartbeat_due || snapshot.needs_publication {
                     let driver = self.normal_publication_driver().ok_or(StepError::Stale)?;
 
@@ -523,6 +595,28 @@ impl Worker {
             }
         }
     }
+    fn begin_cadence_peer_deferral(
+        &mut self,
+        now: Instant,
+        peer_cutoff: Option<Instant>,
+        needs_publication: bool,
+    ) -> Option<Instant> {
+        let request_started = cadence_peer_deferral_request(
+            now,
+            self.heartbeat_observation.as_ref(),
+            self.lease_until,
+            self.fresh_until,
+            self.heartbeat_at,
+            peer_cutoff,
+            self.heartbeat_deferral_attempt,
+            self.pending_publication.is_some(),
+            needs_publication,
+            self.fresh_runtime_read_pending || self.fresh_runtime_read_rejected,
+        )?;
+        let peer_cutoff = peer_cutoff?;
+        self.heartbeat_deferral_attempt = Some(request_started);
+        Some(peer_cutoff)
+    }
     fn peer_eligibility(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -582,6 +676,7 @@ impl Worker {
             || self.fresh_until.is_none_or(|until| checked >= until)
         {
             self.heartbeat_observation = None;
+            self.heartbeat_deferral_attempt = None;
             return Ok(StepOutcome::Deferred);
         }
         runtime.check()?;
@@ -938,6 +1033,7 @@ impl<'w> NormalPublicationDriver<'w> {
     pub(in crate::unix) fn invalidate_heartbeat(&mut self) {
         self.worker.normal_publication_origin = None;
         self.worker.heartbeat_observation = None;
+        self.worker.heartbeat_deferral_attempt = None;
         self.worker.action = Action::Get;
     }
     /// Provider work only. The caller next checks the original Domain/Store
@@ -1124,6 +1220,7 @@ impl<'w> NormalPublicationDriver<'w> {
             request_started.checked_add(Duration::from_millis(heartbeat.lease_ms));
         self.worker.fresh_until =
             request_started.checked_add(Duration::from_millis(heartbeat.freshness_ms));
+        self.worker.heartbeat_deferral_attempt = None;
         self.worker.heartbeat_observation = Some(heartbeat.clone());
         self.worker.publication_turn = true;
         self.worker.normal_publication_origin = Some(NormalConfiguredOrigin {
@@ -1342,6 +1439,201 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn test_heartbeat(
+        request_started: Instant,
+        lease_ms: u64,
+        freshness_ms: u64,
+    ) -> HeartbeatObservation {
+        HeartbeatObservation {
+            scope: CloudRuntimeScope {
+                authorization_generation: 3,
+                remote_api_origin: "https://remote.example".to_owned(),
+                host_id: lomi_remote_protocol::HostId::from_bytes([1; 16]).unwrap(),
+                owner_runtime_id: lomi_remote_protocol::RuntimeId::from_bytes([6; 16]).unwrap(),
+                owner_generation: 7,
+            },
+            runtime: RuntimeBinding {
+                runtime_id: lomi_remote_protocol::RuntimeId::from_bytes([2; 16]).unwrap(),
+                runtime_generation: DecimalU64(4),
+                host_access_epoch: DecimalU64(5),
+            },
+            request_started,
+            wall_at_request_start: 10,
+            lease_ms,
+            freshness_ms,
+        }
+    }
+
+    fn cadence_worker(request_started: Instant, heartbeat_at: Instant) -> Worker {
+        let mut worker = Worker::default();
+        worker.action = Action::Online;
+        worker.heartbeat_observation = Some(test_heartbeat(request_started, 6_000, 5_000));
+        worker.lease_until = request_started.checked_add(Duration::from_millis(6_000));
+        worker.fresh_until = request_started.checked_add(Duration::from_millis(5_000));
+        worker.heartbeat_at = Some(heartbeat_at);
+        worker
+    }
+
+    #[test]
+    fn cadence_deferral_preserves_the_original_trace_and_is_one_shot_per_heartbeat() {
+        let request_started = Instant::now();
+        let now = request_started + Duration::from_millis(1_900);
+        let peer_cutoff = now + Duration::from_millis(702);
+        let mut worker = cadence_worker(request_started, now);
+
+        assert_eq!(worker.heartbeat_at, Some(now));
+        assert_eq!(
+            worker.fresh_until,
+            Some(request_started + Duration::from_secs(5))
+        );
+        assert_eq!(
+            peer_cutoff.saturating_duration_since(now + Duration::from_millis(396)),
+            Duration::from_millis(306)
+        );
+        assert!(Duration::from_millis(329) > Duration::from_millis(306));
+
+        assert_eq!(
+            worker.begin_cadence_peer_deferral(now, Some(peer_cutoff), false),
+            Some(peer_cutoff)
+        );
+        assert_eq!(worker.heartbeat_deferral_attempt, Some(request_started));
+
+        // A deferred or failed validator cannot retry this heartbeat under a
+        // different selected channel or cutoff.
+        let changed_cutoff = now + Duration::from_millis(500);
+        assert_eq!(
+            worker.begin_cadence_peer_deferral(now, Some(changed_cutoff), false),
+            None
+        );
+        assert!(worker.heartbeat_at.is_some_and(|at| now >= at));
+
+        let next_request_started = request_started + Duration::from_millis(100);
+        worker.heartbeat_observation = Some(test_heartbeat(next_request_started, 6_000, 5_000));
+        worker.lease_until = next_request_started.checked_add(Duration::from_secs(6));
+        worker.fresh_until = next_request_started.checked_add(Duration::from_secs(5));
+        let next_cutoff = now + Duration::from_millis(600);
+        assert_eq!(
+            worker.begin_cadence_peer_deferral(now, Some(next_cutoff), false),
+            Some(next_cutoff),
+            "a new request_started observation gets its own one-shot attempt"
+        );
+        assert_eq!(
+            worker.heartbeat_deferral_attempt,
+            Some(next_request_started)
+        );
+    }
+
+    #[test]
+    fn cadence_deferral_requires_live_strictly_earlier_peer_cutoff_and_no_mandatory_work() {
+        let request_started = Instant::now();
+        let now = request_started + Duration::from_millis(1_900);
+        let heartbeat = test_heartbeat(request_started, 6_000, 5_000);
+        let lease_until = Some(request_started + Duration::from_secs(6));
+        let fresh_until = Some(request_started + Duration::from_secs(5));
+        let heartbeat_at = Some(now);
+        let peer_cutoff = now + Duration::from_millis(702);
+        let allowed = |peer_cutoff, pending_publication, needs_publication, fresh_runtime_read| {
+            cadence_peer_deferral_request(
+                now,
+                Some(&heartbeat),
+                lease_until,
+                fresh_until,
+                heartbeat_at,
+                peer_cutoff,
+                None,
+                pending_publication,
+                needs_publication,
+                fresh_runtime_read,
+            )
+        };
+
+        assert_eq!(
+            allowed(Some(peer_cutoff), false, false, false),
+            Some(request_started)
+        );
+        assert_eq!(allowed(None, false, false, false), None);
+        assert_eq!(allowed(fresh_until, false, false, false), None);
+        assert_eq!(allowed(Some(now), false, false, false), None);
+        assert_eq!(allowed(Some(peer_cutoff), true, false, false), None);
+        assert_eq!(allowed(Some(peer_cutoff), false, true, false), None);
+        assert_eq!(allowed(Some(peer_cutoff), false, false, true), None);
+        assert_eq!(
+            cadence_peer_deferral_request(
+                now,
+                Some(&heartbeat),
+                Some(now),
+                fresh_until,
+                heartbeat_at,
+                Some(peer_cutoff),
+                None,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            cadence_peer_deferral_request(
+                request_started + Duration::from_secs(5),
+                Some(&heartbeat),
+                lease_until,
+                fresh_until,
+                heartbeat_at,
+                Some(request_started + Duration::from_millis(5_500)),
+                None,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            cadence_peer_deferral_request(
+                now,
+                Some(&heartbeat),
+                lease_until,
+                fresh_until,
+                None,
+                Some(peer_cutoff),
+                None,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            cadence_peer_deferral_request(
+                now,
+                Some(&heartbeat),
+                None,
+                fresh_until,
+                heartbeat_at,
+                Some(peer_cutoff),
+                None,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            cadence_peer_deferral_request(
+                now,
+                Some(&heartbeat),
+                lease_until,
+                None,
+                heartbeat_at,
+                Some(peer_cutoff),
+                None,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+    }
+
     #[test]
     fn publication_resume_forces_get_and_discards_old_heartbeat_state() {
         let now = Instant::now();
@@ -1437,6 +1729,7 @@ impl Drop for NormalPublicationObservation<'_, '_> {
         if !self.completed {
             self.worker.action = Action::Get;
             self.worker.heartbeat_observation = None;
+            self.worker.heartbeat_deferral_attempt = None;
         }
     }
 }

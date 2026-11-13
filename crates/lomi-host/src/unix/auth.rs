@@ -2915,6 +2915,34 @@ impl PublicationBarrier {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerEligibleIngressService {
+    Idle { requested_immediate_pass: bool },
+    PublishNow,
+    Defer,
+    Close,
+}
+
+fn service_peer_eligible_ingress_before_idle(
+    advance_ingress: impl FnOnce() -> bool,
+    observe_fence: impl FnOnce() -> Result<
+        super::shared_owner::CloudPublicationFenceObservation,
+        StepError,
+    >,
+    publication_barrier: &mut PublicationBarrier,
+    cloud: &mut cloud::Worker,
+) -> Result<PeerEligibleIngressService, StepError> {
+    let requested_immediate_pass = advance_ingress();
+    match publication_barrier.observe(observe_fence()?, cloud) {
+        PublicationBarrierObservation::Continue => Ok(PeerEligibleIngressService::Idle {
+            requested_immediate_pass,
+        }),
+        PublicationBarrierObservation::Suspend => Ok(PeerEligibleIngressService::PublishNow),
+        PublicationBarrierObservation::Defer => Ok(PeerEligibleIngressService::Defer),
+        PublicationBarrierObservation::Close => Ok(PeerEligibleIngressService::Close),
+    }
+}
+
 fn worker_unit_retained(
     cloud: bool,
     peer: bool,
@@ -2938,6 +2966,148 @@ mod publication_barrier_tests {
             host_id: HostId::from_bytes([1; 16]).unwrap(),
             owner_runtime_id: RuntimeId::from_bytes([2; 16]).unwrap(),
             owner_generation: 3,
+        }
+    }
+
+    #[test]
+    fn peer_eligible_ingress_observes_new_publication_before_idle_and_preserves_yield() {
+        use super::super::shared_owner::CloudPublicationFenceObservation as Observation;
+
+        let cancelled = AtomicBool::new(false);
+        let mut ingress =
+            remote_ingress::Registry::with_coordinator(&cancelled, std::sync::Weak::new());
+        ingress.note_staged_message_transition(true, false);
+        let mut idle = IdleScheduler::default();
+        let reserved = idle
+            .select_class(false, true, false, false, false, true)
+            .expect("the cached peer class owns the existing reservation");
+        assert!(!idle.after_step(reserved, false, true, false));
+        let reservation = idle.reservation;
+        let mut barrier = PublicationBarrier::default();
+        let mut cloud = cloud::Worker::default();
+        let order = std::cell::RefCell::new(Vec::new());
+
+        let service = service_peer_eligible_ingress_before_idle(
+            || {
+                order.borrow_mut().push("ingress");
+                true
+            },
+            || {
+                assert_eq!(&*order.borrow(), &["ingress"]);
+                order.borrow_mut().push("publication-fence");
+                Ok(Observation::PauseIngress(make_scope(7)))
+            },
+            &mut barrier,
+            &mut cloud,
+        )
+        .unwrap();
+
+        assert_eq!(
+            service,
+            PeerEligibleIngressService::PublishNow,
+            "idle callbacks must wait for the new mandatory publication"
+        );
+        assert_eq!(&*order.borrow(), &["ingress", "publication-fence"]);
+        assert!(barrier.is_publishing());
+        assert_eq!(idle.reservation, reservation);
+        assert!(
+            !ingress.idle_priority_pending(false, true, false),
+            "the owed idle yield remains pending while publication is fenced"
+        );
+    }
+
+    #[test]
+    fn clear_peer_eligible_ingress_keeps_the_reserved_idle_class_in_this_turn() {
+        use super::super::shared_owner::CloudPublicationFenceObservation as Observation;
+
+        let cancelled = AtomicBool::new(false);
+        let mut ingress =
+            remote_ingress::Registry::with_coordinator(&cancelled, std::sync::Weak::new());
+        ingress.note_staged_message_transition(true, false);
+        let mut idle = IdleScheduler::default();
+        let reserved = idle
+            .select_class(false, true, false, false, false, true)
+            .expect("the cached peer class owns the existing reservation");
+        assert_eq!(reserved, WorkClass::Peer);
+        assert!(!idle.after_step(reserved, false, true, false));
+        let reservation = idle.reservation;
+
+        let mut barrier = PublicationBarrier::default();
+        let mut cloud = cloud::Worker::default();
+        let order = std::cell::RefCell::new(Vec::new());
+        let service = service_peer_eligible_ingress_before_idle(
+            || {
+                order.borrow_mut().push("ingress");
+                true
+            },
+            || {
+                assert_eq!(&*order.borrow(), &["ingress"]);
+                order.borrow_mut().push("publication-fence");
+                Ok(Observation::Clear)
+            },
+            &mut barrier,
+            &mut cloud,
+        )
+        .unwrap();
+        assert_eq!(
+            service,
+            PeerEligibleIngressService::Idle {
+                requested_immediate_pass: true,
+            }
+        );
+        assert_eq!(&*order.borrow(), &["ingress", "publication-fence"]);
+
+        // A sibling remains staged. The Registry's owed global yield permits
+        // the already-reserved Peer callback in this same PeerEligible turn.
+        let priority = ingress.idle_priority_pending(false, true, false);
+        assert!(!priority);
+        assert_eq!(
+            idle.select_class_for_ready_turn(priority, false, true, false, false, false, true),
+            Some(reserved)
+        );
+        assert_eq!(idle.reservation, reservation);
+    }
+
+    #[test]
+    fn deferred_or_closed_peer_eligible_ingress_keeps_yield_and_reservation() {
+        use super::super::shared_owner::CloudPublicationFenceObservation as Observation;
+
+        for (observation, expected) in [
+            (Observation::Defer, PeerEligibleIngressService::Defer),
+            (Observation::CloseIngress, PeerEligibleIngressService::Close),
+        ] {
+            let cancelled = AtomicBool::new(false);
+            let mut ingress =
+                remote_ingress::Registry::with_coordinator(&cancelled, std::sync::Weak::new());
+            ingress.note_staged_message_transition(true, false);
+            let mut idle = IdleScheduler::default();
+            let reserved = idle
+                .select_class(false, true, false, false, false, true)
+                .expect("the cached peer class owns the existing reservation");
+            assert!(!idle.after_step(reserved, false, true, false));
+            let reservation = idle.reservation;
+            let mut barrier = PublicationBarrier::default();
+            let mut cloud = cloud::Worker::default();
+
+            let service = service_peer_eligible_ingress_before_idle(
+                || true,
+                || Ok(observation),
+                &mut barrier,
+                &mut cloud,
+            )
+            .unwrap();
+
+            assert_eq!(service, expected);
+            assert!(matches!(
+                service,
+                PeerEligibleIngressService::Defer | PeerEligibleIngressService::Close
+            ));
+            assert_eq!(idle.reservation, reservation);
+            assert!(
+                !ingress.idle_priority_pending(false, true, false),
+                "the owed idle yield remains available after defer or close"
+            );
+            assert!(!barrier.is_active());
         }
     }
 
@@ -3604,6 +3774,7 @@ fn run_with_apis_inner(
                     was_active = true;
                 }
                 Status::Ready => {
+                    let mut ingress_serviced = false;
                     if intent.is_some()
                         || fence.locked
                         || gate.load(Ordering::Acquire)
@@ -3689,7 +3860,18 @@ fn run_with_apis_inner(
                     } else {
                         // Recheck heartbeat eligibility every Ready turn, even
                         // while a peer or channel operation is retained.
-                        let cloud_result = cloud.step(auth, config, runtime, fence.generation);
+                        let next_due_established_peer_cutoff = if publication_barrier.is_active() {
+                            None
+                        } else {
+                            ingress.next_due_established_peer_cutoff(std::time::Instant::now())
+                        };
+                        let cloud_result = cloud.step(
+                            auth,
+                            config,
+                            runtime,
+                            fence.generation,
+                            next_due_established_peer_cutoff,
+                        );
                         requested_immediate_ingress_pass |=
                             cloud_step_requests_immediate_pass(&cloud_result);
                         let outcome = match cloud_result {
@@ -3738,6 +3920,44 @@ fn run_with_apis_inner(
                             outcome => outcome,
                         };
                         if let cloud::StepOutcome::PeerEligible(eligibility) = outcome {
+                            match service_peer_eligible_ingress_before_idle(
+                                || {
+                                    let requested_immediate_pass =
+                                        ingress.advance(auth, runtime, Some(&eligibility));
+                                    ingress_serviced = true;
+                                    requested_immediate_pass
+                                },
+                                || {
+                                    runtime
+                                        .owner
+                                        .cloud_publication_fence_observation(
+                                            runtime.operation,
+                                            fence.generation,
+                                            Some(&eligibility.binding.scope),
+                                        )
+                                        .map_err(StepError::from)
+                                },
+                                &mut publication_barrier,
+                                &mut cloud,
+                            )? {
+                                PeerEligibleIngressService::Idle {
+                                    requested_immediate_pass,
+                                } => {
+                                    requested_immediate_ingress_pass |= requested_immediate_pass;
+                                }
+                                PeerEligibleIngressService::PublishNow => return Ok(true),
+                                PeerEligibleIngressService::Defer => return Ok(false),
+                                PeerEligibleIngressService::Close => {
+                                    ingress.discard();
+                                    return Ok(false);
+                                }
+                            }
+                            if ingress.has_active_git_writer() {
+                                // A request may start a retained Git writer
+                                // during the pre-idle ingress pass. It owns the
+                                // next actor turn before Peer/Channel work.
+                                return Ok(requested_immediate_ingress_pass);
+                            }
                             let peer_active = peer.has_active_work();
                             let peer_cached = peer.has_cached_work();
                             let channel_active = channel.has_active_work();
@@ -3835,7 +4055,7 @@ fn run_with_apis_inner(
                     }
                     // Heartbeat/refresh/configuration work above keeps priority.
                     // The driver owns only socket/crypto/codecs and request state.
-                    if publication_barrier.allows_ingress_io() {
+                    if publication_barrier.allows_ingress_io() && !ingress_serviced {
                         requested_immediate_ingress_pass |=
                             ingress.advance(auth, runtime, cloud.cached_eligibility());
                     }
