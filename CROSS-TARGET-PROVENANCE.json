@@ -288,7 +288,7 @@
           "package.json": "d4a6d884768e79b0cd62820d0e92eef2a9497c62e96693ed80762dbb048f50c0",
           "scripts/generate.mjs": "7deae7bec7f090ebb73367b7db749d9d2749dd7f230217d3656812065c694d13",
           "src/index.mjs": "d0311713112c3d84903a614b7a0c85abc386e9ef54628a356315480f9ddb9d58",
-          "src/rpc-client.ts": "441a6b27b46286c031334310dfba9de7c9fd695b273fee6fda243c2d0e4460f1"
+          "src/rpc-client.ts": "d98137d7f2839c3081263b652df065308a5e4eea239b1f7098f00dcd86ece6bb"
         },
         "snapshot": {
           "generated/ChannelAdmissionParams.d.ts": "e57ef50a801b6a46eea09d7ab7360bb8502bd10414679fb5f170271879ae7e0f",
@@ -363,9 +363,9 @@
           "generated/workspace-stream-frame.d.ts": "e282fb2e5eb66670637356f9a44a34d2146482bc1038a823c04df46427de9655",
           "generated/wss-admission-frame.d.ts": "0e0e905e951578efc8019c404aa20daf482e30d710b6beea9ac5f33c28341db4",
           "package.json": "9f185f4ebb89d4ef303775d6881b4140bd885c3386e132eb15103753a6da9e5d",
-          "snapshot-manifest.json": "06bec2c4889831cb4be2915157a828b5c492377a6d739e91f2199f664f66955a",
+          "snapshot-manifest.json": "f1668fee04fd95a6703cb83c251215c1fd2560e170471e17abaccf63aa7edf53",
           "src/index.mjs": "d0311713112c3d84903a614b7a0c85abc386e9ef54628a356315480f9ddb9d58",
-          "src/rpc-client.ts": "441a6b27b46286c031334310dfba9de7c9fd695b273fee6fda243c2d0e4460f1"
+          "src/rpc-client.ts": "d98137d7f2839c3081263b652df065308a5e4eea239b1f7098f00dcd86ece6bb"
         }
       },
       "protocol-codec-wasm": {
@@ -538,7 +538,7 @@
       "workspace-selection.ts": "ce8439b583825f66b72b920202dd90dd2661d314a3f21e4d1669b2c9e0d5b248",
       "workspace.ts": "cdcf13baf14df6ba7c0781bb20c7387d26babda289970f2b432de8eac5df5f9e"
     },
-    "mobileModuleProvenanceSha256": "a227ac782a2018841ee917f5509b602a5730a09d8a649fdc6fe193d842d6ce40",
+    "mobileModuleProvenanceSha256": "5cb6502895bad1debfc68dd29775b6c23a49e1668b2bf026a42371cbfde9baeb",
     "mobileProductInputs": {
       "android/build.gradle": "898bb086fbfce04120776b89c4ef22200f6f11d7ea54094ae267adc5946f5ef0",
       "android/src/main/AndroidManifest.xml": "343d5be1ac17cdd45d1a2f2ddc616c509290e655869125a9422a96d88aa66066",
@@ -650,9 +650,9 @@
       "generated/workspace-stream-frame.d.ts": "e282fb2e5eb66670637356f9a44a34d2146482bc1038a823c04df46427de9655",
       "generated/wss-admission-frame.d.ts": "0e0e905e951578efc8019c404aa20daf482e30d710b6beea9ac5f33c28341db4",
       "package.json": "9f185f4ebb89d4ef303775d6881b4140bd885c3386e132eb15103753a6da9e5d",
-      "snapshot-manifest.json": "06bec2c4889831cb4be2915157a828b5c492377a6d739e91f2199f664f66955a",
+      "snapshot-manifest.json": "f1668fee04fd95a6703cb83c251215c1fd2560e170471e17abaccf63aa7edf53",
       "src/index.mjs": "d0311713112c3d84903a614b7a0c85abc386e9ef54628a356315480f9ddb9d58",
-      "src/rpc-client.ts": "441a6b27b46286c031334310dfba9de7c9fd695b273fee6fda243c2d0e4460f1"
+      "src/rpc-client.ts": "d98137d7f2839c3081263b652df065308a5e4eea239b1f7098f00dcd86ece6bb"
     },
     "mobileRendererInputs": {
       "renderer/index.ts": "6ac8a22f2c8745ba4ac094d9b178a51bcfac3f85b58761a846e79a9c538482e6",

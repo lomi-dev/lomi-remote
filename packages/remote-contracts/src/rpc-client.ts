@@ -191,6 +191,7 @@ export class RemoteV2RpcCore {
     call: RemoteV2RpcCallInput,
     timeoutMs = REMOTE_V2_RPC_DEFAULT_TIMEOUT_MS,
     sendGuard?: () => boolean,
+    onSendStart?: () => void,
   ): Promise<RpcResponseContract> {
     if (this.closedError) return Promise.reject(new RemoteV2PreSendError('RPC_PEER_CLOSED'));
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > REMOTE_V2_RPC_MAX_TIMEOUT_MS) {
@@ -248,7 +249,7 @@ export class RemoteV2RpcCore {
         reject(new RemoteV2PreSendError('RPC_TIMER_UNAVAILABLE'));
         return;
       }
-      void this.sendRequest(requestId, pending, sendGuard);
+      void this.sendRequest(requestId, pending, sendGuard, onSendStart);
     });
   }
 
@@ -300,16 +301,29 @@ export class RemoteV2RpcCore {
     this.shutdown(reason, closeTransport);
   }
 
-  private async sendRequest(requestId: string, pending: PendingRpc, sendGuard?: () => boolean): Promise<void> {
+  private async sendRequest(
+    requestId: string,
+    pending: PendingRpc,
+    sendGuard?: () => boolean,
+    onSendStart?: () => void,
+  ): Promise<void> {
     try {
       await this.codec.validateRequest(pending.requestJson);
       if (!this.pendingBeforeDeadline(requestId, pending)) return;
       if (!this.guardAllows(sendGuard)) throw new RemoteV2PreSendError('SEND_CANCELLED');
+      let sendStartNotified = false;
+      let sendStartFailed = false;
       await this.transport.send(
         { kind: 1, bytes: pending.requestBytes },
         () => this.pendingBeforeDeadline(requestId, pending) && !this.closedError && this.guardAllows(sendGuard),
         () => {
           if (!this.pendingBeforeDeadline(requestId, pending) || !this.guardAllows(sendGuard)) return false;
+          if (!sendStartNotified) {
+            sendStartNotified = true;
+            try { onSendStart?.(); }
+            catch (error) { sendStartFailed = true; throw error; }
+          }
+          if (sendStartFailed) return false;
           pending.started = true;
           return true;
         },
