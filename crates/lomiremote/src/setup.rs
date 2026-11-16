@@ -1387,13 +1387,22 @@ fn ensure_service_ready(
     {
         return Ok(ServiceProgress::Blocked(SetupProblem::HostIdentityChanged));
     }
-    let status = match current_login_status(host) {
-        Ok(status) => status,
-        Err(_) => {
-            return Ok(ServiceProgress::Blocked(
-                SetupProblem::AuthorizationUnavailable,
-            ));
+    // A freshly started service reports Unconfigured until its auth worker
+    // has loaded the stored login, so give it a bounded moment to settle.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        let status = match current_login_status(host) {
+            Ok(status) => status,
+            Err(_) => {
+                return Ok(ServiceProgress::Blocked(
+                    SetupProblem::AuthorizationUnavailable,
+                ));
+            }
+        };
+        if auth_ready(&status) || std::time::Instant::now() >= deadline {
+            break status;
         }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     };
     if !auth_ready(&status) {
         return Ok(ServiceProgress::Blocked(SetupProblem::AuthorizationPending));
