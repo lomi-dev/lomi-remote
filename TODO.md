@@ -1,27 +1,34 @@
 # Lomi Remote — pozostałe prace
 
-Stan przekazania: 2026-11-13. Kod jest zapisany jako praca w toku.
+Stan przekazania: 2026-11-16. Kod jest zapisany jako praca w toku.
 **Pełny test CLI i przeglądarki nie jest zakończony. Publiczny release CLI
 pozostaje wstrzymany.**
 
 ## Obecny stan
 
-- Logowanie CLI i automatyczne wejście właściciela do workspace'u działały
-  w dotychczasowych testach, bez panelu proszenia o dostęp.
-- Ostatni pełny test Maca zatrzymał się przy przejęciu sterowania terminalem:
-  `OUTCOME_UNKNOWN` i zamknięcie kanału.
-- Ostatni pełny test Linuksa potwierdził snapshot, przejęcie sterowania
-  i zmianę rozmiaru, ale zakończył się błędem odnowienia sterowania.
-- W obu tych testach nie doszło do sprawdzenia wpisywania poleceń. Utworzone
-  przez nie terminale zostały następnie normalnie zamknięte.
-- Najnowsza poprawka obejmuje planowanie obsługi kanałów i wysyłanie odpowiedzi
-  na ACK, przejęcie sterowania, odnowienie, wpisywanie i zmianę rozmiaru.
-  Nie wydłuża czasu ważności uprawnień ani nie ponawia niepewnych operacji.
-- Prywatny pakiet macOS `0.1.18` zbudował się, przeszedł 20 testów instalatora
-  i notaryzację Apple. Nie został zainstalowany ani publicznie opublikowany;
-  powstał z pomocniczego źródła i nie stanowi akceptacji obecnego `main`.
-- Ostatni kontakt z Linuksem `192.168.1.192` zakończył się utratą SSH.
-  Nie znamy aktualnego stanu jego procesów i sesji po tym zdarzeniu.
+- Nowy certyfikat Developer ID (G2) i nowe lokalne klucze TUF. Pakiety
+  `0.1.8` i `0.1.9` zbudowały się lokalnie, podpisane i notaryzowane.
+  Aktualizacja Hosta na Linuksie zachowała profil, logowanie i workspace.
+- Naprawione i potwierdzone na Linuksie: pierwszy `setup` (usługa systemd)
+  oraz snapshot terminala (format `trimmed-rows-v1`, ok. 3,8 KB zamiast 2 MB).
+- Połączenia HTTPS Hosta są ponownie używane w obrębie jednej operacji z
+  limitem czasu: mediana zapytania spadła z 218 do 128 ms.
+- W przeglądarce naprawiono pętlę odnawiania sterowania, która blokowała
+  wpisywanie (`remote-web` `d8fa15b`).
+- **Główna blokada: opóźnienie RPC Hosta ok. 1,5–2 s.** Jeden wątek
+  autoryzacji wykonuje po kolei: odczyt pairingu, kanał relay, odpytywanie
+  `pending`, `GET runtime` i `POST heartbeat`. Ingress działa raz na cykl
+  ok. 0,6–0,8 s, a jedno RPC potrzebuje dwóch cykli. Przez to odnowienie
+  sterowania terminalem przekracza 1,5 s, gdy czeka za wpisywaniem, i kanał
+  się zamyka (`TERMINAL_RPC_RENEW_TIMED_OUT`). Krótsze oczekiwanie bezczynności,
+  mniejszy margines dowodu i szybka ścieżka dla input/resize nie zmieniły
+  rytmu cyklu, dlatego zostały wycofane.
+- Potrzebny projekt: zrównoleglenie zapytań control-plane albo bezpieczne
+  ponowne użycie dowodu pairingu w kolejnych przebiegach. Bez rozluźniania
+  świeżości dowodu, dzierżawy i kontroli uprawnień.
+- Otwarcie workspace'u trwa 9–16 s. Mniej więcej co drugie otwarcie po
+  restarcie Hosta kończyło się `CHANNEL_NOT_ADMITTED` lub komunikatem
+  „could not be completed”; przyczyna nie jest ustalona.
 
 ## Kontrole przy zapisie kodu
 
