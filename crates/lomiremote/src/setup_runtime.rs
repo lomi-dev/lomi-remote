@@ -403,6 +403,13 @@ impl SetupServiceControl for NativeSetupService {
     }
 
     fn install(&mut self, binding: &ServiceBinding) -> Result<(), SetupError> {
+        // Linux registration takes the profile owner lock, so the transient
+        // setup Host must exit first; ensure_service_ready restarts it as the
+        // service and re-checks its Host ID.
+        #[cfg(target_os = "linux")]
+        if self.inspect(binding)?.ipc_ready {
+            lomi_host::stop(&binding.profile_path).map_err(|_| SetupError::ServiceUnavailable)?;
+        }
         native::control(&native_binding(binding)?, native::ServiceAction::Install)
             .map(|_| ())
             .map_err(|_| SetupError::ServiceUnavailable)
