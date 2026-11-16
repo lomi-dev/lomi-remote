@@ -236,6 +236,12 @@ impl<'cancel> Registry<'cancel> {
         self.entries.values().any(Driver::has_active_git_writer)
     }
 
+    pub(in crate::unix::auth) fn has_established_connection(&self) -> bool {
+        self.entries
+            .values()
+            .any(Driver::has_established_connection)
+    }
+
     pub(in crate::unix::auth) fn started_git_continuation(
         &self,
     ) -> Option<super::super::shared_owner::StartedGitContinuation> {

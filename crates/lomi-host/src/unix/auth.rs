@@ -3263,6 +3263,35 @@ mod publication_barrier_tests {
     }
 
     #[test]
+    fn idle_units_rotate_by_age_or_near_deadline_only() {
+        let cancelled = AtomicBool::new(false);
+        let aborted = std::cell::Cell::new(false);
+        let now = Instant::now();
+        let long = OwnerOperation::new(now + Duration::from_secs(60), &cancelled);
+        let units = WorkerOperationUnits::new(&long, &aborted);
+        assert!(
+            !units.due_for_rotation(now),
+            "a fresh unit is kept across boundaries"
+        );
+        assert!(units.due_for_rotation(Instant::now() + WORKER_UNIT_ROTATION_AGE));
+        let stopping = AtomicBool::new(false);
+        let mut aged = WorkerOperationUnits::new(&long, &aborted);
+        aged.admitted_at = now - WORKER_UNIT_ROTATION_AGE;
+        assert!(aged.due_for_rotation(now));
+        aged.admit_after_settlement(&stopping);
+        assert!(
+            !aged.due_for_rotation(Instant::now()),
+            "rotation restarts the age"
+        );
+        let short = OwnerOperation::new(now + Duration::from_secs(20), &cancelled);
+        let units = WorkerOperationUnits::new(&short, &aborted);
+        assert!(
+            units.due_for_rotation(now),
+            "a unit near its deadline rotates"
+        );
+    }
+
+    #[test]
     fn finite_ingress_work_keeps_its_original_deadline_and_cancellation() {
         let cancelled = AtomicBool::new(false);
         let expired_deadline = Instant::now() - Duration::from_secs(1);
@@ -3302,12 +3331,21 @@ mod publication_barrier_tests {
 
 // Admission management only. This identity cannot mint Ready or transfer any
 // existing effect continuation. Renewal occurs only after every class settled.
+// An idle unit rotates at a message boundary only once it is this old, or
+// sooner if its deadline is near. Rotating on every boundary forced a fresh
+// runtime read, heartbeat and pairing proof before each RPC (~0.6 s). Between
+// rotations the unit behaves as a retained one: heartbeats keep their cadence,
+// proofs still expire at their own freshness, and no deadline is extended.
+const WORKER_UNIT_ROTATION_AGE: Duration = Duration::from_secs(15);
+const WORKER_UNIT_ROTATION_REMAINING: Duration = Duration::from_secs(30);
+
 struct WorkerOperationUnits<'a> {
     initial: &'a OwnerOperation<'a>,
     initial_aborted: &'a std::cell::Cell<bool>,
     next: Option<OwnerOperation<'a>>,
     next_aborted: std::cell::Cell<bool>,
     started: bool,
+    admitted_at: Instant,
 }
 impl<'a> WorkerOperationUnits<'a> {
     fn new(initial: &'a OwnerOperation<'a>, aborted: &'a std::cell::Cell<bool>) -> Self {
@@ -3317,7 +3355,13 @@ impl<'a> WorkerOperationUnits<'a> {
             next: None,
             next_aborted: std::cell::Cell::new(false),
             started: false,
+            admitted_at: Instant::now(),
         }
+    }
+    fn due_for_rotation(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.admitted_at) >= WORKER_UNIT_ROTATION_AGE
+            || self.operation().deadline().saturating_duration_since(now)
+                < WORKER_UNIT_ROTATION_REMAINING
     }
     fn operation(&self) -> &OwnerOperation<'a> {
         self.next.as_ref().unwrap_or(self.initial)
@@ -3335,6 +3379,7 @@ impl<'a> WorkerOperationUnits<'a> {
             stopping,
         ));
         self.next_aborted.set(false);
+        self.admitted_at = Instant::now();
     }
 }
 
@@ -3411,6 +3456,7 @@ fn run_with_apis_inner(
         );
         let settled_at_message_boundary = units.started
             && !retained
+            && units.due_for_rotation(scheduling_time)
             && units.operation().check().is_ok()
             && ingress.suspend_at_message_boundary(scheduling_time);
         if settled_at_message_boundary {
@@ -3431,7 +3477,11 @@ fn run_with_apis_inner(
             ingress.poll(auth, runtime, None);
         }
         let operation = runtime.operation;
-        let wait = remote_ingress::actor_wait_duration(std::mem::take(&mut immediate_ingress_pass));
+        let mut wait =
+            remote_ingress::actor_wait_duration(std::mem::take(&mut immediate_ingress_pass));
+        if ingress.has_established_connection() {
+            wait = wait.min(remote_ingress::ESTABLISHED_ACTOR_WAIT);
+        }
         match receiver.recv_timeout(wait) {
             Ok(Command::Wake(id)) => {
                 let _ = id;

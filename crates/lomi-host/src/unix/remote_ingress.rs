@@ -144,6 +144,11 @@ fn relay_socket_mut(socket: &mut IngressSocket) -> &mut RelayConnection {
 mod registry;
 pub(super) use registry::Registry;
 
+/// Relay frames do not wake the actor. While a channel is established, poll
+/// it often so an RPC is not held for a whole idle wait before intake and
+/// again before its result is sent.
+pub(super) const ESTABLISHED_ACTOR_WAIT: Duration = Duration::from_millis(20);
+
 /// Keep the ordinary idle wait unless a successful stage left work for the next pass.
 pub(super) const fn actor_wait_duration(immediate_pass: bool) -> Duration {
     if immediate_pass {
@@ -157,6 +162,11 @@ pub(super) const fn actor_wait_duration(immediate_pass: bool) -> Duration {
 // refresh with three seconds left so one slow owner/network turn cannot use up
 // the entire freshness window before the next ingress pass.
 const PEER_REFRESH_MARGIN: Duration = Duration::from_secs(3);
+// A fresh read is capped by its heartbeat (start + 5 s), so with heartbeats
+// ~1 s apart it has 3-4.5 s left. Reusing only above the 3 s refresh margin
+// re-read the pairing on nearly every ingress pass (~150 ms each). Reuse a
+// still-current proof down to 2 s; it never outlives its own freshness.
+const PEER_PROOF_REUSE_MARGIN: Duration = Duration::from_secs(2);
 // A slow established channel may retain only a small number of already
 // authorized messages while Started Git continues to service terminal input.
 // The active encoder is included in both limits.
@@ -4769,7 +4779,7 @@ fn current_proof(
         let now = Instant::now();
         if proof.current(&evidence)
             && now
-                .checked_add(PEER_REFRESH_MARGIN)
+                .checked_add(PEER_PROOF_REUSE_MARGIN)
                 .is_some_and(|refresh_by| refresh_by < proof.fresh_until())
         {
             return Ok(proof);
