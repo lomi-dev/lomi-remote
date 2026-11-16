@@ -156,6 +156,7 @@ fn validate_remote_origin(origin: &str) -> Result<()> {
 pub struct DataTransport {
     pub(super) budget: Option<Arc<budget::State>>,
     pub(super) agent: ureq::Agent,
+    pub(super) pooled: ureq::Agent,
     pub(super) origin: RemoteApiOrigin,
 }
 impl DataTransport {
@@ -166,6 +167,7 @@ impl DataTransport {
     pub(super) fn with_tls(origin: RemoteApiOrigin, tls: ureq::tls::TlsConfig) -> Result<Self> {
         Ok(Self {
             budget: None,
+            pooled: budget::pooled_agent()?,
             agent: configured_agent(tls)?,
             origin,
         })

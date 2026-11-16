@@ -129,6 +129,7 @@ pub enum PollOutcome {
 pub struct Transport {
     budget: Option<Arc<budget::State>>,
     agent: ureq::Agent,
+    pooled: ureq::Agent,
     origin: String,
     client: String,
 }
@@ -147,10 +148,12 @@ impl Transport {
             );
             Error::InvalidConfig
         })?;
+        let pooled = budget::pooled_agent()?;
         let agent = configured_agent(tls)?;
         Ok(Self {
             budget: None,
             agent,
+            pooled,
             origin: config.origin().to_owned(),
             client: config.public_client_id().to_owned(),
         })
@@ -320,14 +323,27 @@ fn configured_agent(tls: ureq::tls::TlsConfig) -> Result<ureq::Agent> {
         );
         Error::ResolverUnavailable
     })?;
-    let cfg = ureq::Agent::config_builder()
+    Ok(ureq::Agent::with_parts(
+        agent_config(tls, false),
+        ureq::unversioned::transport::DefaultConnector::default(),
+        resolver::BoundedResolver,
+    ))
+}
+/// Direct calls never pool. Budgeted calls reuse idle connections only
+/// briefly (Host calls are ~150 ms apart when busy), far inside any server
+/// keep-alive, so a POST rarely meets a socket the server is closing; such a
+/// send still surfaces as an unknown outcome and is never replayed.
+fn agent_config(tls: ureq::tls::TlsConfig, pooled: bool) -> ureq::config::Config {
+    ureq::Agent::config_builder()
         .https_only(true)
         .proxy(None)
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
         .max_response_header_size(16 * 1024)
-        .max_idle_connections(0)
+        .max_idle_connections(if pooled { 4 } else { 0 })
+        .max_idle_connections_per_host(if pooled { 2 } else { 0 })
+        .max_idle_age(Duration::from_secs(2))
         .timeout_global(Some(Duration::from_secs(15)))
         .timeout_per_call(Some(Duration::from_secs(15)))
         .timeout_resolve(Some(Duration::from_secs(3)))
@@ -337,12 +353,7 @@ fn configured_agent(tls: ureq::tls::TlsConfig) -> Result<ureq::Agent> {
         .timeout_recv_response(Some(Duration::from_secs(5)))
         .timeout_recv_body(Some(Duration::from_secs(5)))
         .tls_config(tls)
-        .build();
-    Ok(ureq::Agent::with_parts(
-        cfg,
-        ureq::unversioned::transport::DefaultConnector::default(),
-        resolver::BoundedResolver,
-    ))
+        .build()
 }
 fn tls_config() -> ureq::tls::TlsConfig {
     ureq::tls::TlsConfig::builder()
@@ -674,7 +685,7 @@ mod gateway_response_tests {
             std::io::Write::write_all(&mut socket, response.as_bytes()).unwrap();
         });
         // Exercise the production response path; only this private fixture permits HTTP.
-        let agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(false)
             .proxy(None)
             .max_redirects(0)
@@ -685,6 +696,7 @@ mod gateway_response_tests {
             .into();
         let transport = Transport {
             budget: None,
+            pooled: agent.clone(),
             agent,
             origin: format!("http://{address}"),
             client: "test".into(),
@@ -728,7 +740,7 @@ mod gateway_response_tests {
             std::io::Write::write_all(&mut socket, response.as_bytes()).unwrap();
             (request_headers, body)
         });
-        let agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(false)
             .proxy(None)
             .max_redirects(0)
@@ -739,6 +751,7 @@ mod gateway_response_tests {
             .into();
         let transport = Transport {
             budget: None,
+            pooled: agent.clone(),
             agent,
             origin: format!("http://{address}"),
             client: "test".into(),

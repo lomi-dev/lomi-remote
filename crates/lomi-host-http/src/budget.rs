@@ -2,12 +2,13 @@
 //! work runs on the scoped watcher. All socket I/O stays on the calling worker.
 use super::{Error, Result};
 use std::{
+    cell::RefCell,
     fmt,
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -17,6 +18,27 @@ use ureq::unversioned::transport::{
 };
 
 const QUANTUM: Duration = Duration::from_millis(10);
+/// Pooled connections never keep a budget of their own: every resolve, connect,
+/// read, write and liveness probe uses the operation bound on the calling thread.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    static CURRENT: RefCell<Option<(u64, Arc<State>)>> = const { RefCell::new(None) };
+}
+struct Bound(Option<(u64, Arc<State>)>);
+impl Drop for Bound {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CURRENT.with_borrow_mut(|current| *current = previous);
+    }
+}
+fn bind(state: &Arc<State>) -> Bound {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
+    Bound(CURRENT.with_borrow_mut(|current| current.replace((generation, state.clone()))))
+}
+/// No bound operation means no I/O at all.
+pub(crate) fn current() -> std::result::Result<(u64, Arc<State>), ureq::Error> {
+    CURRENT.with_borrow(Clone::clone).ok_or_else(stopped)
+}
 /// Terminal result of the caller's actual, already-admitted operation check.
 /// The callback must check that same operation; it must not admit or renew one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +138,9 @@ pub(crate) fn run<T>(
                 }
             })
             .map_err(|_| Error::Network)?;
+        let bound = bind(&state);
         let result = request(state.clone());
+        drop(bound);
         drop(done);
         // Explicit join before final authoritative check / result publication.
         if let Err(panic) = watcher.join() {
@@ -142,7 +166,12 @@ pub(crate) fn remaining(state: Option<&State>) -> Result<Duration> {
         Ok(duration.min(Duration::from_secs(15)))
     }
 }
-pub(crate) fn agent(config: ureq::config::Config, state: Arc<State>) -> Result<ureq::Agent> {
+/// One process-wide agent: most callers build a transport per request, so a
+/// per-transport pool would always be empty. The pool holds idle TLS
+/// connections only (no credentials) and each reuse is re-probed under the
+/// operation bound on the calling thread.
+pub(crate) fn pooled_agent() -> Result<ureq::Agent> {
+    static POOLED: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     super::resolver::initialize().map_err(|_| {
         super::diagnostics::failure(
             lomi_remote_protocol::ipc::DiagnosticCode::DnsUnavailable,
@@ -151,18 +180,18 @@ pub(crate) fn agent(config: ureq::config::Config, state: Arc<State>) -> Result<u
         );
         Error::ResolverUnavailable
     })?;
-    Ok(ureq::Agent::with_parts(
-        config,
-        BudgetConnector {
-            state: state.clone(),
-        },
-        super::resolver::BudgetResolver(state),
-    ))
+    Ok(POOLED
+        .get_or_init(|| {
+            ureq::Agent::with_parts(
+                super::agent_config(super::tls_config(), true),
+                BudgetConnector,
+                super::resolver::BudgetResolver,
+            )
+        })
+        .clone())
 }
 #[derive(Debug)]
-struct BudgetConnector {
-    state: Arc<State>,
-}
+struct BudgetConnector;
 impl Connector<()> for BudgetConnector {
     type Out = Box<dyn Transport>;
     fn connect(
@@ -170,14 +199,15 @@ impl Connector<()> for BudgetConnector {
         details: &ConnectionDetails,
         _: Option<()>,
     ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
-        self.state.io_check(self.state.deadline())?;
+        let (generation, state) = current()?;
+        state.io_check(state.deadline())?;
         // Created once for all address attempts, TCP and the entire TLS handshake.
         let deadline =
-            relative_deadline(details.timeout, Duration::from_secs(5)).min(self.state.deadline());
+            relative_deadline(details.timeout, Duration::from_secs(5)).min(state.deadline());
         let mut last = None;
         for address in &details.addrs {
-            self.state.io_check(deadline)?;
-            match connect_socket(*address, &self.state, deadline) {
+            state.io_check(deadline)?;
+            match connect_socket(*address, &state, deadline) {
                 Ok(stream) => {
                     if details.config.no_delay() {
                         stream.set_nodelay(true)?;
@@ -189,19 +219,19 @@ impl Connector<()> for BudgetConnector {
                             details.config.input_buffer_size(),
                             details.config.output_buffer_size(),
                         ),
-                        state: self.state.clone(),
+                        generation,
                         connect_deadline: deadline,
                         handshaking: handshaking.clone(),
                         stages: Vec::new(),
                     };
                     // Keep stock rustls chain/name/time/signature verification.
                     let tls = RustlsConnector::default().connect(details, Some(transport))?;
-                    self.state.io_check(deadline)?;
+                    state.io_check(deadline)?;
                     handshaking.store(false, Ordering::Release);
                     return Ok(tls.map(|transport| Box::new(transport) as Box<dyn Transport>));
                 }
                 Err(error) => {
-                    self.state.io_check(deadline)?;
+                    state.io_check(deadline)?;
                     match &error {
                         ureq::Error::Io(error)
                             if matches!(
@@ -308,7 +338,7 @@ fn await_connected(
 struct BudgetTcp {
     stream: TcpStream,
     buffers: LazyBuffers,
-    state: Arc<State>,
+    generation: u64,
     connect_deadline: Instant,
     handshaking: Arc<AtomicBool>,
     stages: Vec<(ureq::Timeout, Instant)>,
@@ -319,7 +349,16 @@ impl fmt::Debug for BudgetTcp {
     }
 }
 impl BudgetTcp {
-    fn stage_deadline(&mut self, timeout: NextTimeout) -> Instant {
+    /// Stage deadlines belong to one operation; a reused connection starts fresh.
+    fn bound(&mut self) -> std::result::Result<Arc<State>, ureq::Error> {
+        let (generation, state) = current()?;
+        if generation != self.generation {
+            self.generation = generation;
+            self.stages.clear();
+        }
+        Ok(state)
+    }
+    fn stage_deadline(&mut self, state: &State, timeout: NextTimeout) -> Instant {
         if self.handshaking.load(Ordering::Acquire) {
             return self.connect_deadline;
         }
@@ -335,7 +374,7 @@ impl BudgetTcp {
             ureq::Timeout::RecvResponse | ureq::Timeout::RecvBody => Duration::from_secs(5),
             _ => Duration::from_secs(15),
         };
-        let deadline = relative_deadline(timeout, cap).min(self.state.deadline());
+        let deadline = relative_deadline(timeout, cap).min(state.deadline());
         self.stages.push((timeout.reason, deadline));
         deadline
     }
@@ -371,33 +410,105 @@ impl Transport for BudgetTcp {
         amount: usize,
         timeout: NextTimeout,
     ) -> std::result::Result<(), ureq::Error> {
-        let deadline = self.stage_deadline(timeout);
+        let state = self.bound()?;
+        let deadline = self.stage_deadline(&state, timeout);
         write_until(
             &mut self.stream,
             &self.buffers.output()[..amount],
-            &self.state,
+            &state,
             deadline,
         )
     }
     fn await_input(&mut self, timeout: NextTimeout) -> std::result::Result<bool, ureq::Error> {
-        let deadline = self.stage_deadline(timeout);
+        let state = self.bound()?;
+        let deadline = self.stage_deadline(&state, timeout);
         loop {
-            self.state.io_check(deadline)?;
+            state.io_check(deadline)?;
             match self.stream.read(self.buffers.input_append_buf()) {
                 Ok(amount) => {
-                    self.state.io_check(deadline)?;
+                    state.io_check(deadline)?;
                     self.buffers.input_appended(amount);
                     return Ok(amount > 0);
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    pause(&self.state, deadline)?
-                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(&state, deadline)?,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.into()),
             }
         }
     }
     fn is_open(&mut self) -> bool {
-        self.state.check().is_ok()
+        // The socket is non-blocking: pending EOF or stray bytes both mean the
+        // connection must not carry another request.
+        let mut probe = [0];
+        current().is_ok_and(|(_, state)| state.check().is_ok())
+            && matches!(self.stream.read(&mut probe), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pooled_io_sees_only_the_operation_bound_on_this_thread() {
+        assert!(current().is_err(), "no operation, no I/O");
+        let far = Instant::now() + Duration::from_secs(5);
+        let outer = run(far, &|| Ok(()), |outer| {
+            let (first, seen) = current().unwrap();
+            assert!(Arc::ptr_eq(&seen, &outer));
+            // Another thread never inherits this operation.
+            std::thread::spawn(|| assert!(current().is_err()))
+                .join()
+                .unwrap();
+            run(far, &|| Ok(()), |inner| {
+                let (second, seen) = current().unwrap();
+                assert!(Arc::ptr_eq(&seen, &inner) && second != first);
+                Ok(())
+            })?;
+            let (restored, seen) = current().unwrap();
+            assert!(Arc::ptr_eq(&seen, &outer) && restored == first);
+            Ok(())
+        });
+        assert!(outer.is_ok());
+        assert!(current().is_err(), "binding ends with the operation");
+    }
+
+    #[test]
+    fn cancelled_operation_never_starts_its_request() {
+        let result = run(
+            Instant::now() + Duration::from_secs(5),
+            &|| Err(BudgetStop::Cancelled),
+            |_| Ok(()),
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+    }
+
+    #[test]
+    fn idle_probe_needs_a_bound_operation_and_a_quiet_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let mut tcp = BudgetTcp {
+            stream: client,
+            buffers: LazyBuffers::new(1024, 1024),
+            generation: 0,
+            connect_deadline: Instant::now(),
+            handshaking: Arc::new(AtomicBool::new(false)),
+            stages: Vec::new(),
+        };
+        assert!(!tcp.is_open(), "unbound probe must refuse reuse");
+        let far = Instant::now() + Duration::from_secs(5);
+        run(far, &|| Ok(()), |_| {
+            assert!(
+                tcp.is_open(),
+                "quiet socket under a live operation is reusable"
+            );
+            server.write_all(b"x").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!tcp.is_open(), "stray bytes must refuse reuse");
+            Ok(())
+        })
+        .unwrap();
     }
 }

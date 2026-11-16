@@ -28,7 +28,8 @@ impl BudgetTransport<'_> {
     pub fn initiate(&self, request: &EnrollmentInitiateParams) -> Result<EnrollmentInitiateResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -42,7 +43,8 @@ impl BudgetTransport<'_> {
     ) -> Result<HostAuthorizationResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -56,7 +58,8 @@ impl BudgetTransport<'_> {
     ) -> Result<HostAuthorizationResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -71,7 +74,8 @@ impl BudgetTransport<'_> {
     ) -> Result<HostRegisterResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -87,7 +91,8 @@ impl BudgetTransport<'_> {
     ) -> Result<HostRevokeResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -98,7 +103,8 @@ impl BudgetTransport<'_> {
     pub fn poll(&self, device: &DeviceCode) -> Result<PollOutcome> {
         budget::run(self.deadline, self.check, |state| {
             let bound = Transport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: self.inner.origin.clone(),
                 client: self.inner.client.clone(),
@@ -136,7 +142,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<HostRuntimeGetResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -151,7 +158,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<RuntimeClaimResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -166,7 +174,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<HeartbeatResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -181,7 +190,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<PublicationResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -195,7 +205,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<PairingPendingResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -209,7 +220,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<PairingResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -224,7 +236,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<PairingResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -238,7 +251,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<ChannelPendingResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -252,7 +266,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<ChannelResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -267,7 +282,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<ChannelResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };
@@ -282,7 +298,8 @@ impl BudgetDataTransport<'_> {
     ) -> Result<ChannelTicketResult> {
         budget::run(self.deadline, self.check, |state| {
             let bound = DataTransport {
-                agent: budget::agent(self.inner.agent.config().clone(), state.clone())?,
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
                 budget: Some(state),
                 origin: RemoteApiOrigin(self.inner.origin.0.clone()),
             };

@@ -178,7 +178,7 @@ impl Resolver for BoundedResolver {
     }
 }
 #[derive(Debug)]
-pub(super) struct BudgetResolver(pub(super) Arc<super::budget::State>);
+pub(super) struct BudgetResolver;
 impl Resolver for BudgetResolver {
     fn resolve(
         &self,
@@ -186,7 +186,7 @@ impl Resolver for BudgetResolver {
         config: &ureq::config::Config,
         timeout: NextTimeout,
     ) -> Result<ResolvedSocketAddrs, ureq::Error> {
-        resolve(uri, config, timeout, Some(&self.0))
+        resolve(uri, config, timeout, Some(&super::budget::current()?.1))
     }
 }
 fn resolve(
