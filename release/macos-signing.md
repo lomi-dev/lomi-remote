@@ -14,8 +14,9 @@ python3 release/macos_signing.py check
 The check resolves an available Developer ID identity, confirms its Team ID,
 and checks the notarization profile before any compilation starts. It rejects
 an ambiguous certificate name; use a full certificate fingerprint to select
-one exact identity. The checked-in fingerprint selects the current Remote
-certificate from the two certificates installed for the same team.
+one exact identity. The checked-in fingerprint selects the current G2
+Developer ID Application certificate, valid until 2027-12-16. Its chain needs
+Apple's Developer ID G2 intermediate CA in the Keychain.
 
 Xcode account selection and `notarytool` profiles are separate. A profile is a
 local Keychain item holding credentials. A missing-profile error means that
