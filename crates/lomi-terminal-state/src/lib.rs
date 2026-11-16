@@ -697,7 +697,44 @@ fn buffer(grid: &Grid<EngineCell>) -> Buffer {
     }
 }
 
+/// The cell a fresh grid holds; trimmed-rows-v1 omits it at row ends.
+pub fn blank_cell() -> Cell {
+    Cell {
+        text: " ".into(),
+        width: 1,
+        fg: Color::Default,
+        bg: Color::Default,
+        flags: Vec::new(),
+        underline_style: 0,
+        underline_color: None,
+        hyperlink: None,
+    }
+}
 impl Snapshot {
+    /// trimmed-rows-v1: drop each row's trailing blank cells. Decoders pad
+    /// rows back to `cols` with [`blank_cell`]; the result is no longer
+    /// `validate()`-clean, so only serialize it.
+    pub fn trim_rows(&mut self) {
+        let blank = blank_cell();
+        for buffer in [&mut self.normal, &mut self.alternate] {
+            for row in &mut buffer.lines {
+                while row.cells.last() == Some(&blank) {
+                    row.cells.pop();
+                }
+            }
+        }
+    }
+    /// Inverse of [`Snapshot::trim_rows`] for decoders.
+    pub fn pad_rows(&mut self) {
+        let blank = blank_cell();
+        for buffer in [&mut self.normal, &mut self.alternate] {
+            for row in &mut buffer.lines {
+                if row.cells.len() < self.cols {
+                    row.cells.resize(self.cols, blank.clone());
+                }
+            }
+        }
+    }
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.profile != PROFILE || self.version != 1 {
             return Err("unsupported terminal profile");
@@ -790,5 +827,31 @@ impl Delta {
             return Err("invalid delta sequence");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod trimmed_rows_tests {
+    use super::*;
+
+    #[test]
+    fn trimmed_rows_round_trip_and_shrink() {
+        let mut state = TerminalState::new(24, 120, 100).unwrap();
+        state
+            .feed(b"hello \x1b[31mred\x1b[0m world\r\n  indented   \r\n\xe4\xbd\xa0\xe5\xa5\xbd")
+            .unwrap();
+        let full = state.snapshot().unwrap();
+        let mut trimmed = full.clone();
+        trimmed.trim_rows();
+        let full_bytes = serde_json::to_vec(&full).unwrap().len();
+        let trimmed_bytes = serde_json::to_vec(&trimmed).unwrap().len();
+        assert!(
+            trimmed_bytes * 20 < full_bytes,
+            "{trimmed_bytes} vs {full_bytes}"
+        );
+        // Wide-character spacers are not blank, so the CJK cells survive.
+        assert!(trimmed.normal.lines[2].cells.len() == 4);
+        trimmed.pad_rows();
+        assert_eq!(trimmed, full);
     }
 }

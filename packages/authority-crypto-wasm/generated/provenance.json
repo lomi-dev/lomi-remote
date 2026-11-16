@@ -96,7 +96,7 @@
     "crates/lomi-remote-protocol/src/message_framing.rs": "143c9fa57da521d877a2bd4ac845db6e12cd8e80906405a2a82e2718cf1809fe",
     "crates/lomi-remote-protocol/src/operations.rs": "f9be153bd0899d56d24b95dc3f6c8370c6d0b986eebe9888b970085dc5a342b6",
     "crates/lomi-remote-protocol/src/primitives.rs": "3c96780a156b6294847a40717a3761a73fd48c6faf1c73d7fcfb62bc522df390",
-    "crates/lomi-remote-protocol/src/rpc.rs": "a42fdd4f29b693f0a5dbcac6ada7f99754eb0e9cb769c90c81845b56a85826ac",
+    "crates/lomi-remote-protocol/src/rpc.rs": "e57a0496651cd35677f3392a130aeaf89242aff1b18d0b40ad6d68a8afdfad46",
     "crates/lomi-remote-protocol/src/streams.rs": "6cbc855f64d6a3e61fee9ee890db69119c9a5c9a3fe473622befabdf08f43650",
     "packages/authority-crypto-wasm/README.md": "e62cc53c580d6c2a29f500ac3a474805b3673af4046160cc919fa94b71e8cbf0",
     "packages/authority-crypto-wasm/THIRD_PARTY_NOTICES.json": "d3fc558967480a11e19a275968eec2eca6f2b329e06eb175616ddc7ebeecb9d0",

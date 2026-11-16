@@ -8581,6 +8581,16 @@
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
+          "SnapshotEncoding": {
+            "description": "Opt-in snapshot wire encodings. Absent keeps the full-width row encoding\nthat older clients require; older Hosts reject the field entirely.",
+            "oneOf": [
+              {
+                "const": "trimmed-rows-v1",
+                "description": "Rows omit trailing blank default cells; decoders pad them back.",
+                "type": "string"
+              }
+            ]
+          },
           "SplitAxis": {
             "enum": [
               "horizontal",
@@ -8811,6 +8821,16 @@
           "TerminalReadParams": {
             "additionalProperties": false,
             "properties": {
+              "snapshotEncoding": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/SnapshotEncoding"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "terminal": {
                 "$ref": "#/components/schemas/LocalRequest/$defs/TerminalContext"
               }
@@ -18605,6 +18625,16 @@
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
+          "SnapshotEncoding": {
+            "description": "Opt-in snapshot wire encodings. Absent keeps the full-width row encoding\nthat older clients require; older Hosts reject the field entirely.",
+            "oneOf": [
+              {
+                "const": "trimmed-rows-v1",
+                "description": "Rows omit trailing blank default cells; decoders pad them back.",
+                "type": "string"
+              }
+            ]
+          },
           "SplitAxis": {
             "enum": [
               "horizontal",
@@ -18835,6 +18865,16 @@
           "TerminalReadParams": {
             "additionalProperties": false,
             "properties": {
+              "snapshotEncoding": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/SnapshotEncoding"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "terminal": {
                 "$ref": "#/components/schemas/RpcRequest/$defs/TerminalContext"
               }

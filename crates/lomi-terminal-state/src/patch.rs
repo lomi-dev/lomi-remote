@@ -529,6 +529,18 @@ impl Serialize for CellsView<'_> {
     }
 }
 impl GridPatch {
+    /// trimmed-rows-v1 copy of a checkpoint patch; `None` for sparse
+    /// updates, which already carry only changed runs.
+    pub fn trimmed_rows(&self) -> Option<Self> {
+        let GridUpdate::Checkpoint { .. } = &self.update else {
+            return None;
+        };
+        let mut patch = self.clone();
+        if let GridUpdate::Checkpoint { state } = &mut patch.update {
+            state.trim_rows();
+        }
+        Some(patch)
+    }
     pub fn previous_sequence(&self) -> DecimalU64 {
         self.previous_sequence
     }

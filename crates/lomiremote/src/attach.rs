@@ -562,6 +562,7 @@ pub fn run(
         &mut view,
         RpcCall::TerminalAttach(TerminalReadParams {
             terminal: context.clone(),
+            snapshot_encoding: None,
         }),
     )?;
     let RpcResult::TerminalAttach(meta) = result else {

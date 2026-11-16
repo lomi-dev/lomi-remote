@@ -1617,6 +1617,7 @@ impl RemoteConnectionState {
     ) -> Result<()> {
         let call = RpcCall::TerminalSnapshot(TerminalReadParams {
             terminal: target.clone(),
+            snapshot_encoding: None,
         });
         let result = self.core.evaluate(&call, f, sample);
         self.finish_gate(result)
@@ -1900,6 +1901,7 @@ impl RemoteConnectionState {
         }
         let call = RpcCall::TerminalSnapshot(TerminalReadParams {
             terminal: target.clone(),
+            snapshot_encoding: None,
         });
         let result = self.core.evaluate_started_git_terminal(
             &call,

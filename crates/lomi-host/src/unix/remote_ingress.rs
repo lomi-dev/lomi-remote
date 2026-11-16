@@ -5800,6 +5800,7 @@ mod terminal_renew_fast_path_tests {
             timeout_ms: TimeoutMs::new(10_000).unwrap(),
             call: RpcCall::TerminalAttach(TerminalReadParams {
                 terminal: terminal.clone(),
+                snapshot_encoding: None,
             }),
         };
         let mut request_encoder = MessageEncoder::new();

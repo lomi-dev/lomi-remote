@@ -29,7 +29,7 @@
     "crates/lomi-remote-protocol/src/message_framing.rs": "143c9fa57da521d877a2bd4ac845db6e12cd8e80906405a2a82e2718cf1809fe",
     "crates/lomi-remote-protocol/src/operations.rs": "f9be153bd0899d56d24b95dc3f6c8370c6d0b986eebe9888b970085dc5a342b6",
     "crates/lomi-remote-protocol/src/primitives.rs": "3c96780a156b6294847a40717a3761a73fd48c6faf1c73d7fcfb62bc522df390",
-    "crates/lomi-remote-protocol/src/rpc.rs": "a42fdd4f29b693f0a5dbcac6ada7f99754eb0e9cb769c90c81845b56a85826ac",
+    "crates/lomi-remote-protocol/src/rpc.rs": "e57a0496651cd35677f3392a130aeaf89242aff1b18d0b40ad6d68a8afdfad46",
     "crates/lomi-remote-protocol/src/streams.rs": "6cbc855f64d6a3e61fee9ee890db69119c9a5c9a3fe473622befabdf08f43650",
     "packages/protocol-codec-wasm/README.md": "b38d6e782773d1a47e2d770e8317961c1c1c45fda12b94eeef1a89db7740826c",
     "packages/protocol-codec-wasm/package.json": "08b0abf8ca30dcfea29ca3573f515082f821186092f62fdb87b94486a6113765",
@@ -38,11 +38,11 @@
     "packages/protocol-codec-wasm/src/index.mjs": "995017c04d4a221ee5645f32f5c494c50f36017342205e8b7b260af62f637ccb",
     "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
   },
-  "inputWasmSha256": "b599d1c436f63eefefcd28fb9944f86680d5b839699195a82ee1e5d1b2347b91",
+  "inputWasmSha256": "612d65e615cc0e2e98dbe8db6089ca0a9cc8aea82f8d8e30dfebc24988b9e76c",
   "generatedSha256": {
     "protocol_codec.d.ts": "73b24bf673c4dccf91d016a431698af6fb6a44c2714dba3e5edc3ecabab5b3b7",
     "protocol_codec.js": "7e466fbe6c40eb933cb86cecbc91e68c0c347360f45ce09bc4b4eb8a2e080474",
-    "protocol_codec_bg.wasm": "1996fec0be6299749d5af54602b313f89e47803bdadb6833f98fc1b8e220ca59",
+    "protocol_codec_bg.wasm": "605cbb41039d400929cde35642270c78e74ac82ea6e3fe96db0555e315629c25",
     "protocol_codec_bg.wasm.d.ts": "9e6944ae4cfd772a476245fb7e5d221e5a656f7ce5e0981eb5466ddd1247a9f7"
   },
   "scope": "Pure wire validation and generic logical-message framing; no authentication, cryptography, database state, authority, freshness or semantic domain stream application.",

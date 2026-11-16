@@ -23,6 +23,7 @@ struct Subscription {
     attachment: Attachment,
     emission: Option<Emission>,
     sent_through: Option<u64>,
+    trimmed_rows: bool,
 }
 struct Emission {
     bytes: Vec<u8>,
@@ -296,7 +297,9 @@ impl RemoteTerminalState {
         // Checked APIs invoke these predicates under Core/retirement locks.
         // They read only the retained owner turn or its lock-free IO watch.
         match &request.call {
-            RpcCall::TerminalAttach(_) | RpcCall::TerminalSnapshot(_) => {
+            RpcCall::TerminalAttach(params) | RpcCall::TerminalSnapshot(params) => {
+                let trimmed_rows =
+                    params.snapshot_encoding == Some(SnapshotEncoding::TrimmedRowsV1);
                 if self.subscriptions.len() >= LIMIT {
                     return Err(fault(ErrorCode::ResourceExhausted));
                 }
@@ -314,6 +317,7 @@ impl RemoteTerminalState {
                     context,
                     Box::new(attachment),
                     matches!(&request.call, RpcCall::TerminalAttach(_)),
+                    trimmed_rows,
                 ))
             }
             RpcCall::TerminalAck(params) => {
@@ -484,8 +488,8 @@ impl RemoteTerminalState {
         };
         match result {
             Execution::Result(result) => Ok(result),
-            Execution::Attachment(context, attachment, attach) => {
-                let metadata = self.register(context, *attachment)?;
+            Execution::Attachment(context, attachment, attach, trimmed_rows) => {
+                let metadata = self.register(context, *attachment, trimmed_rows)?;
                 Ok(if attach {
                     RpcResult::TerminalAttach(metadata)
                 } else {
@@ -518,9 +522,16 @@ impl RemoteTerminalState {
         &mut self,
         context: TerminalContext,
         attachment: Attachment,
+        trimmed_rows: bool,
     ) -> Result<TerminalSnapshotMetadata, RemoteError> {
-        let bytes = serde_json::to_vec(&attachment.snapshot)
-            .map_err(|_| fault(ErrorCode::ServiceUnavailable))?;
+        let bytes = if trimmed_rows {
+            let mut snapshot = attachment.snapshot.clone();
+            snapshot.trim_rows();
+            serde_json::to_vec(&snapshot)
+        } else {
+            serde_json::to_vec(&attachment.snapshot)
+        }
+        .map_err(|_| fault(ErrorCode::ServiceUnavailable))?;
         let working_directory = attachment.working_directory.clone();
         let pending: usize = self
             .subscriptions
@@ -575,6 +586,7 @@ impl RemoteTerminalState {
                 attachment,
                 emission: Some(emission),
                 sent_through: None,
+                trimmed_rows,
             },
         );
         self.schedule.push_back(id);
@@ -594,7 +606,7 @@ impl RemoteTerminalState {
     }
 }
 enum Execution {
-    Attachment(TerminalContext, Box<Attachment>, bool),
+    Attachment(TerminalContext, Box<Attachment>, bool, bool),
     Result(RpcResult),
 }
 trait TerminalTurnCallbacks {
@@ -788,7 +800,8 @@ impl RemoteTerminalState {
             match &*queued.event {
                 TerminalEvent::State(delta) => {
                     // No Domain/actor/Store guard remains during serialization.
-                    let bytes = serde_json::to_vec(&**delta)
+                    let trimmed = sub.trimmed_rows.then(|| delta.trimmed_rows()).flatten();
+                    let bytes = serde_json::to_vec(trimmed.as_ref().unwrap_or(delta))
                         .map_err(|_| fault(ErrorCode::ServiceUnavailable))?;
                     let working_directory = queued.working_directory.clone();
                     let pending: usize = self
@@ -1188,9 +1201,17 @@ mod finite_emission_retention_tests {
                 session_epoch,
                 profile: TerminalProfile::ExperimentalRustGridV1,
             };
-            let metadata = terminal.register(context.clone(), attachment).unwrap();
+            let metadata = terminal.register(context.clone(), attachment, false).unwrap();
             assert!(metadata.chunk_count.0 > 1);
             assert!(terminal.has_immediate_output());
+            let mut trimmed_terminal = RemoteTerminalState::new(Weak::new(), &connection).unwrap();
+            let trimmed_attachment = service
+                .attach(session_id, session_epoch, &trimmed_terminal.principal)
+                .unwrap();
+            let trimmed = trimmed_terminal
+                .register(context.clone(), trimmed_attachment, true)
+                .unwrap();
+            assert!(trimmed.total_bytes.0 * 20 < metadata.total_bytes.0);
 
             let subscription = String::from(metadata.subscription_id);
             let mut chunks = 0;
@@ -1217,7 +1238,7 @@ mod finite_emission_retention_tests {
             let other_attachment = service
                 .attach(session_id, session_epoch, &other_terminal.principal)
                 .unwrap();
-            let other_metadata = other_terminal.register(context, other_attachment).unwrap();
+            let other_metadata = other_terminal.register(context, other_attachment, false).unwrap();
             let other_subscription = String::from(other_metadata.subscription_id);
             let frame = other_terminal.emit(&other_subscription).unwrap();
             assert!(
@@ -1359,7 +1380,7 @@ mod finite_emission_retention_tests {
                 session_epoch: SessionEpoch::from_bytes([52; 16]).unwrap(),
                 profile: TerminalProfile::ExperimentalRustGridV1,
             };
-            let metadata = terminal.register(context, attachment).unwrap();
+            let metadata = terminal.register(context, attachment, false).unwrap();
             let subscription = String::from(metadata.subscription_id);
             let delivery = terminal.emit(&subscription).unwrap();
             assert!(terminal.pending_frame_matches(&delivery, &connection));

@@ -477,6 +477,11 @@ export type MovePlacement = "before" | "after";
 export type TerminalProfile = "lomi-rust-grid-v1-experimental";
 export type SessionEpoch = string;
 export type TerminalSessionId = string;
+/**
+ * Opt-in snapshot wire encodings. Absent keeps the full-width row encoding
+ * that older clients require; older Hosts reject the field entirely.
+ */
+export type SnapshotEncoding = "trimmed-rows-v1";
 export type SubscriptionId = string;
 export type LeaseToken = string;
 /**
@@ -726,6 +731,7 @@ export interface TerminalRestartParams {
   profileId: HostProfileId;
 }
 export interface TerminalReadParams {
+  snapshotEncoding?: SnapshotEncoding | null;
   terminal: TerminalContext;
 }
 export interface TerminalAckParams {

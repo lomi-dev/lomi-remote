@@ -281,8 +281,18 @@ dto!(TerminalRestartParams {
     expected_session: Option<TerminalContext>,
     profile_id: HostProfileId
 });
+/// Opt-in snapshot wire encodings. Absent keeps the full-width row encoding
+/// that older clients require; older Hosts reject the field entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SnapshotEncoding {
+    /// Rows omit trailing blank default cells; decoders pad them back.
+    #[serde(rename = "trimmed-rows-v1")]
+    TrimmedRowsV1,
+}
 dto!(TerminalReadParams {
-    terminal: TerminalContext
+    terminal: TerminalContext,
+    #[serde(default)]
+    snapshot_encoding: Option<SnapshotEncoding>
 });
 dto!(TerminalAckParams {
     terminal: TerminalContext,
