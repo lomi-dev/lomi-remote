@@ -207,6 +207,12 @@ pub(super) struct Work {
     pub(super) intent: Option<PairingDecisionIntent>,
 }
 
+/// Pending pairing/channel discovery cadence: every second, or every three
+/// while a remote channel is established and shares the actor.
+pub(super) fn discovery_interval(quiet: bool) -> Duration {
+    Duration::from_secs(if quiet { 3 } else { 1 })
+}
+
 #[derive(Default)]
 pub(super) struct Worker {
     transport: Option<DataTransport>,
@@ -226,6 +232,9 @@ pub(super) struct Worker {
     prefer_recovery: bool,
     scheduled_item_consumed: bool,
     cached_first_due: bool,
+    // Set while a remote channel is established: discovery of new requests
+    // can wait longer than the RPCs that share this actor.
+    quiet_polls: bool,
 }
 #[cfg_attr(test, derive(Debug))]
 pub(super) enum PeerError {
@@ -338,6 +347,9 @@ pub(super) fn pin(value: &IdentityFingerprintHex) -> ResultPeer<[u8; 32]> {
         .map_err(|_| PeerError::Invalid)
 }
 impl Worker {
+    pub(super) fn set_quiet_polls(&mut self, quiet: bool) {
+        self.quiet_polls = quiet;
+    }
     pub(super) fn discard_retained_operation(&mut self) {
         self.active = None;
         self.cache.clear();
@@ -647,7 +659,7 @@ impl Worker {
         })?;
         let access = managed(auth.access_credential(now))?;
         let started = Instant::now();
-        self.poll_at = Some(started + Duration::from_secs(1));
+        self.poll_at = Some(started + discovery_interval(self.quiet_polls));
         self.turns_since_poll = 0;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         owner_turn(runtime, || effect.try_validate(&provider))?;

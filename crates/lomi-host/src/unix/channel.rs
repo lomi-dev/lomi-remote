@@ -246,8 +246,14 @@ pub(super) struct Worker {
     capacity_blocked: bool,
     scheduled_item_consumed: bool,
     cached_first_due: bool,
+    // Set while a remote channel is established: discovery of new requests
+    // can wait longer than the RPCs that share this actor.
+    quiet_polls: bool,
 }
 impl Worker {
+    pub(super) fn set_quiet_polls(&mut self, quiet: bool) {
+        self.quiet_polls = quiet;
+    }
     pub(super) fn discard_retained_operation(&mut self) {
         self.active = None;
         self.cache.clear();
@@ -491,7 +497,7 @@ impl Worker {
         })?;
         let access = managed(auth.access_credential(now))?;
         let started = Instant::now();
-        self.poll_at = Some(started + Duration::from_secs(1));
+        self.poll_at = Some(started + peer::discovery_interval(self.quiet_polls));
         self.turns_since_poll = 0;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         owner_turn(runtime, || effect.try_validate(&provider))?;
