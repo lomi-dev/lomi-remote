@@ -253,7 +253,11 @@ def request_status(
         response = opener_factory().open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
         status = error.code
-        error.close()
+        try:
+            error.close()
+        except Exception:
+            # Python < 3.10 raises KeyError when the error has no body.
+            pass
         return status, None
     except ssl.SSLCertVerificationError:
         return None, "TLS_TRUST_UNAVAILABLE"
