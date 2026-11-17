@@ -232,6 +232,13 @@ impl<'cancel> Registry<'cancel> {
         self.entries.values().any(Driver::has_pending_setup)
     }
 
+    /// Setup that needs an actor turn (ticket POST or relay connect). A
+    /// connection waiting for the browser's `ready`/handshake does not, so it
+    /// must not hold back discovery of other channels.
+    pub(in crate::unix::auth) fn has_local_setup_work(&self) -> bool {
+        self.entries.values().any(Driver::has_local_setup_work)
+    }
+
     pub(in crate::unix::auth) fn has_active_git_writer(&self) -> bool {
         self.entries.values().any(Driver::has_active_git_writer)
     }

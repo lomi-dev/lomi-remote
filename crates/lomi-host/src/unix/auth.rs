@@ -3479,8 +3479,12 @@ fn run_with_apis_inner(
         let operation = runtime.operation;
         let mut wait =
             remote_ingress::actor_wait_duration(std::mem::take(&mut immediate_ingress_pass));
-        if ingress.has_established_connection() || cloud.has_inflight_heartbeat() {
-            // Also pick up an in-flight heartbeat result promptly.
+        if ingress.has_established_connection()
+            || ingress.has_pending_setup()
+            || cloud.has_inflight_heartbeat()
+        {
+            // Also pick up an in-flight heartbeat result and handshake/ready
+            // frames of a channel being set up promptly.
             wait = wait.min(remote_ingress::ESTABLISHED_ACTOR_WAIT);
         }
         match receiver.recv_timeout(wait) {
@@ -3916,6 +3920,7 @@ fn run_with_apis_inner(
                         } else {
                             ingress.next_due_established_peer_cutoff(std::time::Instant::now())
                         };
+                        cloud.set_synchronous_heartbeats(ingress.has_local_setup_work());
                         let cloud_result = cloud.step(
                             auth,
                             config,
@@ -4013,7 +4018,7 @@ fn run_with_apis_inner(
                             let peer_cached = peer.has_cached_work();
                             let channel_active = channel.has_active_work();
                             let channel_cached = channel.has_cached_work();
-                            let setup_pending = ingress.has_pending_setup();
+                            let setup_pending = ingress.has_local_setup_work();
                             let staged_output_pending =
                                 ingress.has_staged_output(runtime, Some(&eligibility));
                             let due_peer_refresh = ingress.has_due_peer_refresh(Instant::now());
@@ -4033,8 +4038,13 @@ fn run_with_apis_inner(
                             // while sibling messages remain staged. Keep the
                             // reservation; producer-only readiness never blocks
                             // the gap after a finite message drains.
+                            // Peer/Channel turns write owner state; one landing
+                            // while a heartbeat is in flight makes that heartbeat
+                            // stale and forces a Cloud GET that invalidates every
+                            // peer continuation (including a channel being
+                            // admitted). Wait the few hundred ms for it instead.
                             if let Some(class) = idle.select_class_for_ready_turn(
-                                priority_ingress_pending,
+                                priority_ingress_pending || cloud.has_inflight_heartbeat(),
                                 peer_active,
                                 peer_cached,
                                 channel_active,

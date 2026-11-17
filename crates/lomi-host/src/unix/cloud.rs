@@ -108,6 +108,7 @@ pub(super) struct Worker {
     /// Plain heartbeat POST running on a helper thread. Dropping it cancels the
     /// POST and installs nothing.
     inflight: Option<super::super::shared_owner::InFlightConfiguredHeartbeat>,
+    synchronous_heartbeats: bool,
     eligibility: Option<Box<PeerEligibility>>,
 }
 fn cloud_error(error: CloudGetError) -> StepError {
@@ -185,6 +186,12 @@ impl Worker {
     }
     pub(super) fn has_inflight_heartbeat(&self) -> bool {
         self.inflight.is_some()
+    }
+    /// While channel setup writes owner state, a heartbeat in flight would come
+    /// back stale and force a Cloud GET that invalidates the setup; keep the
+    /// POST on the actor until setup settles.
+    pub(super) fn set_synchronous_heartbeats(&mut self, synchronous: bool) {
+        self.synchronous_heartbeats = synchronous;
     }
     /// Called only after every class has settled/discarded its original unit.
     /// No heartbeat/GET observation survives into a successor admission.
@@ -558,6 +565,7 @@ impl Worker {
                     }
                     Ok(outcome)
                 } else if heartbeat_due || snapshot.needs_publication {
+                    let synchronous_heartbeats = self.synchronous_heartbeats;
                     let driver = self.normal_publication_driver().ok_or(StepError::Stale)?;
 
                     let mut attempt = ConfiguredNormalPublication::from_existing_worker(
@@ -573,7 +581,7 @@ impl Worker {
                     );
                     // Only a heartbeat that precedes no publication leaves the
                     // actor while its POST runs.
-                    let asynchronous = !snapshot.needs_publication;
+                    let asynchronous = !snapshot.needs_publication && !synchronous_heartbeats;
                     let outcome = (|| -> Result<(), StepError> {
                         let mut heartbeat = attempt
                             .begin_configured_heartbeat(runtime.owner, asynchronous)

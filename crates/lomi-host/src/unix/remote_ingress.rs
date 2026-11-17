@@ -745,6 +745,25 @@ impl<'cancel> Driver<'cancel> {
             .as_mut()
             .is_none_or(|connection| connection.suspend_at_message_boundary(now))
     }
+    /// Pending setup outlives a lapsed Cloud eligibility only within its own
+    /// handoff/ticket bounds and while the peer runtime is current.
+    fn setup_waits_for_eligibility(
+        &self,
+        runtime: RuntimeWithOperation<'_, '_>,
+        now: Instant,
+    ) -> bool {
+        if peer::check_peer_runtime(runtime).is_err() {
+            return false;
+        }
+        match (&self.candidate, &self.ticketed) {
+            (Some(candidate), None) => now < candidate.deadline(),
+            (None, Some(ticketed)) => ticketed.bounds_current_at(now),
+            _ => false,
+        }
+    }
+    pub(super) fn has_local_setup_work(&self) -> bool {
+        self.candidate.is_some() || self.ticketed.is_some()
+    }
     pub(super) fn has_pending_setup(&self) -> bool {
         self.candidate.is_some()
             || self.ticketed.is_some()
@@ -1059,14 +1078,21 @@ impl<'cancel> Driver<'cancel> {
             }
             return true;
         }
-        let current =
-            eligibility.is_some_and(|eligibility| match (&self.candidate, &self.ticketed) {
-                (Some(candidate), None) => {
-                    candidate.check_current(auth, runtime, eligibility).is_ok()
-                }
-                (None, Some(ticketed)) => ticketed.poll_current(auth, runtime, eligibility),
-                _ => false,
-            });
+        let Some(eligibility) = eligibility else {
+            // Cloud's cached eligibility lapses between heartbeats. Pending
+            // setup waits for the next fresh read inside its own deadline
+            // (dropping it left the browser to retry ~15 s later); no IO runs
+            // without eligibility and every later stage revalidates in full.
+            if !self.setup_waits_for_eligibility(runtime, Instant::now()) {
+                self.discard();
+            }
+            return false;
+        };
+        let current = match (&self.candidate, &self.ticketed) {
+            (Some(candidate), None) => candidate.check_current(auth, runtime, eligibility).is_ok(),
+            (None, Some(ticketed)) => ticketed.poll_current(auth, runtime, eligibility),
+            _ => false,
+        };
         if !current {
             self.discard();
         }
@@ -1096,10 +1122,13 @@ impl<'cancel> Driver<'cancel> {
             }
         }
         if self.ticketed.is_some() {
-            let result = eligibility
-                .ok_or(peer::PeerError::Invalid)
-                .and_then(|e| self.connect(auth, runtime, e));
-            if result.is_ok() {
+            let Some(eligibility) = eligibility else {
+                if !self.setup_waits_for_eligibility(runtime, Instant::now()) {
+                    self.discard();
+                }
+                return false;
+            };
+            if self.connect(auth, runtime, eligibility).is_ok() {
                 return true;
             }
             self.discard();
