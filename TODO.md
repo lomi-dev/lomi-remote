@@ -29,6 +29,7 @@ pozostaje wstrzymany.**
   - ponowienie przy `CHANNEL_NOT_ADMITTED`;
   - jednorazowe ponowne połączenie przy `STALE_EPOCH`;
   - przycisk „Dismiss” dla niepewnego tworzenia terminala.
+  - czytelny komunikat przy limicie zasobów Hosta (np. 32 terminale).
 - **Pozostała blokada:** jeden wątek autoryzacji wykonuje zapytania
   control-plane szeregowo. `POST heartbeat` trwa 150–900 ms, bo serwer
   obsługuje runtime pod globalną blokadą. Przez ten czas Host nie czyta
@@ -43,18 +44,22 @@ pozostaje wstrzymany.**
    dostaje gotowe obserwacje i używa ich wyłącznie w ramach ich własnej
    świeżości, z tymi samymi kontrolami co dziś. Ingress przestaje czekać na
    HTTPS.
-2. Zmierzyć i skrócić czas `lomi_host_runtime_heartbeat` po stronie serwera
-   (globalna blokada autoryzacji).
+2. Serwer: pomiar 2026-11-17 bez aktywnych Hostów pokazał, że transakcja
+   z globalną blokadą kosztuje ok. 15–25 ms ponad zwykłą odpowiedź
+   (`remote.lomi.dev`, ok. 150–180 ms łącznie z TLS). Wcześniejsze 150–900 ms
+   heartbeatu trzeba powtórzyć pod obciążeniem aktywnej sesji, zanim
+   zmienimy serwer.
 3. Rozważyć region originu relaya/API bliżej użytkowników (decyzja infrastruktury).
 4. Dzierżawa 5 s jest w specyfikacji „startowa”. Wydłużenie wymaga zgodnej
    zmiany Hosta, `remote-web` i aplikacji mobilnej (obie odrzucają > 5000 ms).
 
 ## Znane problemy do naprawy
 
-- Interfejs nie mówi wprost o limicie 32 kart w workspace; pokazuje
-  „The host could not complete the request”.
-- Aplikacja mobilna: sprawdzić, czy jej renderer ma ten sam błąd sekwencji
-  zdarzeń sterowania co `remote-web` (naprawiony w `2c8177c`).
+- Aplikacja mobilna: zdarzenie `controlChanged` przesuwa sekwencję poprawnie
+  (`advanceStream`). Gałąź `gridResize` w `renderer/index.ts` nie przesuwa
+  wewnętrznej sekwencji renderera, ale obecny Host nie emituje zmiany
+  `resize` w strumieniu (zmiana geometrii wymaga snapshotu). Poprawić, jeśli
+  Host zacznie ją wysyłać.
 
 ## Kontrole przy zapisie kodu
 
