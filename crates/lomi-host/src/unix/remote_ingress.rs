@@ -3817,7 +3817,13 @@ impl<'cancel> Connection<'cancel> {
             }
             return Ok(true);
         }
-        if self.maintenance.check().is_err() {
+        if self.maintenance.check().is_err()
+            || maintenance_needs_replacement(
+                self.maintenance.deadline(),
+                runtime.operation.deadline(),
+                Instant::now(),
+            )
+        {
             self.maintenance_aborted.set(false);
             self.maintenance = super::OwnerOperation::new(
                 runtime.operation.deadline(),
@@ -4128,11 +4134,18 @@ impl<'cancel> Connection<'cancel> {
         }
         if let Some((request, received)) = request {
             let terminal_renew = matches!(&request.call, RpcCall::TerminalRenew(_));
+            // Short terminal control calls adopt the connection's maintenance
+            // admission and proof, then return them after a one-frame reply.
+            let terminal_control = terminal_renew
+                || matches!(
+                    &request.call,
+                    RpcCall::TerminalInput(_) | RpcCall::TerminalResize(_)
+                );
             let request_deadline = received
                 .checked_add(Duration::from_millis(request.timeout_ms.get()))
                 .ok_or(peer::PeerError::Invalid)?
                 .min(worker_deadline);
-            let (mut operation, aborted, cached_peer) = if terminal_renew {
+            let (mut operation, aborted, cached_peer) = if terminal_control {
                 let replacement_maintenance = super::OwnerOperation::new(
                     worker_deadline,
                     cancelled.ok_or(peer::PeerError::Invalid)?,
@@ -4157,7 +4170,7 @@ impl<'cancel> Connection<'cancel> {
                     None,
                 )
             };
-            if terminal_renew {
+            if terminal_control {
                 operation.cap_deadline(request_deadline);
             }
             let request_runtime = Runtime {
@@ -4165,14 +4178,19 @@ impl<'cancel> Connection<'cancel> {
                 aborted: &aborted,
                 ..runtime
             };
-            let (current, evidence) = if terminal_renew {
+            let (current, evidence) = if terminal_control {
                 let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
-                if let Some(current) = terminal_renew_cached_proof(
-                    cached_peer,
-                    request_runtime,
-                    self.peer_cutoff,
-                    &evidence,
-                ) {
+                let cached = if terminal_renew {
+                    terminal_renew_cached_proof(
+                        cached_peer,
+                        request_runtime,
+                        self.peer_cutoff,
+                        &evidence,
+                    )
+                } else {
+                    terminal_control_cached_proof(cached_peer, self.peer_cutoff, &evidence)
+                };
+                if let Some(current) = cached {
                     (current, evidence)
                 } else {
                     drop(evidence);
@@ -4727,22 +4745,36 @@ impl<'cancel> Connection<'cancel> {
                 let send_deadline = current
                     .io_deadline(&evidence)
                     .ok_or(peer::PeerError::Invalid)?;
-                let operation = &operation;
-                let owner = runtime.owner;
-                let continuation = current.continuation();
-                let gate = runtime.gate;
-                let paused = runtime.paused;
-                let stopping = runtime.stopping;
-                let public_pending = &runtime.public_io.setup().pending;
-                let check = || {
-                    watch(operation, gate, paused, stopping, public_pending)?;
-                    owner
-                        .peer_original_boundary(operation, continuation)
-                        .map_err(|_| BudgetStop::Cancelled)
-                };
-                self.socket
-                    .send_binary(&frame, send_deadline, &check)
-                    .map_err(invalid_at!())?;
+                {
+                    let operation = &operation;
+                    let owner = runtime.owner;
+                    let continuation = current.continuation();
+                    let gate = runtime.gate;
+                    let paused = runtime.paused;
+                    let stopping = runtime.stopping;
+                    let public_pending = &runtime.public_io.setup().pending;
+                    let check = || {
+                        watch(operation, gate, paused, stopping, public_pending)?;
+                        owner
+                            .peer_original_boundary(operation, continuation)
+                            .map_err(|_| BudgetStop::Cancelled)
+                    };
+                    self.socket
+                        .send_binary(&frame, send_deadline, &check)
+                        .map_err(invalid_at!())?;
+                }
+                if terminal_control {
+                    // Return the exact original admission (and capped deadline)
+                    // with its proof; every later use rechecks both.
+                    drop(evidence);
+                    restore_terminal_stream_operation(
+                        &mut self.maintenance,
+                        &mut self.maintenance_aborted,
+                        operation,
+                        aborted,
+                    );
+                    self.peer = Some(current);
+                }
                 return Ok(true);
             }
             drop(evidence);
@@ -4807,6 +4839,31 @@ fn terminal_renew_cached_proof(
             terminal_renew_cached_proof_covers(Instant::now(), deadline, cutoff, proof_deadline)
         }))
     .then_some(proof)
+}
+
+/// Reuse the connection proof for input/resize under the same rule as other
+/// cached sends: same admission, current, and fresh beyond the reuse margin.
+fn terminal_control_cached_proof(
+    cached: Option<peer::VerifiedCurrentPeer>,
+    peer_cutoff: Instant,
+    evidence: &super::RemoteWorkerEvidence<'_, '_, '_, '_>,
+) -> Option<peer::VerifiedCurrentPeer> {
+    let proof = cached?;
+    let refresh_by = Instant::now().checked_add(PEER_PROOF_REUSE_MARGIN)?;
+    (proof.current(evidence)
+        && refresh_by < proof.fresh_until()
+        && refresh_by < peer_cutoff
+        && proof
+            .io_deadline(evidence)
+            .is_some_and(|deadline| refresh_by < deadline))
+    .then_some(proof)
+}
+
+/// Terminal control calls return their admission capped to the request
+/// deadline. Replace it before it runs short when the worker unit allows a
+/// later deadline, so the next request still gets a usable budget.
+fn maintenance_needs_replacement(maintenance: Instant, unit: Instant, now: Instant) -> bool {
+    maintenance.saturating_duration_since(now) <= PEER_REFRESH_MARGIN && unit > maintenance
 }
 
 fn terminal_renew_cached_proof_covers(
@@ -5593,6 +5650,21 @@ mod terminal_renew_fast_path_tests {
     }
 
     #[test]
+    fn capped_maintenance_is_replaced_only_when_the_unit_allows_more_time() {
+        let now = Instant::now();
+        let short = now + PEER_REFRESH_MARGIN;
+        let long = now + Duration::from_secs(30);
+        assert!(maintenance_needs_replacement(short, long, now));
+        assert!(!maintenance_needs_replacement(
+            long,
+            long + Duration::from_secs(1),
+            now
+        ));
+        // A unit that cannot extend the budget must not churn admissions.
+        assert!(!maintenance_needs_replacement(short, short, now));
+    }
+
+    #[test]
     fn cached_renewal_proof_skips_prefetch_margin_only_when_all_real_bounds_cover() {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(1_500);
@@ -5994,13 +6066,21 @@ mod terminal_renew_fast_path_tests {
                 matches!(&outcome, Ok(true)),
                 "terminal request did not finish in its current turn: {outcome:?}"
             );
+            // Input/resize adopt the maintenance proof and hand it back after
+            // their one-frame reply; other calls need their own fresh read.
+            let reuses_connection_proof = matches!(
+                &request.call,
+                RpcCall::TerminalInput(_) | RpcCall::TerminalResize(_)
+            );
             assert_eq!(
                 get_count.get(),
-                2,
-                "maintenance and fresh request pairing reads are required"
+                if reuses_connection_proof { 1 } else { 2 },
+                "unexpected pairing reads for {:?}",
+                request.call.method()
             );
             assert_eq!(connection.socket.sent().len(), sent_before + 1);
             assert!(connection.response.is_none());
+            assert_eq!(connection.peer.is_some(), reuses_connection_proof);
         });
         let IngressSocket::Memory(socket) = &connection.socket else {
             unreachable!("terminal control tests use their in-memory relay boundary");
@@ -6719,7 +6799,10 @@ mod terminal_renew_fast_path_tests {
                                             Some(runtime.operation.cancellation_latch()),
                                         );
                                         assert!(outcome.is_err());
-                                        assert_eq!(get_count.get(), 2);
+                                        // The maintenance proof is reused; a failed
+                                        // send never returns it to the connection.
+                                        assert_eq!(get_count.get(), 1);
+                                        assert!(connection.peer.is_none());
                                         let IngressSocket::Memory(socket) = &connection.socket
                                         else {
                                             unreachable!("terminal data tests use memory socket")
