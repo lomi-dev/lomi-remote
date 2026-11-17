@@ -599,8 +599,10 @@ fn terminal_burst_can_continue(
                 .checked_duration_since(started)
                 .is_some_and(|elapsed| elapsed < registry::STAGED_MESSAGE_BATCH_QUANTUM)
             && registry::terminal_emission_retains_operation(operation_deadline, now)
+            // Same bound as proof reuse: a 3 s margin disabled bursts for
+            // nearly every heartbeat-capped proof.
             && now
-                .checked_add(PEER_REFRESH_MARGIN)
+                .checked_add(PEER_PROOF_REUSE_MARGIN)
                 .is_some_and(|refresh_by| refresh_by < proof_fresh_until)
     })
 }
@@ -5395,7 +5397,7 @@ mod stream_operation_transfer_tests {
             Duration::from_millis(lomi_remote_protocol::message_framing::ASSEMBLY_TIMEOUT_MS)
                 .saturating_add(PEER_REFRESH_MARGIN);
         let operation_deadline = first_send + headroom + Duration::from_secs(2);
-        let proof_fresh_until = first_send + PEER_REFRESH_MARGIN + Duration::from_secs(2);
+        let proof_fresh_until = first_send + PEER_PROOF_REUSE_MARGIN + Duration::from_secs(2);
         assert!(terminal_burst_can_continue(
             burst_started,
             first_send + Duration::from_millis(499),
@@ -5431,7 +5433,7 @@ mod stream_operation_transfer_tests {
             Duration::from_millis(lomi_remote_protocol::message_framing::ASSEMBLY_TIMEOUT_MS)
                 .saturating_add(PEER_REFRESH_MARGIN);
         let operation_deadline = now + headroom + Duration::from_nanos(1);
-        let proof_fresh_until = now + PEER_REFRESH_MARGIN + Duration::from_nanos(1);
+        let proof_fresh_until = now + PEER_PROOF_REUSE_MARGIN + Duration::from_nanos(1);
 
         let can_continue =
             |origin, at, fresh_until, deadline, operation_live, proof_current, pending| {
@@ -5485,7 +5487,7 @@ mod stream_operation_transfer_tests {
         assert!(!can_continue(
             Some(started),
             now,
-            now + PEER_REFRESH_MARGIN,
+            now + PEER_PROOF_REUSE_MARGIN,
             operation_deadline,
             true,
             true,
