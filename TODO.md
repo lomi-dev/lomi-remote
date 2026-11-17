@@ -21,6 +21,9 @@ pozostaje wstrzymany.**
   - odpytywanie kanału co 20 ms;
   - dłuższe użycie ważnego dowodu;
   - rzadsze wykrywanie nowych okien.
+  - `terminal.input`/`terminal.resize` używają dowodu połączenia zamiast
+    odczytu pairingu przy każdym klawiszu (`652764b`). Testy PTY tej zmiany
+    czekają na Linuksa.
 - Poprawki przeglądarki (`remote-web`):
   - sekwencja zdarzeń sterowania w modelu siatki (wcześniej każdy pierwszy
     klawisz wymuszał resync);
