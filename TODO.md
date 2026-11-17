@@ -60,6 +60,17 @@ pozostaje wstrzymany.**
 - Opóźnienie sieci: relay i API idą przez Cloudflare do odległego originu.
   Jedno RPC przez relay kosztuje ok. 0,25 s w każdą stronę niezależnie od Hosta.
 
+- **Echo klawisza (pomiar 2026-11-17, 0.1.12, instrumentowany Host): 0,8–2,1 s.**
+  Rozkład: przeglądarka → Host 160–1470 ms (Host odbiera ramki relaya tylko
+  między blokującymi zapytaniami HTTPS); Host od wejścia do pierwszej ramki
+  wyniku ok. 230 ms, a do 1,5 s, gdy trafi na odpytanie `channels/pending`,
+  odczyt pairingu lub odnowienie sterowania. Każde przejście aktora trwa
+  ok. 45 ms. Echo jednego znaku to 3 ramki (w tym delta ok. 2,5 KB JSON,
+  czyli ok. 9 KB na kablu), bo łatka obejmuje cały wiersz.
+- Po restarcie Hosta pierwsze otwarcie terminala przechodzi przez
+  `STALE_EPOCH`, `CHANNEL_NOT_ADMITTED` i `WORKSPACE_UNSHARED`, a potem
+  samo się udaje (ok. 24 s). Sesje PTY nie przeżywają restartu Hosta.
+
 ## Następny krok projektowy
 
 1. Zrobione: zwykły heartbeat idzie w wątku pomocniczym (`26d1ad4`), a paczki
