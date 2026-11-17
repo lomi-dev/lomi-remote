@@ -22,8 +22,11 @@ pozostaje wstrzymany.**
   - dłuższe użycie ważnego dowodu;
   - rzadsze wykrywanie nowych okien.
   - `terminal.input`/`terminal.resize` używają dowodu połączenia zamiast
-    odczytu pairingu przy każdym klawiszu (`652764b`). Testy PTY tej zmiany
-    czekają na Linuksa.
+    odczytu pairingu przy każdym klawiszu (`652764b`), a od `5a23263` także
+    `terminal.ack` (wcześniej dwa odczyty na każde potwierdzenie wyniku).
+  - `34454c9`: kanał „wymagający odświeżenia dowodu” (próg 3 s) wygrywał
+    każdą turę, choć jego tura używała dowodu do 2 s. Kanał workspace
+    zabierał wszystkie tury, a wynik terminala czekał 1–5 s.
 - Poprawki przeglądarki (`remote-web`):
   - sekwencja zdarzeń sterowania w modelu siatki (wcześniej każdy pierwszy
     klawisz wymuszał resync);
@@ -33,11 +36,17 @@ pozostaje wstrzymany.**
   - jednorazowe ponowne połączenie przy `STALE_EPOCH`;
   - przycisk „Dismiss” dla niepewnego tworzenia terminala.
   - czytelny komunikat przy limicie zasobów Hosta (np. 32 terminale).
-- **Pozostała blokada:** jeden wątek autoryzacji wykonuje zapytania
-  control-plane szeregowo. `POST heartbeat` trwa 150–900 ms, bo serwer
-  obsługuje runtime pod globalną blokadą. Przez ten czas Host nie czyta
-  relaya. Każde RPC poza odnowieniem dodaje 1–2 odczyty pairingu (osobny
-  dowód dla operacji żądania).
+- **Pozostała blokada (pomiar 2026-11-17, Linux, instrumentowany Host):**
+  jeden wątek autoryzacji wykonuje HTTPS szeregowo, ok. 200 ms na
+  zapytanie. Podczas pisania w 18 s było 43 zapytań: 15 heartbeatów,
+  17 odczytów pairingu, 10 odpytań `pending`. Host czeka na sieć przez
+  ok. 50% czasu. Echo klawisza po poprawkach: 75 ms–1,2 s (wcześniej
+  1,3–5 s). Otwarcie terminala po odświeżeniu strony: ok. 22 s (dwa kanały
+  po kolei; każdy czeka na odpytanie `channels/pending` co 3 s, potem
+  admission, ticket i połączenie relaya).
+- Każdy fragment wyniku terminala to JSON z tablicą liczb (`BoundedList<u8>`):
+  delta 2,5 KB daje ok. 9–36 KB. Zmiana formatu wymaga zgodnej zmiany
+  protokołu, `remote-web` i aplikacji mobilnej.
 - Opóźnienie sieci: relay i API idą przez Cloudflare do odległego originu.
   Jedno RPC przez relay kosztuje ok. 0,25 s w każdą stronę niezależnie od Hosta.
 
