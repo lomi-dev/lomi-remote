@@ -52,10 +52,15 @@ pozostaje wstrzymany.**
 
 ## Następny krok projektowy
 
-1. Heartbeat i odpytywanie `pending` w osobnym wątku control-plane. Aktor
-   dostaje gotowe obserwacje i używa ich wyłącznie w ramach ich własnej
-   świeżości, z tymi samymi kontrolami co dziś. Ingress przestaje czekać na
-   HTTPS.
+1. Zrobione: zwykły heartbeat idzie w wątku pomocniczym (`26d1ad4`), a paczki
+   wyniku terminala wychodzą w jednej turze (`a563865`). Po zmianach Host
+   wysyła wynik 0,2–0,4 s po klawiszu. Reszta opóźnienia to relay (ok.
+   0,3–0,4 s w każdą stronę) i blokujące zapytania, które zostały na aktorze:
+   odpytywanie `pairings/pending` i `channels/pending` (ok. 250 ms każde)
+   oraz odczyty pairingu (ok. 1/s). Następny krok: odpytywanie `pending`
+   w wątku pomocniczym, tym samym wzorcem (ok. 150 linii).
+   Do zbadania: po odświeżeniu strony snapshot terminala czasem czeka
+   15–60 s.
 2. Serwer: pomiar 2026-11-17 bez aktywnych Hostów pokazał, że transakcja
    z globalną blokadą kosztuje ok. 15–25 ms ponad zwykłą odpowiedź
    (`remote.lomi.dev`, ok. 150–180 ms łącznie z TLS). Wcześniejsze 150–900 ms
