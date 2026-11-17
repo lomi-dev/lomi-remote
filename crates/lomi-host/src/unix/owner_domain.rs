@@ -1542,6 +1542,28 @@ impl<'d, 'o> OwnerGuard<'d, 'o> {
 }
 #[cfg(any(unix, windows))]
 impl OwnedHeartbeatPublication {
+    /// Reborrow the original read scope only, for a heartbeat resumed after its
+    /// POST ran on a helper thread. Same identity checks as `reborrow`.
+    pub(super) fn reborrow_read_scope<'d, 'o>(
+        &self,
+        domain: &'d OwnerDomain,
+        operation: &'o Operation<'o>,
+    ) -> Result<CloudReadScope<'d, 'o>, Error> {
+        operation.check()?;
+        if !std::sync::Arc::ptr_eq(&self.domain_identity, &domain.owner_identity)
+            || !operation.is_same_admission(&self.operation_identity)
+        {
+            return Err(Error::Stale);
+        }
+        Ok(CloudReadScope {
+            domain,
+            operation,
+            authority_revision: self.authority_revision,
+            generation: self.generation,
+            deny_epoch: self.deny_epoch,
+            issued: self.issued,
+        })
+    }
     /// Reborrow original values only. The caller validates the resulting cap
     /// under Domain then Store after provider work and before any effect.
     pub(super) fn reborrow<'d, 'o>(
@@ -1549,21 +1571,8 @@ impl OwnedHeartbeatPublication {
         domain: &'d OwnerDomain,
         operation: &'o Operation<'o>,
     ) -> Result<PublicationContinuation<'d, 'o>, Error> {
-        operation.check()?;
-        if !std::sync::Arc::ptr_eq(&self.domain_identity, &domain.owner_identity)
-            || !operation.is_same_admission(&self.operation_identity)
-        {
-            return Err(Error::Stale);
-        }
         Ok(PublicationContinuation {
-            original: CloudReadScope {
-                domain,
-                operation,
-                authority_revision: self.authority_revision,
-                generation: self.generation,
-                deny_epoch: self.deny_epoch,
-                issued: self.issued,
-            },
+            original: self.reborrow_read_scope(domain, operation)?,
             prepared: None,
             acknowledged: false,
         })

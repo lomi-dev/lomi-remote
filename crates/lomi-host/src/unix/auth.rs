@@ -3479,7 +3479,8 @@ fn run_with_apis_inner(
         let operation = runtime.operation;
         let mut wait =
             remote_ingress::actor_wait_duration(std::mem::take(&mut immediate_ingress_pass));
-        if ingress.has_established_connection() {
+        if ingress.has_established_connection() || cloud.has_inflight_heartbeat() {
+            // Also pick up an in-flight heartbeat result promptly.
             wait = wait.min(remote_ingress::ESTABLISHED_ACTOR_WAIT);
         }
         match receiver.recv_timeout(wait) {

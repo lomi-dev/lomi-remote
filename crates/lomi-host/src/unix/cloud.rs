@@ -105,6 +105,9 @@ pub(super) struct Worker {
     normal_publication_origin: Option<NormalConfiguredOrigin>,
     normal_worker_identity: std::sync::Arc<()>,
     pending_publication: Option<super::super::shared_owner::OwnedConfiguredHeartbeat>,
+    /// Plain heartbeat POST running on a helper thread. Dropping it cancels the
+    /// POST and installs nothing.
+    inflight: Option<super::super::shared_owner::InFlightConfiguredHeartbeat>,
     eligibility: Option<Box<PeerEligibility>>,
 }
 fn cloud_error(error: CloudGetError) -> StepError {
@@ -178,6 +181,10 @@ impl Worker {
             || self.awaiting_claim_get
             || self.unit_pending
             || self.pending_publication.is_some()
+            || self.inflight.is_some()
+    }
+    pub(super) fn has_inflight_heartbeat(&self) -> bool {
+        self.inflight.is_some()
     }
     /// Called only after every class has settled/discarded its original unit.
     /// No heartbeat/GET observation survives into a successor admission.
@@ -186,6 +193,7 @@ impl Worker {
         self.awaiting_claim_get = false;
         self.unit_pending = false;
         self.pending_publication = None;
+        self.inflight = None;
         self.normal_publication_origin = None;
         self.heartbeat_observation = None;
         self.heartbeat_deferral_attempt = None;
@@ -203,6 +211,7 @@ impl Worker {
     }
     fn clear_observations(&mut self) {
         self.pending_publication = None;
+        self.inflight = None;
         self.normal_publication_origin = None;
         self.heartbeat_observation = None;
         self.heartbeat_deferral_attempt = None;
@@ -464,6 +473,20 @@ impl Worker {
                 }
                 let heartbeat_due = self.fresh_until.is_none_or(|until| now >= until)
                     || self.heartbeat_at.is_none_or(|until| now >= until);
+                if let Some(flight) = self.inflight.as_mut() {
+                    let Some(response) = flight.poll() else {
+                        // The old observation is served only until its own
+                        // fresh_until; peer_eligibility never extends it. Once
+                        // it lapses, drop the cached copy ingress reads too.
+                        let outcome = self.peer_eligibility(auth, runtime, generation)?;
+                        if matches!(outcome, StepOutcome::Deferred) {
+                            self.eligibility = None;
+                        }
+                        return Ok(outcome);
+                    };
+                    let flight = self.inflight.take().ok_or(StepError::Stale)?;
+                    return self.resume_inflight_heartbeat(auth, runtime, flight, response);
+                }
                 if let Some(receipt) = self.pending_publication.take() {
                     let driver = self.normal_publication_driver().ok_or(StepError::Stale)?;
                     let mut attempt = ConfiguredNormalPublication::from_retained_heartbeat(
@@ -548,9 +571,12 @@ impl Worker {
                         runtime.base,
                         runtime.anchor,
                     );
+                    // Only a heartbeat that precedes no publication leaves the
+                    // actor while its POST runs.
+                    let asynchronous = !snapshot.needs_publication;
                     let outcome = (|| -> Result<(), StepError> {
                         let mut heartbeat = attempt
-                            .begin_configured_heartbeat(runtime.owner)
+                            .begin_configured_heartbeat(runtime.owner, asynchronous)
                             .map_err(publication_error)?;
                         loop {
                             runtime.check()?;
@@ -573,6 +599,13 @@ impl Worker {
                         Err(error) => return Err(error),
                         Ok(()) => {}
                     }
+                    if asynchronous {
+                        let flight = attempt.take_inflight_heartbeat();
+                        drop(attempt);
+                        self.inflight = Some(flight.ok_or(StepError::Stale)?);
+                        self.unit_pending = true;
+                        return Ok(StepOutcome::Network);
+                    }
                     let receipt = if snapshot.needs_publication {
                         Some(
                             attempt
@@ -594,6 +627,63 @@ impl Worker {
                 }
             }
         }
+    }
+    /// The actor performs every validation and state effect here; the helper
+    /// thread only delivered the HTTP result. A failure or stale result
+    /// invalidates the old heartbeat, so the next action is a fresh Cloud GET.
+    fn resume_inflight_heartbeat(
+        &mut self,
+        auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'_>,
+        flight: super::super::shared_owner::InFlightConfiguredHeartbeat,
+        response: Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>,
+    ) -> Result<StepOutcome, StepError> {
+        let driver = self.normal_publication_driver().ok_or(StepError::Stale)?;
+        let outcome = (|| -> Result<(), StepError> {
+            let mut attempt = ConfiguredNormalPublication::from_inflight_heartbeat(
+                auth,
+                driver,
+                runtime.operation,
+                runtime.public_io,
+                runtime.gate,
+                runtime.paused,
+                runtime.stopping,
+                flight,
+            )
+            .map_err(publication_error)?;
+            {
+                let mut heartbeat = attempt
+                    .resume_configured_heartbeat(runtime.owner, response)
+                    .map_err(publication_error)?;
+                loop {
+                    runtime.check()?;
+                    match heartbeat.try_step() {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(PublicationError::Domain(DomainError::Busy)) => runtime.busy()?,
+                        Err(error) => return Err(publication_error(error)),
+                    }
+                }
+            }
+            attempt.finish_heartbeat_only().map_err(publication_error)
+        })();
+        match outcome {
+            Err(StepError::Http(lomi_host_http::Error::InvalidResponse)) => self.block(),
+            Err(error) => {
+                self.invalidate_heartbeat_state();
+                Err(error)
+            }
+            Ok(()) => {
+                self.unit_pending = true;
+                Ok(StepOutcome::Network)
+            }
+        }
+    }
+    fn invalidate_heartbeat_state(&mut self) {
+        self.normal_publication_origin = None;
+        self.heartbeat_observation = None;
+        self.heartbeat_deferral_attempt = None;
+        self.action = Action::Get;
     }
     fn begin_cadence_peer_deferral(
         &mut self,
@@ -982,10 +1072,83 @@ struct ConfiguredHeartbeatPrepared {
     epoch: DecimalU64,
     deadlines: lomi_host_auth::CredentialDeadlines,
     access: lomi_remote_protocol::HostAccessCredential,
-    transport: DataTransport,
+    transport: Option<DataTransport>,
     response: Option<lomi_remote_protocol::http::HeartbeatResult>,
     request_started: Option<Instant>,
     wall_started: Option<u64>,
+}
+/// Helper-thread POST. The thread sees only a copied deadline and this cancel
+/// flag; dropping the handle sets the flag so the POST stops locally.
+struct HeartbeatPost {
+    result: std::sync::mpsc::Receiver<
+        Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>,
+    >,
+    cancel: CancelOnDrop,
+}
+struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+impl HeartbeatPost {
+    fn spawn(
+        deadline: Instant,
+        post: impl FnOnce(
+            Instant,
+            &(dyn Fn() -> Result<(), lomi_host_http::BudgetStop> + Sync),
+        )
+            -> Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>
+        + Send
+        + 'static,
+    ) -> Result<Self, NormalPublicationOriginError> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (sender, result) = std::sync::mpsc::channel();
+        let flag = cancel.clone();
+        std::thread::Builder::new()
+            .name("lomi-heartbeat".into())
+            .spawn(move || {
+                let check = || {
+                    if flag.load(std::sync::atomic::Ordering::Acquire) {
+                        Err(lomi_host_http::BudgetStop::Cancelled)
+                    } else if Instant::now() >= deadline {
+                        Err(lomi_host_http::BudgetStop::Deadline)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let _ = sender.send(post(deadline, &check));
+            })
+            .map_err(|_| NormalPublicationOriginError::Stale)?;
+        Ok(Self {
+            result,
+            cancel: CancelOnDrop(cancel),
+        })
+    }
+    fn poll(
+        &self,
+    ) -> Option<Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>> {
+        use std::sync::mpsc::TryRecvError;
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(lomi_host_http::Error::Cancelled)),
+        }
+    }
+}
+/// Everything except the POST itself, which the helper thread owns.
+pub(in crate::unix) struct InFlightHeartbeatSend {
+    post: HeartbeatPost,
+    prepared: ConfiguredHeartbeatPrepared,
+    original_lease_until: Option<Instant>,
+    worker_identity: std::sync::Arc<()>,
+}
+impl InFlightHeartbeatSend {
+    pub(in crate::unix) fn poll(
+        &self,
+    ) -> Option<Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>> {
+        self.post.poll()
+    }
 }
 #[cfg(any(unix, windows))]
 pub(in crate::unix) struct NormalPublicationObservation<'w, 'o> {
@@ -1031,10 +1194,7 @@ impl<'w> NormalPublicationDriver<'w> {
     }
 
     pub(in crate::unix) fn invalidate_heartbeat(&mut self) {
-        self.worker.normal_publication_origin = None;
-        self.worker.heartbeat_observation = None;
-        self.worker.heartbeat_deferral_attempt = None;
-        self.worker.action = Action::Get;
+        self.worker.invalidate_heartbeat_state();
     }
     /// Provider work only. The caller next checks the original Domain/Store
     /// scope and full captured tuple, with both locks dropped before send.
@@ -1044,8 +1204,13 @@ impl<'w> NormalPublicationDriver<'w> {
         public_io: &super::super::public_configuration::WorkerPublicIo<'_>,
         binding: &CloudRuntimeState,
         now: u64,
+        keep_observation: bool,
     ) -> Result<(), NormalPublicationOriginError> {
-        self.invalidate_heartbeat();
+        // An asynchronous heartbeat keeps serving the old observation until its
+        // own fresh_until while the POST runs; failures invalidate it later.
+        if !keep_observation {
+            self.invalidate_heartbeat();
+        }
         self.check_original_heartbeat_lease()?;
         if self.prepared.is_some() || self.worker.scope.as_ref() != Some(&binding.scope) {
             return Err(NormalPublicationOriginError::Stale);
@@ -1082,7 +1247,7 @@ impl<'w> NormalPublicationDriver<'w> {
             epoch,
             deadlines,
             access,
-            transport,
+            transport: Some(transport),
             response: None,
             request_started: None,
             wall_started: None,
@@ -1117,6 +1282,8 @@ impl<'w> NormalPublicationDriver<'w> {
         prepared.response = Some(
             prepared
                 .transport
+                .as_ref()
+                .ok_or(NormalPublicationOriginError::Stale)?
                 .with_budget(operation.deadline(), &check)
                 .heartbeat(
                     prepared.binding.scope.host_id,
@@ -1127,6 +1294,66 @@ impl<'w> NormalPublicationDriver<'w> {
                 )
                 .map_err(NormalPublicationOriginError::Http)?,
         );
+        Ok(())
+    }
+    /// Same send as `send_configured_heartbeat`, but the POST runs on a helper
+    /// thread. The request start is recorded before the thread exists; all
+    /// validation and installation stay on the actor at resume.
+    pub(in crate::unix) fn spawn_configured_heartbeat(
+        &mut self,
+        operation: &crate::unix::owner_domain::Operation<'_>,
+        now: u64,
+    ) -> Result<InFlightHeartbeatSend, NormalPublicationOriginError> {
+        self.check_original_heartbeat_lease()?;
+        let mut prepared = self
+            .prepared
+            .take()
+            .ok_or(NormalPublicationOriginError::Stale)?;
+        if prepared.request_started.is_some() || now >= prepared.deadlines.refresh_at {
+            return Err(NormalPublicationOriginError::Stale);
+        }
+        operation
+            .check()
+            .map_err(NormalPublicationOriginError::Stopped)?;
+        let transport = prepared
+            .transport
+            .take()
+            .ok_or(NormalPublicationOriginError::Stale)?;
+        let host = prepared.binding.scope.host_id;
+        let params = HeartbeatParams {
+            runtime: prepared.binding.server_runtime.clone(),
+        };
+        let access = prepared.access.clone();
+        let deadline = operation.deadline();
+        prepared.request_started = Some(Instant::now());
+        prepared.wall_started = Some(now);
+        let post = HeartbeatPost::spawn(deadline, move |deadline, check| {
+            transport
+                .with_budget(deadline, check)
+                .heartbeat(host, &params, &access)
+        })?;
+        Ok(InFlightHeartbeatSend {
+            post,
+            prepared,
+            original_lease_until: self.original_lease_until,
+            worker_identity: self.worker.normal_worker_identity.clone(),
+        })
+    }
+    /// Re-establish the original driver state around a delivered response.
+    pub(in crate::unix) fn restore_inflight_heartbeat(
+        &mut self,
+        flight: InFlightHeartbeatSend,
+        response: lomi_remote_protocol::http::HeartbeatResult,
+    ) -> Result<(), NormalPublicationOriginError> {
+        if !std::sync::Arc::ptr_eq(&flight.worker_identity, &self.worker.normal_worker_identity)
+            || self.original_lease_until != flight.original_lease_until
+        {
+            return Err(NormalPublicationOriginError::Stale);
+        }
+        self.check_original_heartbeat_lease()?;
+        let mut prepared = flight.prepared;
+        prepared.response = Some(response);
+        self.prepared = Some(prepared);
         Ok(())
     }
     pub(in crate::unix) fn validate_configured_heartbeat<'p, S: SecretStorage + ?Sized>(
@@ -1438,6 +1665,56 @@ impl NormalPublicationObservation<'_, '_> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    fn wait_for(post: &HeartbeatPost) -> Result<HeartbeatResult, lomi_host_http::Error> {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = post.poll() {
+                return result;
+            }
+            assert!(Instant::now() < until, "heartbeat helper never reported");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn inflight_post_stops_at_its_copied_deadline() {
+        let post = HeartbeatPost::spawn(Instant::now() + Duration::from_millis(20), |_, check| {
+            loop {
+                if let Err(stop) = check() {
+                    assert!(matches!(stop, lomi_host_http::BudgetStop::Deadline));
+                    return Err(lomi_host_http::Error::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+        .unwrap();
+        assert!(matches!(
+            wait_for(&post),
+            Err(lomi_host_http::Error::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn dropping_an_inflight_post_cancels_it_and_delivers_nothing() {
+        let (stopped, observed) = std::sync::mpsc::channel();
+        let post =
+            HeartbeatPost::spawn(Instant::now() + Duration::from_secs(30), move |_, check| {
+                loop {
+                    if let Err(stop) = check() {
+                        stopped
+                            .send(matches!(stop, lomi_host_http::BudgetStop::Cancelled))
+                            .unwrap();
+                        return Err(lomi_host_http::Error::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+            .unwrap();
+        assert!(post.poll().is_none());
+        drop(post);
+        assert!(observed.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
 
     fn test_heartbeat(
         request_started: Instant,

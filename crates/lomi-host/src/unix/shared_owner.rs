@@ -4241,6 +4241,19 @@ pub(super) struct OwnedConfiguredHeartbeat {
     admission: RetainedHeartbeatAdmission,
     observation: super::auth::OwnedNormalPublicationObservation,
 }
+/// A plain heartbeat whose POST runs on a helper thread. Owns no guard or
+/// provider; the actor resumes it with `from_inflight_heartbeat`.
+pub(super) struct InFlightConfiguredHeartbeat {
+    send: super::auth::cloud::InFlightHeartbeatSend,
+    admission: RetainedHeartbeatAdmission,
+}
+impl InFlightConfiguredHeartbeat {
+    pub(super) fn poll(
+        &self,
+    ) -> Option<Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>> {
+        self.send.poll()
+    }
+}
 struct RetainedHeartbeatAdmission {
     domain: domain::OwnedHeartbeatPublication,
     tuple: PublicationTuple,
@@ -4271,6 +4284,7 @@ pub(super) struct ConfiguredNormalPublication<
     started: bool,
     heartbeat_started: bool,
     http: Option<PublicationHttp>,
+    inflight: Option<InFlightConfiguredHeartbeat>,
 }
 impl<'w, 'p, 'o, 'i, S: lomi_platform::secrets::SecretStorage + ?Sized>
     ConfiguredNormalPublication<'w, 'p, 'o, 'i, S>
@@ -4305,6 +4319,7 @@ impl<'w, 'p, 'o, 'i, S: lomi_platform::secrets::SecretStorage + ?Sized>
             started: false,
             heartbeat_started: false,
             http: None,
+            inflight: None,
         }
     }
     pub(super) fn retain_configured_heartbeat(
@@ -4371,22 +4386,108 @@ impl<'w, 'p, 'o, 'i, S: lomi_platform::secrets::SecretStorage + ?Sized>
             started: false,
             heartbeat_started: true,
             http: None,
+            inflight: None,
         };
         attempt.boundary()?;
         Ok(attempt)
+    }
+    pub(super) fn take_inflight_heartbeat(&mut self) -> Option<InFlightConfiguredHeartbeat> {
+        self.inflight.take()
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep the original provider, Worker, operation, IO lease, latches and in-flight receipt explicit"
+    )]
+    pub(super) fn from_inflight_heartbeat(
+        auth: &'w mut lomi_host_auth::HostAuth<'p, S>,
+        driver: super::auth::NormalPublicationDriver<'w>,
+        operation: &'o Operation<'o>,
+        io: &'i super::public_configuration::WorkerPublicIo<'i>,
+        gate: &'i std::sync::atomic::AtomicBool,
+        paused: &'i std::sync::atomic::AtomicBool,
+        stopping: &'i std::sync::atomic::AtomicBool,
+        flight: InFlightConfiguredHeartbeat,
+    ) -> Result<Self, PublicationError> {
+        if !io.is_same_lease(&flight.admission.io_identity) {
+            return Err(PublicationError::Stale);
+        }
+        let attempt = Self {
+            auth,
+            driver: Some(driver),
+            retained: None,
+            observation: None,
+            operation,
+            io,
+            gate,
+            paused,
+            stopping,
+            base: flight.admission.base,
+            anchor: flight.admission.anchor,
+            started: false,
+            heartbeat_started: true,
+            http: None,
+            inflight: Some(flight),
+        };
+        attempt.boundary()?;
+        Ok(attempt)
+    }
+    /// Continue at ValidateProvider with the delivered response. Worker identity,
+    /// original lease and the Domain admission are re-checked here; PostClock
+    /// and Install are the unchanged synchronous phases.
+    pub(super) fn resume_configured_heartbeat<'t, 'd>(
+        &'t mut self,
+        owner: &'d SharedOwner,
+        response: Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>,
+    ) -> Result<ConfiguredHeartbeatTurn<'t, 'd, 'w, 'p, 'o, 'i, S>, PublicationError> {
+        self.boundary()?;
+        let InFlightConfiguredHeartbeat { send, admission } =
+            self.inflight.take().ok_or(PublicationError::Stale)?;
+        let response = response.map_err(PublicationError::Http)?;
+        let scope = admission
+            .domain
+            .reborrow_read_scope(&owner.domain, self.operation)
+            .map_err(PublicationError::Domain)?;
+        self.driver
+            .as_mut()
+            .ok_or(PublicationError::Stale)?
+            .restore_inflight_heartbeat(send, response)
+            .map_err(PublicationError::from)?;
+        Ok(ConfiguredHeartbeatTurn {
+            attempt: self,
+            owner,
+            scope: Some(scope),
+            tuple: Some(admission.tuple),
+            captured_access: Some(admission.access),
+            floor: admission.floor,
+            phase: ConfiguredHeartbeatPhase::ValidateProvider,
+            terminal: None,
+            asynchronous: false,
+        })
     }
 
     pub(super) fn begin_configured_heartbeat<'t, 'd>(
         &'t mut self,
         owner: &'d SharedOwner,
+        asynchronous: bool,
     ) -> Result<ConfiguredHeartbeatTurn<'t, 'd, 'w, 'p, 'o, 'i, S>, PublicationError> {
-        self.driver
-            .as_mut()
-            .ok_or(PublicationError::Stale)?
-            .invalidate_heartbeat();
-        self.boundary()?;
-        if self.started || self.heartbeat_started || self.observation.is_some() {
-            return Err(PublicationError::Stale);
+        let driver = self.driver.as_mut().ok_or(PublicationError::Stale)?;
+        if !asynchronous {
+            driver.invalidate_heartbeat();
+        }
+        let ready = self.boundary().and_then(|()| {
+            if self.started || self.heartbeat_started || self.observation.is_some() {
+                Err(PublicationError::Stale)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = ready {
+            // As in the synchronous path, a heartbeat that cannot start
+            // forces a fresh Cloud GET.
+            if let Some(driver) = self.driver.as_mut() {
+                driver.invalidate_heartbeat();
+            }
+            return Err(error);
         }
         self.heartbeat_started = true;
         Ok(ConfiguredHeartbeatTurn {
@@ -4398,6 +4499,7 @@ impl<'w, 'p, 'o, 'i, S: lomi_platform::secrets::SecretStorage + ?Sized>
             floor: 0,
             phase: ConfiguredHeartbeatPhase::Capture,
             terminal: None,
+            asynchronous,
         })
     }
     fn now(&self) -> Result<u64, PublicationError> {
@@ -4462,6 +4564,8 @@ enum ConfiguredHeartbeatPhase {
     PostClock,
     InstallObservation,
     Complete,
+    /// POST handed to a helper thread; the receipt lives in the attempt.
+    InFlight,
     Terminal,
 }
 pub(super) struct ConfiguredHeartbeatTurn<
@@ -4481,6 +4585,7 @@ pub(super) struct ConfiguredHeartbeatTurn<
     floor: u64,
     phase: ConfiguredHeartbeatPhase,
     terminal: Option<PublicationError>,
+    asynchronous: bool,
 }
 impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
     ConfiguredHeartbeatTurn<'_, '_, '_, '_, '_, '_, S>
@@ -4578,7 +4683,13 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
             .driver
             .as_mut()
             .ok_or(PublicationError::Stale)?
-            .prepare_configured_heartbeat(self.attempt.auth, self.attempt.io, &tuple.binding, now)
+            .prepare_configured_heartbeat(
+                self.attempt.auth,
+                self.attempt.io,
+                &tuple.binding,
+                now,
+                self.asynchronous,
+            )
             .map_err(PublicationError::from)?;
         self.phase = ConfiguredHeartbeatPhase::FinalSendAdmission;
         Ok(false)
@@ -4611,6 +4722,9 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
         // A previous Busy retains provider material, original scope and phase.
         // The final mutex pair drops before pure checks and SAME-operation TLS.
         self.check_original()?;
+        if self.asynchronous {
+            return self.spawn_send();
+        }
         self.phase = ConfiguredHeartbeatPhase::SendOnce;
         let now = self.current()?;
         self.attempt
@@ -4622,6 +4736,48 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
         // No fallible work or yield between retaining response and next phase.
         self.phase = ConfiguredHeartbeatPhase::ValidateProvider;
         Ok(false)
+    }
+    fn spawn_send(&mut self) -> Result<bool, PublicationError> {
+        // Retain the owned scope while both locks are held, before any send;
+        // nothing fallible follows the spawn except storing the receipt.
+        let (domain, floor) = {
+            let guard = self
+                .owner
+                .domain
+                .try_read(self.attempt.operation)
+                .map_err(PublicationError::Domain)?;
+            let store = self.owner.try_store().map_err(PublicationError::from)?;
+            guard
+                .retain_heartbeat_publication(
+                    self.scope.take().ok_or(PublicationError::Stale)?,
+                    &store,
+                )
+                .map_err(PublicationError::from)?
+        };
+        self.floor = self.floor.max(floor);
+        self.phase = ConfiguredHeartbeatPhase::SendOnce;
+        let now = self.current()?;
+        let send = self
+            .attempt
+            .driver
+            .as_mut()
+            .ok_or(PublicationError::Stale)?
+            .spawn_configured_heartbeat(self.attempt.operation, now)
+            .map_err(PublicationError::from)?;
+        self.attempt.inflight = Some(InFlightConfiguredHeartbeat {
+            send,
+            admission: RetainedHeartbeatAdmission {
+                domain,
+                tuple: self.tuple.take().ok_or(PublicationError::Stale)?,
+                access: self.captured_access.take().ok_or(PublicationError::Stale)?,
+                io_identity: self.attempt.io.retained_identity(),
+                base: self.attempt.base,
+                anchor: self.attempt.anchor,
+                floor: self.floor,
+            },
+        });
+        self.phase = ConfiguredHeartbeatPhase::InFlight;
+        Ok(true)
     }
     fn captured_provider(&self, now: u64) -> Result<(), PublicationError> {
         let cloud = &self.tuple.as_ref().ok_or(PublicationError::Stale)?.cloud;
@@ -4738,7 +4894,12 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized> Drop
     for ConfiguredHeartbeatTurn<'_, '_, '_, '_, '_, '_, S>
 {
     fn drop(&mut self) {
-        if self.phase != ConfiguredHeartbeatPhase::Complete {
+        // An in-flight heartbeat must keep the old observation: it is served
+        // only until its own fresh_until and is invalidated at resume.
+        if !matches!(
+            self.phase,
+            ConfiguredHeartbeatPhase::Complete | ConfiguredHeartbeatPhase::InFlight
+        ) {
             if let Some(driver) = self.attempt.driver.as_mut() {
                 driver.invalidate_heartbeat();
             }
