@@ -1,6 +1,6 @@
 # Lomi Remote — pozostałe prace
 
-Stan przekazania: 2026-11-17. Kod jest zapisany jako praca w toku.
+Stan przekazania: 2026-11-17 (wieczór). Kod jest zapisany jako praca w toku.
 **Pełny test CLI i przeglądarki nie jest zakończony. Publiczny release CLI
 pozostaje wstrzymany.**
 
@@ -36,17 +36,27 @@ pozostaje wstrzymany.**
   - jednorazowe ponowne połączenie przy `STALE_EPOCH`;
   - przycisk „Dismiss” dla niepewnego tworzenia terminala.
   - czytelny komunikat przy limicie zasobów Hosta (np. 32 terminale).
-- **Pozostała blokada (pomiar 2026-11-17, Linux, instrumentowany Host):**
-  jeden wątek autoryzacji wykonuje HTTPS szeregowo, ok. 200 ms na
-  zapytanie. Podczas pisania w 18 s było 43 zapytań: 15 heartbeatów,
-  17 odczytów pairingu, 10 odpytań `pending`. Host czeka na sieć przez
-  ok. 50% czasu. Echo klawisza po poprawkach: 75 ms–1,2 s (wcześniej
-  1,3–5 s). Otwarcie terminala po odświeżeniu strony: ok. 22 s (dwa kanały
-  po kolei; każdy czeka na odpytanie `channels/pending` co 3 s, potem
-  admission, ticket i połączenie relaya).
-- Każdy fragment wyniku terminala to JSON z tablicą liczb (`BoundedList<u8>`):
-  delta 2,5 KB daje ok. 9–36 KB. Zmiana formatu wymaga zgodnej zmiany
-  protokołu, `remote-web` i aplikacji mobilnej.
+- **Otwarcie terminala po odświeżeniu strony (pomiar 2026-11-17 wieczorem,
+  Linux, Host z bieżącego `main`, lokalny build `remote-web`): 10,5–12 s,
+  wszystkie próby udane.** Rano: 14–70 s z częstymi niepowodzeniami.
+  Naprawione:
+  - zestawiany kanał przepadał przy chwilowym braku kwalifikacji z chmury
+    i przy zapisie w trakcie heartbeatu w tle (`b901ebf`);
+  - `connect` relaya blokował wątek Hosta do 5 s (`84da4ae`);
+  - każdy nowy kanał najpierw dostawał `ResourceExhausted` (magazyn
+    potwierdzeń przy limicie 256), a wykrywanie kanału terminala czekało
+    do 3 s (`767068b`);
+  - snapshot terminala zajmował 4,15 MB (71 ramek, ok. 15 s); z
+    `compact-cells-v1` ok. 16 KB (2 ramki) (`3d1c794`, `remote-web` `7dd0cf3`).
+- Pozostały czas to głównie podróże sieciowe: dwa kanały po kolei, każdy
+  z admission, ticketem, połączeniem relaya i handshake'iem (ok. 3,5–4,7 s
+  na kanał), oraz ok. 2 s pracy przeglądarki między kanałami.
+- Zgodność: nowy `remote-web` z Hostem 0.1.11 schodzi do `trimmed-rows-v1`
+  (pierwsze odświeżenie ok. 27 s z nieudaną sondą, kolejne ok. 16 s;
+  poziom zapamiętany na 6 h).
+- Fragmenty wyniku nadal są JSON-em z tablicą liczb (`BoundedList<u8>`,
+  ok. 3,6× więcej bajtów). Zmiana na binarne lub base64 wymaga zgodnej
+  zmiany protokołu, `remote-web` i aplikacji mobilnej.
 - Opóźnienie sieci: relay i API idą przez Cloudflare do odległego originu.
   Jedno RPC przez relay kosztuje ok. 0,25 s w każdą stronę niezależnie od Hosta.
 
@@ -59,8 +69,8 @@ pozostaje wstrzymany.**
    odpytywanie `pairings/pending` i `channels/pending` (ok. 250 ms każde)
    oraz odczyty pairingu (ok. 1/s). Następny krok: odpytywanie `pending`
    w wątku pomocniczym, tym samym wzorcem (ok. 150 linii).
-   Do zbadania: po odświeżeniu strony snapshot terminala czasem czeka
-   15–60 s.
+   Zbadane: długie czekanie na snapshot po odświeżeniu wynikało z jego
+   rozmiaru (pełne komórki JSON); rozwiązane przez `compact-cells-v1`.
 2. Serwer: pomiar 2026-11-17 bez aktywnych Hostów pokazał, że transakcja
    z globalną blokadą kosztuje ok. 15–25 ms ponad zwykłą odpowiedź
    (`remote.lomi.dev`, ok. 150–180 ms łącznie z TLS). Wcześniejsze 150–900 ms
