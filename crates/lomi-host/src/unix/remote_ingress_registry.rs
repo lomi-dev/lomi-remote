@@ -1206,7 +1206,12 @@ mod tests {
         // A fresh observation moves the first established channel outside the
         // due window, leaving pending work eligible on the next registry pass.
         assert_eq!(
-            super::super::peer_refresh_deadline_for(true, refreshed_cutoff, now),
+            super::super::peer_refresh_deadline_for(
+                true,
+                refreshed_cutoff,
+                now,
+                super::super::PEER_PROOF_REUSE_MARGIN
+            ),
             None
         );
         assert_eq!(
@@ -1214,9 +1219,19 @@ mod tests {
                 &round_robin,
                 |channel_id| {
                     if channel_id == established {
-                        super::super::peer_refresh_deadline_for(true, refreshed_cutoff, now)
+                        super::super::peer_refresh_deadline_for(
+                            true,
+                            refreshed_cutoff,
+                            now,
+                            super::super::PEER_PROOF_REUSE_MARGIN,
+                        )
                     } else {
-                        super::super::peer_refresh_deadline_for(true, pending_cutoff, now)
+                        super::super::peer_refresh_deadline_for(
+                            true,
+                            pending_cutoff,
+                            now,
+                            super::super::PEER_REFRESH_MARGIN,
+                        )
                     }
                 },
                 |channel_id| channel_id == established,
@@ -1240,12 +1255,18 @@ mod tests {
         let selected = earliest_peer_refresh(
             &round_robin,
             |channel_id| match channel_id {
-                id if id == child => {
-                    super::super::peer_refresh_deadline_for(true, child_cutoff, start)
-                }
-                id if id == parent => {
-                    super::super::peer_refresh_deadline_for(true, parent_cutoff, start)
-                }
+                id if id == child => super::super::peer_refresh_deadline_for(
+                    true,
+                    child_cutoff,
+                    start,
+                    super::super::PEER_REFRESH_MARGIN,
+                ),
+                id if id == parent => super::super::peer_refresh_deadline_for(
+                    true,
+                    parent_cutoff,
+                    start,
+                    super::super::PEER_PROOF_REUSE_MARGIN,
+                ),
                 _ => None,
             },
             |channel_id| channel_id == parent,
@@ -1263,10 +1284,14 @@ mod tests {
                     true,
                     refreshed_child_cutoff,
                     after_heartbeat,
+                    super::super::PEER_REFRESH_MARGIN,
                 ),
-                id if id == parent => {
-                    super::super::peer_refresh_deadline_for(true, parent_cutoff, after_heartbeat)
-                }
+                id if id == parent => super::super::peer_refresh_deadline_for(
+                    true,
+                    parent_cutoff,
+                    after_heartbeat,
+                    super::super::PEER_PROOF_REUSE_MARGIN,
+                ),
                 _ => None,
             },
             |channel_id| channel_id == parent,

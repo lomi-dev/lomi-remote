@@ -2651,7 +2651,10 @@ impl<'cancel> Connection<'cancel> {
                 | Crypto::ReadThird(_)
                 | Crypto::Established(_)
         );
-        peer_refresh_deadline_for(refreshable, self.peer_cutoff, now)
+        // Turns reuse a proof until PEER_PROOF_REUSE_MARGIN; a due refresh
+        // earlier than that would win every pass without refreshing and
+        // starve sibling channels.
+        peer_refresh_deadline_for(refreshable, self.peer_cutoff, now, PEER_PROOF_REUSE_MARGIN)
     }
 
     fn poll_git_mutation(
@@ -5016,11 +5019,12 @@ fn peer_refresh_deadline_for(
     refreshable: bool,
     peer_cutoff: Instant,
     now: Instant,
+    margin: Duration,
 ) -> Option<Instant> {
     if !refreshable || peer_cutoff <= now {
         return None;
     }
-    (peer_cutoff.saturating_duration_since(now) <= PEER_REFRESH_MARGIN).then_some(peer_cutoff)
+    (peer_cutoff.saturating_duration_since(now) <= margin).then_some(peer_cutoff)
 }
 
 fn peer_cutoff_expired(peer_cutoff: Instant, now: Instant) -> bool {
@@ -5136,7 +5140,7 @@ fn handoff_peer_refresh_deadline(
     if let Some(ticket_expires_at) = ticket_expires_at {
         cutoff = cutoff.min(ticket_expires_at);
     }
-    peer_refresh_deadline_for(true, cutoff, now)
+    peer_refresh_deadline_for(true, cutoff, now, PEER_REFRESH_MARGIN)
 }
 
 #[cfg(test)]
@@ -5150,7 +5154,7 @@ mod peer_refresh_tests {
         let maintenance_deadline = scheduling_time + Duration::from_secs(60);
         let retained_at = |now| {
             connection_retains_worker_unit(
-                [peer_refresh_deadline_for(true, cutoff, now).is_some()],
+                [peer_refresh_deadline_for(true, cutoff, now, PEER_REFRESH_MARGIN).is_some()],
                 false,
                 maintenance_deadline,
                 now,
@@ -5178,13 +5182,45 @@ mod peer_refresh_tests {
         let now = Instant::now();
         let cutoff = now + PEER_REFRESH_MARGIN;
 
-        assert_eq!(peer_refresh_deadline_for(true, cutoff, now), Some(cutoff));
         assert_eq!(
-            peer_refresh_deadline_for(true, cutoff + Duration::from_nanos(1), now),
+            peer_refresh_deadline_for(true, cutoff, now, PEER_REFRESH_MARGIN),
+            Some(cutoff)
+        );
+        assert_eq!(
+            peer_refresh_deadline_for(
+                true,
+                cutoff + Duration::from_nanos(1),
+                now,
+                PEER_REFRESH_MARGIN
+            ),
             None
         );
-        assert_eq!(peer_refresh_deadline_for(false, cutoff, now), None);
-        assert_eq!(peer_refresh_deadline_for(true, now, now), None);
+        assert_eq!(
+            peer_refresh_deadline_for(false, cutoff, now, PEER_REFRESH_MARGIN),
+            None
+        );
+        assert_eq!(
+            peer_refresh_deadline_for(true, now, now, PEER_REFRESH_MARGIN),
+            None
+        );
+    }
+
+    #[test]
+    fn established_refresh_is_due_only_once_its_turn_stops_reusing_the_proof() {
+        let now = Instant::now();
+        let reusable = now + PEER_PROOF_REUSE_MARGIN + Duration::from_nanos(1);
+        let stale = now + PEER_PROOF_REUSE_MARGIN;
+
+        // A due channel wins every registry pass; if its turn may still reuse
+        // the proof, the cutoff never moves and sibling channels starve.
+        assert_eq!(
+            peer_refresh_deadline_for(true, reusable, now, PEER_PROOF_REUSE_MARGIN),
+            None
+        );
+        assert_eq!(
+            peer_refresh_deadline_for(true, stale, now, PEER_PROOF_REUSE_MARGIN),
+            Some(stale)
+        );
     }
 
     #[test]
@@ -5229,7 +5265,7 @@ mod peer_refresh_tests {
             now
         ));
         assert_eq!(
-            peer_refresh_deadline_for(true, original_cutoff, original_cutoff),
+            peer_refresh_deadline_for(true, original_cutoff, original_cutoff, PEER_REFRESH_MARGIN),
             None
         );
     }
