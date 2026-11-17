@@ -56,6 +56,9 @@ impl RelayTransport {
     /// when this method starts. DNS/TCP/TLS/upgrade/admission/ready all share
     /// min(original deadline, ticket request start + expires_in_ms). A failed
     /// attempt is never retried here; the caller must not replay its ticket.
+    /// Returns once the relay authenticates the ticket; the peer's `ready`
+    /// arrives through `poll_binary` under the same bound, so waiting for the
+    /// browser never blocks the caller's thread.
     /// `check` checks the original Operation only, without Domain/Store locks.
     pub fn connect(
         &self,
@@ -132,35 +135,13 @@ impl RelayTransport {
                 .send(Message::Text(body.as_str().into()))
                 .map_err(ws_error)?;
             state.check()?;
-            let mut authenticated = false;
             loop {
                 state.check()?;
                 match socket.read().map_err(ws_error)? {
-                    Message::Text(text) => {
-                        #[derive(Deserialize)]
-                        #[serde(tag = "type", deny_unknown_fields)]
-                        enum Status {
-                            #[serde(rename = "authenticated")]
-                            Authenticated {
-                                #[serde(rename = "expiresAt")]
-                                expires_at: u64,
-                            },
-                            #[serde(rename = "ready")]
-                            Ready {},
-                        }
-                        match serde_json::from_str::<Status>(text.as_str())
-                            .map_err(|_| Error::InvalidResponse)?
-                        {
-                            Status::Authenticated { expires_at }
-                                if !authenticated
-                                    && (1..=9_007_199_254_740_991).contains(&expires_at) =>
-                            {
-                                authenticated = true
-                            }
-                            Status::Ready {} if authenticated => break,
-                            _ => return Err(Error::InvalidResponse),
-                        }
-                    }
+                    Message::Text(text) => match relay_status(text.as_str())? {
+                        RelayStatus::Authenticated => break,
+                        RelayStatus::Ready => return Err(Error::InvalidResponse),
+                    },
                     Message::Ping(_) => socket.flush().map_err(ws_error)?,
                     Message::Pong(_) => {}
                     _ => return Err(Error::InvalidResponse),
@@ -174,6 +155,7 @@ impl RelayTransport {
             socket.get_mut().sock.state = None;
             Ok(RelayConnection {
                 socket: Some(socket),
+                ready_deadline: Some(deadline),
             })
         })
     }
@@ -193,6 +175,39 @@ fn config(limit: usize) -> WebSocketConfig {
 /// consumes/closes this connection. No queued application bytes are resent.
 pub struct RelayConnection {
     socket: Option<Socket>,
+    // Until the relay reports `ready`: the ticket bound the old blocking wait had.
+    ready_deadline: Option<Instant>,
+}
+enum RelayStatus {
+    Authenticated,
+    Ready,
+}
+fn relay_status(text: &str) -> Result<RelayStatus> {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", deny_unknown_fields)]
+    enum Status {
+        #[serde(rename = "authenticated")]
+        Authenticated {
+            #[serde(rename = "expiresAt")]
+            expires_at: u64,
+        },
+        #[serde(rename = "ready")]
+        Ready {},
+    }
+    match serde_json::from_str::<Status>(text).map_err(|_| Error::InvalidResponse)? {
+        Status::Authenticated { expires_at }
+            if (1..=9_007_199_254_740_991).contains(&expires_at) =>
+        {
+            Ok(RelayStatus::Authenticated)
+        }
+        Status::Ready {} => Ok(RelayStatus::Ready),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+enum Polled {
+    Frame(Vec<u8>),
+    Ready,
+    Pending,
 }
 impl fmt::Debug for RelayConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -214,7 +229,10 @@ impl RelayConnection {
         original_deadline: Instant,
         check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
     ) -> Result<()> {
-        if ciphertext.is_empty() || ciphertext.len() > MAX_TRANSPORT_FRAME_LEN {
+        if ciphertext.is_empty()
+            || ciphertext.len() > MAX_TRANSPORT_FRAME_LEN
+            || self.ready_deadline.is_some()
+        {
             self.close();
             return Err(Error::Request);
         }
@@ -237,7 +255,14 @@ impl RelayConnection {
         original_deadline: Instant,
         check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
     ) -> Result<std::task::Poll<Vec<u8>>> {
-        self.operation(original_deadline, check, |socket, state| {
+        let awaiting_ready = self.ready_deadline;
+        if awaiting_ready.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.close();
+            return Err(Error::Timeout);
+        }
+        let deadline =
+            awaiting_ready.map_or(original_deadline, |ready| ready.min(original_deadline));
+        let polled = self.operation(deadline, check, |socket, state| {
             state.check()?;
             socket.get_mut().sock.polling = true;
             let read = socket.read();
@@ -245,23 +270,39 @@ impl RelayConnection {
             state.check()?;
             match read {
                 Ok(Message::Binary(bytes))
-                    if !bytes.is_empty() && bytes.len() <= MAX_TRANSPORT_FRAME_LEN =>
+                    if awaiting_ready.is_none()
+                        && !bytes.is_empty()
+                        && bytes.len() <= MAX_TRANSPORT_FRAME_LEN =>
                 {
-                    Ok(std::task::Poll::Ready(bytes.to_vec()))
+                    Ok(Polled::Frame(bytes.to_vec()))
+                }
+                Ok(Message::Text(text)) if awaiting_ready.is_some() => {
+                    match relay_status(text.as_str())? {
+                        RelayStatus::Ready => Ok(Polled::Ready),
+                        RelayStatus::Authenticated => Err(Error::InvalidResponse),
+                    }
                 }
                 Ok(Message::Ping(_)) => {
                     // A pong flush is a write: uncertainty is terminal.
                     socket.flush().map_err(ws_error)?;
                     state.check()?;
-                    Ok(std::task::Poll::Pending)
+                    Ok(Polled::Pending)
                 }
-                Ok(Message::Pong(_)) => Ok(std::task::Poll::Pending),
+                Ok(Message::Pong(_)) => Ok(Polled::Pending),
                 Err(tungstenite::Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
-                    Ok(std::task::Poll::Pending)
+                    Ok(Polled::Pending)
                 }
                 Err(error) => Err(ws_error(error)),
                 _ => Err(Error::InvalidResponse),
             }
+        })?;
+        Ok(match polled {
+            Polled::Frame(bytes) => std::task::Poll::Ready(bytes),
+            Polled::Ready => {
+                self.ready_deadline = None;
+                std::task::Poll::Pending
+            }
+            Polled::Pending => std::task::Poll::Pending,
         })
     }
     pub fn read_binary(
@@ -269,6 +310,10 @@ impl RelayConnection {
         original_deadline: Instant,
         check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
     ) -> Result<Vec<u8>> {
+        if self.ready_deadline.is_some() {
+            self.close();
+            return Err(Error::Request);
+        }
         self.operation(original_deadline, check, |socket, state| {
             loop {
                 state.check()?;
@@ -397,5 +442,31 @@ impl Write for RelaySocket {
 impl Drop for RelaySocket {
     fn drop(&mut self) {
         let _ = self.tcp.shutdown(Shutdown::Both);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelayStatus, relay_status};
+
+    #[test]
+    fn relay_status_accepts_only_exact_authenticated_and_ready() {
+        assert!(matches!(
+            relay_status(r#"{"type":"authenticated","expiresAt":1}"#),
+            Ok(RelayStatus::Authenticated)
+        ));
+        assert!(matches!(
+            relay_status(r#"{"type":"ready"}"#),
+            Ok(RelayStatus::Ready)
+        ));
+        for text in [
+            r#"{"type":"authenticated","expiresAt":0}"#,
+            r#"{"type":"authenticated","expiresAt":9007199254740992}"#,
+            r#"{"type":"ready","extra":1}"#,
+            r#"{"type":"other"}"#,
+            "not json",
+        ] {
+            assert!(relay_status(text).is_err(), "{text}");
+        }
     }
 }
