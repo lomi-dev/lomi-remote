@@ -4142,7 +4142,9 @@ impl<'cancel> Connection<'cancel> {
             let terminal_control = terminal_renew
                 || matches!(
                     &request.call,
-                    RpcCall::TerminalInput(_) | RpcCall::TerminalResize(_)
+                    RpcCall::TerminalInput(_)
+                        | RpcCall::TerminalResize(_)
+                        | RpcCall::TerminalAck(_)
                 );
             let request_deadline = received
                 .checked_add(Duration::from_millis(request.timeout_ms.get()))
@@ -4707,7 +4709,7 @@ impl<'cancel> Connection<'cancel> {
             };
             self.peer_cutoff = current.fresh_until();
             let bytes = serde_json::to_vec(&response).map_err(invalid_at!())?;
-            // Only the response flush is shared; ACK/Claim keep fresh proofs.
+            // Only the response flush is shared; Claim keeps a fresh proof.
             let terminal_control_response = matches!(
                 &request.call,
                 RpcCall::TerminalRenew(_)
@@ -6023,6 +6025,12 @@ mod terminal_renew_fast_path_tests {
     }
 
     impl TerminalControlKind {
+        fn pairing_reads(self) -> usize {
+            match self {
+                Self::Ack => 1,
+                Self::Claim => 2,
+            }
+        }
         fn request_id(self) -> &'static str {
             match self {
                 Self::Ack => "terminal-ack-fast-path",
@@ -6102,11 +6110,11 @@ mod terminal_renew_fast_path_tests {
                 matches!(&outcome, Ok(true)),
                 "terminal request did not finish in its current turn: {outcome:?}"
             );
-            // Input/resize adopt the maintenance proof and hand it back after
-            // their one-frame reply; other calls need their own fresh read.
+            // Input/resize/ack adopt the maintenance proof and hand it back
+            // after their one-frame reply; other calls need their own fresh read.
             let reuses_connection_proof = matches!(
                 &request.call,
-                RpcCall::TerminalInput(_) | RpcCall::TerminalResize(_)
+                RpcCall::TerminalInput(_) | RpcCall::TerminalResize(_) | RpcCall::TerminalAck(_)
             );
             assert_eq!(
                 get_count.get(),
@@ -6330,8 +6338,8 @@ mod terminal_renew_fast_path_tests {
                                     );
                                     assert_eq!(
                                         get_count.get(),
-                                        2,
-                                        "maintenance and fresh request pairing reads are required"
+                                        kind.pairing_reads(),
+                                        "Ack reuses the maintenance proof; Claim needs a fresh request read"
                                     );
                                     assert_eq!(connection.socket.sent().len(), sent_before + 1);
                                     assert!(connection.response.is_none());
@@ -6432,7 +6440,7 @@ mod terminal_renew_fast_path_tests {
                                             outcome.is_err(),
                                             "physical send fault unexpectedly succeeded: {outcome:?}"
                                         );
-                                        assert_eq!(get_count.get(), 2);
+                                        assert_eq!(get_count.get(), kind.pairing_reads());
                                         let IngressSocket::Memory(socket) = &connection.socket
                                         else {
                                             unreachable!("terminal control tests use memory socket")
@@ -6525,7 +6533,7 @@ mod terminal_renew_fast_path_tests {
                                         Some(runtime.operation.cancellation_latch()),
                                     );
                                     assert!(matches!(&outcome, Ok(true)));
-                                    assert_eq!(get_count.get(), 2);
+                                    assert_eq!(get_count.get(), kind.pairing_reads());
                                     assert_eq!(connection.socket.sent().len(), sent_before + 1);
                                     assert!(connection.response.is_none());
                                     let response = decode_encrypted_response(
