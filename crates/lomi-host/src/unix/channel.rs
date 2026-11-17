@@ -224,6 +224,7 @@ struct Work {
     intent: Option<ChannelAdmissionIntent>,
 }
 
+const FAST_POLL_WINDOW: Duration = Duration::from_secs(15);
 #[derive(Default)]
 pub(super) struct Worker {
     trust: peer::Worker,
@@ -244,14 +245,30 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     prefer_recovery: bool,
     capacity_blocked: bool,
+    // Each admission adds an acknowledged record; retire one expired record on
+    // a later idle turn so the store stays below its cap instead of failing
+    // the next admission (ResourceExhausted, then a backoff) every time.
+    cleanup_due: bool,
     scheduled_item_consumed: bool,
     cached_first_due: bool,
     // Set while a remote channel is established: discovery of new requests
     // can wait longer than the RPCs that share this actor.
     quiet_polls: bool,
+    // A client usually requests its next channel (terminal, files) right
+    // after one is admitted; keep normal discovery cadence for a while.
+    fast_polls_until: Option<Instant>,
+    polled_at: Option<Instant>,
 }
 impl Worker {
     pub(super) fn set_quiet_polls(&mut self, quiet: bool) {
+        let now = Instant::now();
+        let quiet = quiet && self.fast_polls_until.is_none_or(|until| now >= until);
+        if self.quiet_polls && !quiet && self.failures == 0 {
+            // Pull a poll scheduled at the quiet interval forward.
+            if let (Some(due), Some(polled)) = (self.poll_at, self.polled_at) {
+                self.poll_at = Some(due.min(polled + peer::discovery_interval(false)));
+            }
+        }
         self.quiet_polls = quiet;
     }
     pub(super) fn discard_retained_operation(&mut self) {
@@ -387,8 +404,11 @@ impl Worker {
         }
     }
     fn backoff(&mut self) {
-        self.failures = self.failures.saturating_add(1).min(5);
-        self.poll_at = Some(Instant::now() + Duration::from_secs((1u64 << self.failures).min(30)));
+        // 0.5 s first: a first failure is usually transient (a concurrent
+        // owner write or a store-cap retirement), so retry soon.
+        self.failures = self.failures.saturating_add(1).min(7);
+        self.poll_at =
+            Some(Instant::now() + Duration::from_millis((250u64 << self.failures).min(30_000)));
     }
     fn turn(
         &mut self,
@@ -498,6 +518,7 @@ impl Worker {
         let access = managed(auth.access_credential(now))?;
         let started = Instant::now();
         self.poll_at = Some(started + peer::discovery_interval(self.quiet_polls));
+        self.polled_at = Some(started);
         self.turns_since_poll = 0;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         owner_turn(runtime, || effect.try_validate(&provider))?;
@@ -889,6 +910,8 @@ impl Worker {
         if let Ok(response) = response {
             let reconstructed = self.reconstruct(auth, config, runtime, eligibility, &work)?;
             self.ack(auth, runtime, eligibility, &work, response, reconstructed)?;
+            self.cleanup_due = true;
+            self.fast_polls_until = Some(Instant::now() + FAST_POLL_WINDOW);
         } else {
             self.parked.insert(
                 intent.token.clone(),
@@ -1007,7 +1030,9 @@ impl Worker {
         if self.retire_expired(auth, runtime, eligibility, pending, now)? {
             return Ok(true);
         }
-        if self.capacity_blocked && self.cleanup_expired(auth, runtime, eligibility, now)? {
+        if (self.capacity_blocked || std::mem::take(&mut self.cleanup_due))
+            && self.cleanup_expired(auth, runtime, eligibility, now)?
+        {
             return Ok(true);
         }
         let start = self

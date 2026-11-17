@@ -502,8 +502,11 @@ impl Worker {
         Ok(now)
     }
     fn backoff(&mut self) {
-        self.failures = self.failures.saturating_add(1).min(5);
-        self.poll_at = Some(Instant::now() + Duration::from_secs((1u64 << self.failures).min(30)));
+        // 0.5 s first: the usual failure is a transient Stale while owner
+        // publication drains (e.g. right after old channels close).
+        self.failures = self.failures.saturating_add(1).min(7);
+        self.poll_at =
+            Some(Instant::now() + Duration::from_millis((250u64 << self.failures).min(30_000)));
     }
     fn park(&mut self, intent: &PairingDecisionIntent) {
         self.parked.insert(
