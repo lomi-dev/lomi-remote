@@ -541,6 +541,10 @@ impl GridPatch {
         }
         Some(patch)
     }
+    /// compact-cells-v1 bytes; callers trim checkpoints first.
+    pub fn to_compact_json(&self) -> serde_json::Result<Vec<u8>> {
+        crate::compact_cells_json(self)
+    }
     pub fn previous_sequence(&self) -> DecimalU64 {
         self.previous_sequence
     }

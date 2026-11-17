@@ -288,6 +288,11 @@ pub enum SnapshotEncoding {
     /// Rows omit trailing blank default cells; decoders pad them back.
     #[serde(rename = "trimmed-rows-v1")]
     TrimmedRowsV1,
+    /// trimmed-rows-v1 plus cells that omit default-valued fields (text " ",
+    /// width 1, default colors, no flags, underline or hyperlink), in
+    /// snapshots and in every state delta. Decoders restore the defaults.
+    #[serde(rename = "compact-cells-v1")]
+    CompactCellsV1,
 }
 dto!(TerminalReadParams {
     terminal: TerminalContext,

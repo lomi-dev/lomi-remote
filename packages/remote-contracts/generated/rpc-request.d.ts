@@ -176,7 +176,7 @@ export type TerminalSessionId = string;
  * Opt-in snapshot wire encodings. Absent keeps the full-width row encoding
  * that older clients require; older Hosts reject the field entirely.
  */
-export type SnapshotEncoding = "trimmed-rows-v1";
+export type SnapshotEncoding = "trimmed-rows-v1" | "compact-cells-v1";
 export type SubscriptionId = string;
 export type LeaseToken = string;
 /**

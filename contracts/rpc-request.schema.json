@@ -1630,6 +1630,11 @@
           "const": "trimmed-rows-v1",
           "description": "Rows omit trailing blank default cells; decoders pad them back.",
           "type": "string"
+        },
+        {
+          "const": "compact-cells-v1",
+          "description": "trimmed-rows-v1 plus cells that omit default-valued fields (text \" \",\nwidth 1, default colors, no flags, underline or hyperlink), in\nsnapshots and in every state delta. Decoders restore the defaults.",
+          "type": "string"
         }
       ]
     },

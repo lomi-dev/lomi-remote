@@ -724,6 +724,12 @@ impl Snapshot {
             }
         }
     }
+    /// compact-cells-v1 bytes: trimmed rows, then default cell fields omitted.
+    pub fn to_compact_json(&self) -> serde_json::Result<Vec<u8>> {
+        let mut trimmed = self.clone();
+        trimmed.trim_rows();
+        compact_cells_json(&trimmed)
+    }
     /// Inverse of [`Snapshot::trim_rows`] for decoders.
     pub fn pad_rows(&mut self) {
         let blank = blank_cell();
@@ -830,6 +836,46 @@ impl Delta {
     }
 }
 
+/// Serialize `value` with every cell object reduced to its non-default
+/// fields. Only objects with exactly the cell keys are touched; the size of
+/// each cell still depends only on that cell, so no cross-cell compression.
+pub fn compact_cells_json(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
+    fn compact(value: &mut serde_json::Value) {
+        const CELL_KEYS: [&str; 8] = [
+            "bg",
+            "fg",
+            "flags",
+            "hyperlink",
+            "text",
+            "underlineColor",
+            "underlineStyle",
+            "width",
+        ];
+        match value {
+            serde_json::Value::Array(items) => items.iter_mut().for_each(compact),
+            serde_json::Value::Object(map) => {
+                if map.len() == CELL_KEYS.len() && CELL_KEYS.iter().all(|k| map.contains_key(*k)) {
+                    let default = serde_json::json!({"kind": "default"});
+                    map.retain(|key, v| match key.as_str() {
+                        "text" => v != " ",
+                        "width" => v != 1,
+                        "fg" | "bg" => *v != default,
+                        "flags" => v.as_array().is_none_or(|a| !a.is_empty()),
+                        "underlineStyle" => v != 0,
+                        _ => !v.is_null(),
+                    });
+                } else {
+                    map.values_mut().for_each(compact);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(value)?;
+    compact(&mut value);
+    serde_json::to_vec(&value)
+}
+
 #[cfg(test)]
 mod trimmed_rows_tests {
     use super::*;
@@ -853,5 +899,32 @@ mod trimmed_rows_tests {
         assert!(trimmed.normal.lines[2].cells.len() == 4);
         trimmed.pad_rows();
         assert_eq!(trimmed, full);
+    }
+
+    #[test]
+    fn compact_cells_drop_only_default_fields() {
+        let mut state = TerminalState::new(24, 120, 100).unwrap();
+        state.feed(b"ab \x1b[31mr\x1b[0m\r\n").unwrap();
+        for _ in 0..20 {
+            state.feed(&[b'x'; 100]).unwrap();
+            state.feed(b"\r\n").unwrap();
+        }
+        let full = state.snapshot().unwrap();
+        let trimmed = {
+            let mut s = full.clone();
+            s.trim_rows();
+            serde_json::to_vec(&s).unwrap().len()
+        };
+        let bytes = full.to_compact_json().unwrap();
+        assert!(bytes.len() * 5 < trimmed, "{} vs {trimmed}", bytes.len());
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let cells = &value["normal"]["lines"][0]["cells"];
+        assert_eq!(cells[0], serde_json::json!({"text": "a"}));
+        assert_eq!(cells[2], serde_json::json!({}));
+        assert_eq!(
+            cells[3],
+            serde_json::json!({"text": "r", "fg": {"kind": "indexed", "index": 1}})
+        );
+        assert_eq!(cells.as_array().unwrap().len(), 4);
     }
 }
