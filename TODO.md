@@ -1,6 +1,6 @@
 # Lomi Remote — pozostałe prace
 
-Stan przekazania: 2026-11-16. Kod jest zapisany jako praca w toku.
+Stan przekazania: 2026-11-17. Kod jest zapisany jako praca w toku.
 **Pełny test CLI i przeglądarki nie jest zakończony. Publiczny release CLI
 pozostaje wstrzymany.**
 
@@ -11,24 +11,50 @@ pozostaje wstrzymany.**
   Aktualizacja Hosta na Linuksie zachowała profil, logowanie i workspace.
 - Naprawione i potwierdzone na Linuksie: pierwszy `setup` (usługa systemd)
   oraz snapshot terminala (format `trimmed-rows-v1`, ok. 3,8 KB zamiast 2 MB).
-- Połączenia HTTPS Hosta są ponownie używane w obrębie jednej operacji z
-  limitem czasu: mediana zapytania spadła z 218 do 128 ms.
-- W przeglądarce naprawiono pętlę odnawiania sterowania, która blokowała
-  wpisywanie (`remote-web` `d8fa15b`).
-- **Główna blokada: opóźnienie RPC Hosta ok. 1,5–2 s.** Jeden wątek
-  autoryzacji wykonuje po kolei: odczyt pairingu, kanał relay, odpytywanie
-  `pending`, `GET runtime` i `POST heartbeat`. Ingress działa raz na cykl
-  ok. 0,6–0,8 s, a jedno RPC potrzebuje dwóch cykli. Przez to odnowienie
-  sterowania terminalem przekracza 1,5 s, gdy czeka za wpisywaniem, i kanał
-  się zamyka (`TERMINAL_RPC_RENEW_TIMED_OUT`). Krótsze oczekiwanie bezczynności,
-  mniejszy margines dowodu i szybka ścieżka dla input/resize nie zmieniły
-  rytmu cyklu, dlatego zostały wycofane.
-- Potrzebny projekt: zrównoleglenie zapytań control-plane albo bezpieczne
-  ponowne użycie dowodu pairingu w kolejnych przebiegach. Bez rozluźniania
-  świeżości dowodu, dzierżawy i kontroli uprawnień.
-- Otwarcie workspace'u trwa 9–16 s. Mniej więcej co drugie otwarcie po
-  restarcie Hosta kończyło się `CHANNEL_NOT_ADMITTED` lub komunikatem
-  „could not be completed”; przyczyna nie jest ustalona.
+- **Terminal w przeglądarce działa end-to-end, ale wolno.** Na Linuksie
+  `echo hello-e2e` wykonało się i wynik się wyświetlił. Jedno RPC trwa
+  ok. 0,6–1,3 s, a odnowienie sterowania czasem przekracza limit i kanał
+  łączy się ponownie.
+- Poprawki Hosta (`lomi-remote`):
+  - ponowne użycie połączeń HTTPS;
+  - rotacja jednostki pracy co 15 s zamiast przy każdej granicy komunikatu;
+  - odpytywanie kanału co 20 ms;
+  - dłuższe użycie ważnego dowodu;
+  - rzadsze wykrywanie nowych okien.
+- Poprawki przeglądarki (`remote-web`):
+  - sekwencja zdarzeń sterowania w modelu siatki (wcześniej każdy pierwszy
+    klawisz wymuszał resync);
+  - okno odnowienia 3 s / 2 s;
+  - odnowienie równolegle z wpisywaniem;
+  - ponowienie przy `CHANNEL_NOT_ADMITTED`;
+  - jednorazowe ponowne połączenie przy `STALE_EPOCH`;
+  - przycisk „Dismiss” dla niepewnego tworzenia terminala.
+- **Pozostała blokada:** jeden wątek autoryzacji wykonuje zapytania
+  control-plane szeregowo. `POST heartbeat` trwa 150–900 ms, bo serwer
+  obsługuje runtime pod globalną blokadą. Przez ten czas Host nie czyta
+  relaya. Każde RPC poza odnowieniem dodaje 1–2 odczyty pairingu (osobny
+  dowód dla operacji żądania).
+- Opóźnienie sieci: relay i API idą przez Cloudflare do odległego originu.
+  Jedno RPC przez relay kosztuje ok. 0,25 s w każdą stronę niezależnie od Hosta.
+
+## Następny krok projektowy
+
+1. Heartbeat i odpytywanie `pending` w osobnym wątku control-plane. Aktor
+   dostaje gotowe obserwacje i używa ich wyłącznie w ramach ich własnej
+   świeżości, z tymi samymi kontrolami co dziś. Ingress przestaje czekać na
+   HTTPS.
+2. Zmierzyć i skrócić czas `lomi_host_runtime_heartbeat` po stronie serwera
+   (globalna blokada autoryzacji).
+3. Rozważyć region originu relaya/API bliżej użytkowników (decyzja infrastruktury).
+4. Dzierżawa 5 s jest w specyfikacji „startowa”. Wydłużenie wymaga zgodnej
+   zmiany Hosta, `remote-web` i aplikacji mobilnej (obie odrzucają > 5000 ms).
+
+## Znane problemy do naprawy
+
+- Interfejs nie mówi wprost o limicie 32 kart w workspace; pokazuje
+  „The host could not complete the request”.
+- Aplikacja mobilna: sprawdzić, czy jej renderer ma ten sam błąd sekwencji
+  zdarzeń sterowania co `remote-web` (naprawiony w `2c8177c`).
 
 ## Kontrole przy zapisie kodu
 
