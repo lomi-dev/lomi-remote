@@ -54,8 +54,9 @@ agent enforces HTTPS, disables proxy selection and redirects, limits headers to
 DNS 3 seconds, connect including TLS 5 seconds, request/body sends 2 seconds each,
 and response headers/body 5 seconds each. DNS uses one lazy process-wide worker,
 a one-slot queue, a busy gate and request-specific one-slot result channels. A
-native lookup cannot be cancelled: after a timeout, subsequent resolutions fail
-fast until that worker returns. New transport instances cannot create additional
+native lookup cannot be cancelled: a concurrent resolution waits at most 0.5
+seconds for the busy gate, so after a timeout, subsequent resolutions fail
+within that bound until the worker returns. New transport instances cannot create additional
 DNS workers. No new thread is spawned per request or timeout. DNS receives only
 public hostnames and ports. This is a resource bound, not cancellation of the
 platform resolver.

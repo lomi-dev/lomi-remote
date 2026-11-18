@@ -25,6 +25,7 @@ struct Worker {
     busy: Arc<AtomicBool>,
     _join: std::thread::JoinHandle<()>,
 }
+const BUSY_WAIT: Duration = Duration::from_millis(500);
 static WORKER: OnceLock<Result<Worker, ()>> = OnceLock::new();
 fn worker() -> Result<&'static Worker, ()> {
     WORKER
@@ -77,12 +78,20 @@ impl Worker {
         if budget.is_some_and(|state| state.io_check(deadline).is_err()) {
             return Err(());
         }
-        if self
+        // Concurrent requests (helper threads) briefly queue behind a normal
+        // lookup; a hung one still fails its waiters fast.
+        let queue_until = deadline.min(Instant::now() + BUSY_WAIT);
+        while self
             .busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Err(());
+            if Instant::now() >= queue_until
+                || budget.is_some_and(|state| state.io_check(deadline).is_err())
+            {
+                return Err(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
         let (response, receiver) = mpsc::sync_channel(1);
         if self
@@ -217,5 +226,53 @@ fn resolve(
         Err(ureq::Error::HostNotFound)
     } else {
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_lookups_queue_behind_one_native_lookup() {
+        let worker = spawn_worker(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Some(vec![SocketAddr::from(([127, 0, 0, 1], 443))])
+        })
+        .unwrap();
+        let worker = &worker;
+        std::thread::scope(|scope| {
+            let lookups: Vec<_> = (0..3)
+                .map(|_| {
+                    scope.spawn(move || {
+                        worker.lookup_budget("a.example:443".into(), Duration::from_secs(3), None)
+                    })
+                })
+                .collect();
+            for lookup in lookups {
+                assert!(matches!(lookup.join().unwrap(), Ok(Some(_))));
+            }
+        });
+    }
+
+    #[test]
+    fn a_hung_lookup_still_fails_its_waiters_fast() {
+        let worker = spawn_worker(|_| {
+            std::thread::sleep(Duration::from_secs(5));
+            None
+        })
+        .unwrap();
+        assert!(
+            worker
+                .lookup_budget("a.example:443".into(), Duration::from_millis(50), None)
+                .is_err()
+        );
+        let started = Instant::now();
+        assert!(
+            worker
+                .lookup_budget("a.example:443".into(), Duration::from_secs(3), None)
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
