@@ -1568,7 +1568,7 @@ fn commit_request(
     repo: &gix::Repository,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let object = request.as_object().ok_or("request must be object")?;
-    if object.len() != 4 || object.get("operation").and_then(Value::as_str) != Some("commit") {
+    if object.len() != 3 || object.get("operation").and_then(Value::as_str) != Some("commit") {
         return Err("unsupported request".into());
     }
     let message = request

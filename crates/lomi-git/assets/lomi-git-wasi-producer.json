@@ -1,14 +1,14 @@
 {
   "format": "lomi-wasi-producer-v1",
   "artifact": "../guest/target/wasm32-wasip1/release/lomi-git-wasi-guest.wasm",
-  "artifactSha256": "4f8641721722b1f56ed4453c3f67369c2e7ec1abd3c602c0ee3578275b9ab0e4",
+  "artifactSha256": "8cdeea3ea8a422206812b0bf86038765977697f399d0830240cf93e66c073dd2",
   "artifactBytes": 2411577,
   "embedded": true,
   "embeddedArtifact": "lomi-git-read-worker.wasm",
-  "embeddedSha256": "4f8641721722b1f56ed4453c3f67369c2e7ec1abd3c602c0ee3578275b9ab0e4",
+  "embeddedSha256": "8cdeea3ea8a422206812b0bf86038765977697f399d0830240cf93e66c073dd2",
   "embeddedBytes": 2411577,
   "source": {
-    "guestMainSha256": "aeb436ee9c1915abe670d1e751638a39736f142e3f4c32ca54f1db5ce44a70ec",
+    "guestMainSha256": "0788c2a10d5c296c6815e6496118384316893ace7d9db193109f7baeca81e4fa",
     "guestManifestSha256": "6dc30ceca6bfad5fbd2f3c759da1bdaebaa96dd96e36c0828901fcf5543119f7",
     "guestLockSha256": "9630ba83b690bfe61a7c7ebf71f0119c1781d7bc4b227f2b6960e128fa7c98fd",
     "vendorFiletimeWasiSha256": "9b0f7e31ae3c58bb5dce1bb5e6aef2d48208d48686e6d055ed095151357e5841",
@@ -25,8 +25,8 @@
     },
     "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
     "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
-    "finishedAtUtc": "2026-10-28T02:48:58Z",
+    "finishedAtUtc": "2026-11-18T13:40:06Z",
     "result": "passed"
   },
-  "runtimeValidation": "not run per user instruction (tests prohibited)"
+  "runtimeValidation": "cargo test -p lomi-git (stage and commit through GitService): passed"
 }

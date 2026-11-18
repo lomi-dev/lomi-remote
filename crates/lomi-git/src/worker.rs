@@ -31,7 +31,7 @@ const OWNER_CONTEXT_FILE: &str = "context.json";
 const MAX_OWNER_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_OWNER_CONTEXT_BYTES: usize = 4 * 1024 * 1024 + 4096;
 const TIMER_POLL: Duration = Duration::from_millis(10);
-const MODULE_SHA256: &str = "4f8641721722b1f56ed4453c3f67369c2e7ec1abd3c602c0ee3578275b9ab0e4";
+const MODULE_SHA256: &str = "8cdeea3ea8a422206812b0bf86038765977697f399d0830240cf93e66c073dd2";
 
 /// Inspect the embedded artifact without creating an engine, opening a
 /// repository, executing Git, or accessing the network.

@@ -511,7 +511,11 @@ impl PostStateReader {
             context: self.context.clone(),
             repositories: Mutex::new(HashMap::new()),
         };
-        let snapshot = service.create_snapshot(&self.repository, control)?;
+        // Publishing replaced .git/index, so the pre-publish directory
+        // metadata is stale by design. Rediscover the same repository ID
+        // while its physical lock is still held.
+        let repository = service.refresh_repository(self.repository.id, control)?;
+        let snapshot = service.create_snapshot(&repository, control)?;
         control.check()?;
         snapshot_token(&snapshot.state_token)
     }
@@ -2863,4 +2867,112 @@ fn common_repository_lock(identity: &FileIdentity) -> Arc<RepoLock> {
     });
     locks.insert(identity.clone(), Arc::downgrade(&lock));
     lock
+}
+
+#[cfg(test)]
+mod stage_receipt_tests {
+    use super::*;
+    use serde_json::json;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Regression: publishing replaces .git/index, so the post-publish token
+    /// must be captured from a refreshed repository, not the pre-publish one.
+    #[test]
+    fn stage_publish_for_receipt_succeeds_after_index_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "t"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        fs::write(root.join("README.md"), "one\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        fs::write(root.join("README.md"), "two\n").unwrap();
+
+        let id = "11111111-1111-4111-8111-111111111111";
+        let context = json!({
+            "workspaceId": id, "workspaceEpoch": id, "runtimeId": id,
+            "runtimeGeneration": "1", "hostAccessEpoch": "1", "grantRevision": "1",
+        });
+        let service =
+            GitService::open(&root, &[], serde_json::from_value(context.clone()).unwrap()).unwrap();
+        let control =
+            RequestControl::with_timeout(CancellationToken::new(), Duration::from_secs(60))
+                .unwrap();
+
+        let repos = service
+            .repositories(
+                serde_json::from_value(json!({ "context": context })).unwrap(),
+                &control,
+            )
+            .unwrap();
+        let repo = serde_json::to_value(&repos).unwrap()["repositories"][0]["repositoryId"].clone();
+        let status = service
+            .status(
+                serde_json::from_value(json!({
+                    "context": context, "repositoryId": repo,
+                    "stateToken": null, "cursor": null, "limit": 200,
+                }))
+                .unwrap(),
+                &control,
+            )
+            .unwrap();
+        let status = serde_json::to_value(&status).unwrap();
+        let entry = &status["entries"][0];
+        let params = serde_json::from_value(json!({
+            "mutation": { "context": context, "operationId": id },
+            "repositoryId": repo,
+            "expected": { "head": status["head"], "index": status["index"] },
+            "paths": [{ "entryId": entry["entryId"], "fileRevision": entry["fileRevision"] }],
+        }))
+        .unwrap();
+
+        service
+            .prepare_stage(params, &control)
+            .unwrap()
+            .publish_for_receipt(&control)
+            .unwrap();
+        assert_eq!(
+            git(&root, &["diff", "--cached", "--name-only"]).trim(),
+            "README.md"
+        );
+
+        let status = service
+            .status(
+                serde_json::from_value(json!({
+                    "context": context, "repositoryId": repo,
+                    "stateToken": null, "cursor": null, "limit": 200,
+                }))
+                .unwrap(),
+                &control,
+            )
+            .unwrap();
+        let status = serde_json::to_value(&status).unwrap();
+        let params = serde_json::from_value(json!({
+            "mutation": { "context": context, "operationId": "22222222-2222-4222-8222-222222222222" },
+            "repositoryId": repo,
+            "expected": { "head": status["head"], "index": status["index"] },
+            "message": "test: commit",
+        }))
+        .unwrap();
+        service
+            .prepare_commit(params, &control)
+            .unwrap()
+            .publish_for_receipt(&control)
+            .unwrap();
+        assert_eq!(
+            git(&root, &["log", "-1", "--format=%s"]).trim(),
+            "test: commit"
+        );
+    }
 }
