@@ -3552,6 +3552,22 @@ fn run_with_apis_inner(
             publication_barrier.reset();
             return;
         }
+        // A failed writer tripped the global uncertainty fence. Recover as a
+        // fresh process would: drop every remote connection and cached proof,
+        // then let the closed gate force a real Ready resume from the Store.
+        if !ingress.has_active_git_writer()
+            && matches!(owner.try_reset_failed_remote(operation), Ok(true))
+        {
+            cloud.finish_operation();
+            peer.discard_retained_operation();
+            channel.discard_retained_operation();
+            idle.reset_reservation();
+            publication_barrier.reset();
+            ingress.discard();
+            gate.store(true, Ordering::Release);
+            units.admit_after_settlement(stopping);
+            continue;
+        }
         // Retained effect scopes have their OWN fixed clock checkpoints. A
         // standalone Mutation writer here would stale their original admission.
         let snapshot = if ingress.has_active_git_writer() {
@@ -4446,6 +4462,11 @@ fn run_with_apis_inner(
                         return;
                     }
                 }
+            }
+            // Owner denial after a writer failure is mapped to Sealed. That is
+            // recoverable in-process: the next pass resets the fence.
+            Err(StepError::Auth(lomi_host_auth::Error::Sealed)) if owner.remote_fence_failed() => {
+                continue;
             }
             Err(StepError::Auth(error)) => {
                 if publication_barrier.is_active() {

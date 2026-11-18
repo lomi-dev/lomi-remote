@@ -229,6 +229,43 @@ impl OwnerDomain {
     pub(super) fn fail_remote(&self) {
         self.failed_remote.store(true, SeqCst);
     }
+    pub(super) fn remote_failed(&self) -> bool {
+        self.failed_remote.load(SeqCst)
+    }
+    /// Restart-equivalent recovery of the global uncertainty fence. It runs
+    /// only while no other writer is pending: a fresh ticket stales every
+    /// earlier scope, watcher and lock-free gate, and Ready closes with both
+    /// revisions advanced under the Domain lock before the fence clears. The
+    /// caller must drop all remote ingress and resume Ready from the Store, as
+    /// a new process would.
+    pub(super) fn try_reset_failed_remote(&self, operation: &Operation<'_>) -> Result<bool, Error> {
+        if !self.failed_remote.load(SeqCst) {
+            return Ok(false);
+        }
+        let mut writer =
+            self.register_writer(operation, WriterClass::Remote, Intent::VerifyRemote)?;
+        let ticket = writer.ticket;
+        let result = (|| {
+            let mut state = self.lock(operation)?;
+            if self.pending.load(SeqCst) != 1
+                || self.shared_pending.load(SeqCst) != 0
+                || self.issued.load(SeqCst) != ticket
+            {
+                return Err(Error::Busy);
+            }
+            state.revision = state.revision.checked_add(1).ok_or(Error::Exhausted)?;
+            state.authority_revision = state
+                .authority_revision
+                .checked_add(1)
+                .ok_or(Error::Exhausted)?;
+            state.ready = None;
+            self.failed_remote.store(false, SeqCst);
+            Ok(true)
+        })();
+        // Release without fail(): this ticket made no authority claim.
+        writer.release();
+        result
+    }
     /// Failure-only attenuation. No Operation is admitted or renewed, and no
     /// normal write/read capability or lock is returned. SharedOwner alone
     /// supplies its privately owned Store for this named cleanup operation.
@@ -4543,5 +4580,36 @@ impl RemoteRenameReceiptWatcher<'_, '_> {
         store: &lomi_host_store::HostStore,
     ) -> Result<u64, StepError<lomi_host_store::StoreError>> {
         self.stamp.validate(guard, store)
+    }
+}
+
+#[cfg(test)]
+mod failed_remote_reset_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    #[test]
+    fn reset_waits_for_pending_writers_then_clears_the_fence() {
+        let domain = OwnerDomain::new(1);
+        let cancelled = AtomicBool::new(false);
+        let operation = Operation::new(Instant::now() + Duration::from_secs(30), &cancelled);
+        assert!(!domain.try_reset_failed_remote(&operation).unwrap());
+
+        domain.fail_remote();
+        let writer = domain
+            .announce(&operation, WriterClass::Shared, Intent::Mutation)
+            .unwrap();
+        let revision = domain.state.lock().unwrap().authority_revision;
+        assert_eq!(domain.try_reset_failed_remote(&operation), Err(Error::Busy));
+        assert!(domain.remote_failed());
+        drop(writer);
+
+        assert!(domain.try_reset_failed_remote(&operation).unwrap());
+        assert!(!domain.remote_failed());
+        let state = domain.state.lock().unwrap();
+        assert!(state.ready.is_none());
+        assert!(state.authority_revision > revision);
+        assert_eq!(domain.pending.load(SeqCst), 0);
     }
 }

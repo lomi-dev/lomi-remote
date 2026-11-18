@@ -371,6 +371,14 @@ impl SharedOwner {
 
     /// A fresh Domain gate as well as the current durable authorization view.
     /// No Store row, cached bool or returned DTO can mint Ready through this API.
+    pub(super) fn remote_fence_failed(&self) -> bool {
+        self.domain.remote_failed()
+    }
+    pub(super) fn try_reset_failed_remote(&self, operation: &Operation<'_>) -> Result<bool, Error> {
+        self.domain
+            .try_reset_failed_remote(operation)
+            .map_err(Error::Domain)
+    }
     pub(super) fn remote_authorization(
         &self,
         operation: &Operation<'_>,
