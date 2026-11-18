@@ -2038,8 +2038,16 @@ pub(super) fn refresh_started_git_pairing(
     else {
         return Err(StepError::Stale);
     };
+    // Use the current projection: the post-response auth snapshot may already
+    // have observed a later Unix second, and observing wall_at_start again
+    // would be rejected as a clock rollback.
     let host = auth
-        .public_host_identity(wall_at_start)
+        .public_host_identity(
+            runtime
+                .base
+                .checked_add(runtime.anchor.elapsed().as_secs())
+                .ok_or(StepError::Stale)?,
+        )
         .map_err(|_| StepError::Stale)?;
     if pairing_id != preparation.pairing_id
         || proposal != preparation.proposal
@@ -2299,8 +2307,16 @@ pub(super) fn refresh_established_started_git_pairing(
     {
         return Err(StepError::Stale);
     }
+    // Use the current projection: the post-response auth snapshot may already
+    // have observed a later Unix second, and observing wall_at_start again
+    // would be rejected as a clock rollback.
     let host = auth
-        .public_host_identity(wall_at_start)
+        .public_host_identity(
+            runtime
+                .base
+                .checked_add(runtime.anchor.elapsed().as_secs())
+                .ok_or(StepError::Stale)?,
+        )
         .map_err(|_| StepError::Stale)?;
     if identities.host != host.identity
         || pin(&identities.host_fingerprint).map_err(|_| StepError::Stale)? != host.fingerprint
