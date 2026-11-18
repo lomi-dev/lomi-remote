@@ -224,7 +224,6 @@ struct Work {
     intent: Option<ChannelAdmissionIntent>,
 }
 
-const FAST_POLL_WINDOW: Duration = Duration::from_secs(15);
 /// `channels/pending` GET running on a helper thread so relay ingress keeps
 /// flowing. Its observation was captured and validated before the request;
 /// the result is accepted only on the same IO lease and while still current.
@@ -261,26 +260,8 @@ pub(super) struct Worker {
     cleanup_due: bool,
     scheduled_item_consumed: bool,
     cached_first_due: bool,
-    // Set while a remote channel is established: discovery of new requests
-    // can wait longer than the RPCs that share this actor.
-    quiet_polls: bool,
-    // A client usually requests its next channel (terminal, files) right
-    // after one is admitted; keep normal discovery cadence for a while.
-    fast_polls_until: Option<Instant>,
-    polled_at: Option<Instant>,
 }
 impl Worker {
-    pub(super) fn set_quiet_polls(&mut self, quiet: bool) {
-        let now = Instant::now();
-        let quiet = quiet && self.fast_polls_until.is_none_or(|until| now >= until);
-        if self.quiet_polls && !quiet && self.failures == 0 {
-            // Pull a poll scheduled at the quiet interval forward.
-            if let (Some(due), Some(polled)) = (self.poll_at, self.polled_at) {
-                self.poll_at = Some(due.min(polled + peer::discovery_interval(false)));
-            }
-        }
-        self.quiet_polls = quiet;
-    }
     pub(super) fn discard_retained_operation(&mut self) {
         self.active = None;
         self.cache.clear();
@@ -565,8 +546,9 @@ impl Worker {
         })?;
         let access = managed(auth.access_credential(now))?;
         let started = Instant::now();
-        self.poll_at = Some(started + peer::discovery_interval(self.quiet_polls));
-        self.polled_at = Some(started);
+        // Every new terminal or files panel waits for this discovery, so keep
+        // it at the normal cadence even while another channel is established.
+        self.poll_at = Some(started + peer::discovery_interval(false));
         self.turns_since_poll = 0;
         let provider = ProviderCapture::read(auth, runtime, eligibility)?;
         owner_turn(runtime, || effect.try_validate(&provider))?;
@@ -1002,7 +984,6 @@ impl Worker {
             let reconstructed = self.reconstruct(auth, config, runtime, eligibility, &work)?;
             self.ack(auth, runtime, eligibility, &work, response, reconstructed)?;
             self.cleanup_due = true;
-            self.fast_polls_until = Some(Instant::now() + FAST_POLL_WINDOW);
         } else {
             self.parked.insert(
                 intent.token.clone(),

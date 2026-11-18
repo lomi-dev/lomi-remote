@@ -4058,7 +4058,6 @@ fn run_with_apis_inner(
                             let discovery_allowed = apis.enabled && !setup_pending;
                             let established = ingress.has_established_connection();
                             peer.set_quiet_polls(established);
-                            channel.set_quiet_polls(established);
                             // Cloud retains priority above. Advance due peer
                             // refreshes, setup, or staged output before idle
                             // Peer/Channel work. A message settlement grants
