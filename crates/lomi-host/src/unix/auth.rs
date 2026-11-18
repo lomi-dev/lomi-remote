@@ -3482,6 +3482,8 @@ fn run_with_apis_inner(
         if ingress.has_established_connection()
             || ingress.has_pending_setup()
             || cloud.has_inflight_heartbeat()
+            || channel.has_inflight_poll()
+            || peer.has_inflight_poll()
         {
             // Also pick up an in-flight heartbeat result and handshake/ready
             // frames of a channel being set up promptly.
@@ -4015,9 +4017,12 @@ fn run_with_apis_inner(
                                 return Ok(requested_immediate_ingress_pass);
                             }
                             let peer_active = peer.has_active_work();
-                            let peer_cached = peer.has_cached_work();
+                            let peer_cached = peer.has_cached_work() || peer.has_inflight_poll();
                             let channel_active = channel.has_active_work();
-                            let channel_cached = channel.has_cached_work();
+                            // An in-flight poll keeps the Channel reservation, as
+                            // the blocking GET did, without requesting a spin.
+                            let channel_cached =
+                                channel.has_cached_work() || channel.has_inflight_poll();
                             let setup_pending = ingress.has_local_setup_work();
                             let staged_output_pending =
                                 ingress.has_staged_output(runtime, Some(&eligibility));
@@ -4072,7 +4077,8 @@ fn run_with_apis_inner(
                                         let released = idle.after_step(
                                             class,
                                             channel.has_active_work(),
-                                            channel.has_cached_work(),
+                                            channel.has_cached_work()
+                                                || channel.has_inflight_poll(),
                                             channel.scheduled_item_consumed(),
                                         );
                                         if released {
@@ -4098,7 +4104,7 @@ fn run_with_apis_inner(
                                         let released = idle.after_step(
                                             class,
                                             peer.has_active_work(),
-                                            peer.has_cached_work(),
+                                            peer.has_cached_work() || peer.has_inflight_poll(),
                                             peer.scheduled_item_consumed(),
                                         );
                                         if released {

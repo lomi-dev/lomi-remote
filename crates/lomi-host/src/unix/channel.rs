@@ -225,10 +225,19 @@ struct Work {
 }
 
 const FAST_POLL_WINDOW: Duration = Duration::from_secs(15);
+/// `channels/pending` GET running on a helper thread so relay ingress keeps
+/// flowing. Its observation was captured and validated before the request;
+/// the result is accepted only on the same IO lease and while still current.
+struct InFlightPoll {
+    request: cloud::HelperRequest<ChannelPendingResult>,
+    observation: Arc<Observation>,
+    io: public_configuration::WorkerPublicIoIdentity,
+}
 #[derive(Default)]
 pub(super) struct Worker {
     trust: peer::Worker,
-    transport: Option<DataTransport>,
+    transport: Option<Arc<DataTransport>>,
+    inflight_poll: Option<InFlightPoll>,
     scope: Option<CloudRuntimeScope>,
     clock: Option<PolicyClock>,
     cache: VecDeque<Work>,
@@ -277,6 +286,10 @@ impl Worker {
         self.cache.clear();
         self.pending_handoff = None;
         self.cached_first_due = false;
+        self.inflight_poll = None;
+    }
+    pub(super) fn has_inflight_poll(&self) -> bool {
+        self.inflight_poll.is_some()
     }
     pub(super) fn discard_cached_work(&mut self) {
         self.cache.clear();
@@ -286,6 +299,8 @@ impl Worker {
         self.pending_handoff.take()
     }
     pub(super) fn has_retained_operation(&self) -> bool {
+        // An in-flight poll is not retained: a result that outlives its
+        // operation fails `current_operation` before any of it is used.
         self.active.is_some() || !self.cache.is_empty() || self.pending_handoff.is_some()
     }
     pub(super) fn has_active_work(&self) -> bool {
@@ -308,7 +323,7 @@ impl Worker {
     ) -> Result<(), StepError> {
         self.scheduled_item_consumed = false;
         if let Some(api) = injected {
-            return self.step_using(auth, config, runtime, eligibility, api);
+            return self.step_using(auth, config, runtime, eligibility, api, None);
         }
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.transport = None;
@@ -317,14 +332,14 @@ impl Worker {
             let origin =
                 RemoteApiOrigin::new(config, eligibility.binding.scope.remote_api_origin.clone())
                     .map_err(|_| StepError::Stale)?;
-            self.transport = Some(
+            self.transport = Some(Arc::new(
                 runtime
                     .public_io
                     .data_transport(origin)
                     .map_err(|_| StepError::Stale)?,
-            );
+            ));
         }
-        let transport = self.transport.take().expect("channel adapter");
+        let transport = self.transport.clone().expect("channel adapter");
         let operation = runtime.operation;
         let stopping = runtime.stopping;
         let paused = runtime.paused;
@@ -349,9 +364,14 @@ impl Worker {
             Ok(())
         };
         let budget = transport.with_budget(operation.deadline(), &check);
-        let result = self.step_using(auth, config, runtime, eligibility, &budget);
-        self.transport = Some(transport);
-        result
+        self.step_using(
+            auth,
+            config,
+            runtime,
+            eligibility,
+            &budget,
+            Some(&transport),
+        )
     }
     fn step_using(
         &mut self,
@@ -360,10 +380,12 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn ChannelApi,
+        spawn: Option<&Arc<DataTransport>>,
     ) -> Result<(), StepError> {
         self.scheduled_item_consumed = false;
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.scope = Some(eligibility.binding.scope.clone());
+            self.inflight_poll = None;
             // Records left by an earlier run may already have expired.
             self.cleanup_due = true;
             self.cache.clear();
@@ -384,9 +406,10 @@ impl Worker {
             }
             self.pending_handoff = None;
         }
-        match self.turn(auth, config, runtime, eligibility, api) {
+        match self.turn(auth, config, runtime, eligibility, api, spawn) {
             Ok(()) => Ok(()),
             Err(PeerError::Fatal(error)) => {
+                self.inflight_poll = None;
                 self.active = None;
                 self.cache.clear();
                 self.pending_handoff = None;
@@ -420,6 +443,7 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn ChannelApi,
+        spawn: Option<&Arc<DataTransport>>,
     ) -> ResultPeer<()> {
         // The clock must use Runtime's original wall/monotonic pair. Sampling
         // `live()` (whole seconds) against a fresh `Instant::now()` drops the
@@ -436,6 +460,25 @@ impl Worker {
         })?;
         self.parked
             .retain(|token, _| pending.iter().any(|p| &p.token == token));
+        if let Some(flight) = &self.inflight_poll {
+            // Channel work waits for its own poll, as when the GET blocked.
+            let Some(response) = flight.request.poll() else {
+                return Ok(());
+            };
+            let flight = self.inflight_poll.take().expect("in-flight poll");
+            if !runtime.public_io.is_same_lease(&flight.io) {
+                return Ok(());
+            }
+            return self.accept_pending(
+                auth,
+                config,
+                runtime,
+                eligibility,
+                &pending,
+                response,
+                flight.observation,
+            );
+        }
         self.turns_since_poll = self.turns_since_poll.saturating_add(1);
         if let Some(work) = self.active.take() {
             self.scheduled_item_consumed = true;
@@ -469,7 +512,7 @@ impl Worker {
             }
         }
         if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
-            return self.poll(auth, config, runtime, eligibility, api, &pending);
+            return self.poll(auth, config, runtime, eligibility, api, spawn, &pending);
         }
         if self.prefer_recovery
             && self.recover_one(auth, config, runtime, eligibility, api, &pending)?
@@ -496,8 +539,9 @@ impl Worker {
         if self.poll_at.is_some_and(|at| Instant::now() < at) {
             return Ok(());
         }
-        self.poll(auth, config, runtime, eligibility, api, &pending)
+        self.poll(auth, config, runtime, eligibility, api, spawn, &pending)
     }
+    #[allow(clippy::too_many_arguments)]
     fn poll(
         &mut self,
         auth: &HostAuth<'_, dyn SecretStorage + '_>,
@@ -505,6 +549,7 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn ChannelApi,
+        spawn: Option<&Arc<DataTransport>>,
         pending: &[ChannelAdmissionIntent],
     ) -> ResultPeer<()> {
         let now = self.trust.live(auth, runtime, eligibility)?;
@@ -527,17 +572,60 @@ impl Worker {
         owner_turn(runtime, || effect.try_validate(&provider))?;
         check_peer_runtime(runtime)?;
         effect.check_boundary(&provider).map_err(owner_error)?;
-        let response = api.pending(eligibility.identity.host_id, &access);
-        self.trust.live(auth, runtime, eligibility)?;
-        let Ok(response) = response else {
-            self.backoff();
-            return Ok(());
-        };
         let observation = Arc::new(Observation::new(
             eligibility,
             started,
             effect.continuation(),
         ));
+        let host = eligibility.identity.host_id;
+        if let Some(transport) = spawn {
+            let transport = transport.clone();
+            let request = cloud::HelperRequest::spawn(
+                "lomi-channel-poll",
+                runtime.operation.deadline(),
+                move |deadline, check| {
+                    transport
+                        .with_budget(deadline, check)
+                        .channel_pending(host, &access)
+                },
+            )
+            .map_err(|_| PeerError::from(StepError::Stale))?;
+            self.inflight_poll = Some(InFlightPoll {
+                request,
+                observation,
+                io: runtime.public_io.retained_identity(),
+            });
+            return Ok(());
+        }
+        let response = api.pending(host, &access);
+        self.accept_pending(
+            auth,
+            config,
+            runtime,
+            eligibility,
+            pending,
+            response,
+            observation,
+        )
+    }
+    /// The rest of a poll once its response arrived (synchronously or from
+    /// the helper thread).
+    #[allow(clippy::too_many_arguments)]
+    fn accept_pending(
+        &mut self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        config: &Config,
+        runtime: Runtime<'_>,
+        eligibility: &PeerEligibility,
+        pending: &[ChannelAdmissionIntent],
+        response: Result<ChannelPendingResult, lomi_host_http::Error>,
+        observation: Arc<Observation>,
+    ) -> ResultPeer<()> {
+        self.trust.live(auth, runtime, eligibility)?;
+        let Ok(response) = response else {
+            self.backoff();
+            return Ok(());
+        };
         if !observation.current(eligibility) {
             return Ok(());
         }

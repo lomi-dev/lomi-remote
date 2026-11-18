@@ -1085,13 +1085,11 @@ struct ConfiguredHeartbeatPrepared {
     request_started: Option<Instant>,
     wall_started: Option<u64>,
 }
-/// Helper-thread POST. The thread sees only a copied deadline and this cancel
-/// flag; dropping the handle sets the flag so the POST stops locally.
-struct HeartbeatPost {
-    result: std::sync::mpsc::Receiver<
-        Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>,
-    >,
-    cancel: CancelOnDrop,
+/// Helper-thread request. The thread sees only a copied deadline and this
+/// cancel flag; dropping the handle sets the flag so the request stops locally.
+pub(super) struct HelperRequest<T> {
+    result: std::sync::mpsc::Receiver<Result<T, lomi_host_http::Error>>,
+    _cancel: CancelOnDrop,
 }
 struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelOnDrop {
@@ -1099,22 +1097,23 @@ impl Drop for CancelOnDrop {
         self.0.store(true, std::sync::atomic::Ordering::Release);
     }
 }
-impl HeartbeatPost {
-    fn spawn(
+type HeartbeatPost = HelperRequest<lomi_remote_protocol::http::HeartbeatResult>;
+impl<T: Send + 'static> HelperRequest<T> {
+    pub(super) fn spawn(
+        name: &str,
         deadline: Instant,
-        post: impl FnOnce(
+        request: impl FnOnce(
             Instant,
             &(dyn Fn() -> Result<(), lomi_host_http::BudgetStop> + Sync),
-        )
-            -> Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>
+        ) -> Result<T, lomi_host_http::Error>
         + Send
         + 'static,
-    ) -> Result<Self, NormalPublicationOriginError> {
+    ) -> std::io::Result<Self> {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (sender, result) = std::sync::mpsc::channel();
         let flag = cancel.clone();
         std::thread::Builder::new()
-            .name("lomi-heartbeat".into())
+            .name(name.into())
             .spawn(move || {
                 let check = || {
                     if flag.load(std::sync::atomic::Ordering::Acquire) {
@@ -1125,17 +1124,14 @@ impl HeartbeatPost {
                         Ok(())
                     }
                 };
-                let _ = sender.send(post(deadline, &check));
-            })
-            .map_err(|_| NormalPublicationOriginError::Stale)?;
+                let _ = sender.send(request(deadline, &check));
+            })?;
         Ok(Self {
             result,
-            cancel: CancelOnDrop(cancel),
+            _cancel: CancelOnDrop(cancel),
         })
     }
-    fn poll(
-        &self,
-    ) -> Option<Result<lomi_remote_protocol::http::HeartbeatResult, lomi_host_http::Error>> {
+    pub(super) fn poll(&self) -> Option<Result<T, lomi_host_http::Error>> {
         use std::sync::mpsc::TryRecvError;
         match self.result.try_recv() {
             Ok(result) => Some(result),
@@ -1335,11 +1331,12 @@ impl<'w> NormalPublicationDriver<'w> {
         let deadline = operation.deadline();
         prepared.request_started = Some(Instant::now());
         prepared.wall_started = Some(now);
-        let post = HeartbeatPost::spawn(deadline, move |deadline, check| {
+        let post = HeartbeatPost::spawn("lomi-heartbeat", deadline, move |deadline, check| {
             transport
                 .with_budget(deadline, check)
                 .heartbeat(host, &params, &access)
-        })?;
+        })
+        .map_err(|_| NormalPublicationOriginError::Stale)?;
         Ok(InFlightHeartbeatSend {
             post,
             prepared,
@@ -1687,15 +1684,19 @@ mod tests {
 
     #[test]
     fn inflight_post_stops_at_its_copied_deadline() {
-        let post = HeartbeatPost::spawn(Instant::now() + Duration::from_millis(20), |_, check| {
-            loop {
-                if let Err(stop) = check() {
-                    assert!(matches!(stop, lomi_host_http::BudgetStop::Deadline));
-                    return Err(lomi_host_http::Error::Cancelled);
+        let post = HeartbeatPost::spawn(
+            "test",
+            Instant::now() + Duration::from_millis(20),
+            |_, check| {
+                loop {
+                    if let Err(stop) = check() {
+                        assert!(matches!(stop, lomi_host_http::BudgetStop::Deadline));
+                        return Err(lomi_host_http::Error::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
                 }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        })
+            },
+        )
         .unwrap();
         assert!(matches!(
             wait_for(&post),
@@ -1706,8 +1707,10 @@ mod tests {
     #[test]
     fn dropping_an_inflight_post_cancels_it_and_delivers_nothing() {
         let (stopped, observed) = std::sync::mpsc::channel();
-        let post =
-            HeartbeatPost::spawn(Instant::now() + Duration::from_secs(30), move |_, check| {
+        let post = HeartbeatPost::spawn(
+            "test",
+            Instant::now() + Duration::from_secs(30),
+            move |_, check| {
                 loop {
                     if let Err(stop) = check() {
                         stopped
@@ -1717,8 +1720,9 @@ mod tests {
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert!(post.poll().is_none());
         drop(post);
         assert!(observed.recv_timeout(Duration::from_secs(5)).unwrap());

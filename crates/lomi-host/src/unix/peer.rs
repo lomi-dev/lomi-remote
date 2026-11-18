@@ -213,9 +213,16 @@ pub(super) fn discovery_interval(quiet: bool) -> Duration {
     Duration::from_secs(if quiet { 3 } else { 1 })
 }
 
+/// `pairings/pending` GET on a helper thread; same rules as the channel poll.
+struct InFlightPoll {
+    request: cloud::HelperRequest<PairingPendingResult>,
+    observation: std::sync::Arc<Observation>,
+    io: public_configuration::WorkerPublicIoIdentity,
+}
 #[derive(Default)]
 pub(super) struct Worker {
-    transport: Option<DataTransport>,
+    transport: Option<std::sync::Arc<DataTransport>>,
+    inflight_poll: Option<InFlightPoll>,
     scope: Option<CloudRuntimeScope>,
     cache: VecDeque<Work>,
     active: Option<Work>,
@@ -354,12 +361,17 @@ impl Worker {
         self.active = None;
         self.cache.clear();
         self.cached_first_due = false;
+        self.inflight_poll = None;
+    }
+    pub(super) fn has_inflight_poll(&self) -> bool {
+        self.inflight_poll.is_some()
     }
     pub(super) fn discard_cached_work(&mut self) {
         self.cache.clear();
         self.cached_first_due = false;
     }
     pub(super) fn has_retained_operation(&self) -> bool {
+        // See channel::Worker: an in-flight poll is not retained.
         self.active.is_some() || !self.cache.is_empty()
     }
     pub(super) fn has_active_work(&self) -> bool {
@@ -382,7 +394,7 @@ impl Worker {
     ) -> Result<(), StepError> {
         self.scheduled_item_consumed = false;
         if let Some(api) = injected {
-            return self.step_using(auth, config, runtime, eligibility, api);
+            return self.step_using(auth, config, runtime, eligibility, api, None);
         }
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.transport = None;
@@ -393,14 +405,14 @@ impl Worker {
             let origin =
                 RemoteApiOrigin::new(config, eligibility.binding.scope.remote_api_origin.clone())
                     .map_err(|_| StepError::Stale)?;
-            self.transport = Some(
+            self.transport = Some(std::sync::Arc::new(
                 runtime
                     .public_io
                     .data_transport(origin)
                     .map_err(|_| StepError::Stale)?,
-            );
+            ));
         }
-        let transport = self.transport.take().expect("initialized peer adapter");
+        let transport = self.transport.clone().expect("initialized peer adapter");
         let operation = runtime.operation;
         let stopping = runtime.stopping;
         let paused = runtime.paused;
@@ -425,9 +437,14 @@ impl Worker {
             Ok(())
         };
         let budget = transport.with_budget(operation.deadline(), &check);
-        let result = self.step_using(auth, config, runtime, eligibility, &budget);
-        self.transport = Some(transport);
-        result
+        self.step_using(
+            auth,
+            config,
+            runtime,
+            eligibility,
+            &budget,
+            Some(&transport),
+        )
     }
     fn step_using(
         &mut self,
@@ -436,10 +453,12 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn PeerApi,
+        spawn: Option<&std::sync::Arc<DataTransport>>,
     ) -> Result<(), StepError> {
         self.scheduled_item_consumed = false;
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.scope = Some(eligibility.binding.scope.clone());
+            self.inflight_poll = None;
             self.cache.clear();
             self.active = None;
             self.poll_at = None;
@@ -450,10 +469,11 @@ impl Worker {
             self.failures = 0;
             self.cached_first_due = false;
         }
-        let result = self.turn(auth, config, runtime, eligibility, api);
+        let result = self.turn(auth, config, runtime, eligibility, api, spawn);
         match result {
             Ok(()) => Ok(()),
             Err(PeerError::Fatal(error)) => {
+                self.inflight_poll = None;
                 self.active = None;
                 self.cache.clear();
                 Err(error)
@@ -521,6 +541,7 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn PeerApi,
+        spawn: Option<&std::sync::Arc<DataTransport>>,
     ) -> ResultPeer<()> {
         self.live(auth, runtime, eligibility)?;
         if self.clock.is_none() {
@@ -533,6 +554,24 @@ impl Worker {
         })?;
         self.parked
             .retain(|token, _| pending.iter().any(|intent| &intent.token == token));
+        if let Some(flight) = &self.inflight_poll {
+            // Pairing work waits for its own poll, as when the GET blocked.
+            let Some(response) = flight.request.poll() else {
+                return Ok(());
+            };
+            let flight = self.inflight_poll.take().expect("in-flight poll");
+            if !runtime.public_io.is_same_lease(&flight.io) {
+                return Ok(());
+            }
+            return self.accept_pending(
+                auth,
+                runtime,
+                eligibility,
+                &pending,
+                response,
+                flight.observation,
+            );
+        }
         self.turns_since_poll = self.turns_since_poll.saturating_add(1);
         if let Some(work) = self.active.take() {
             self.scheduled_item_consumed = true;
@@ -572,7 +611,7 @@ impl Worker {
         // Resource-local unknowns must not monopolize every idle turn. Honor
         // outage backoff, then reserve every fourth eligible turn for a due poll.
         if self.turns_since_poll >= 4 && self.poll_at.is_none_or(|at| Instant::now() >= at) {
-            return self.poll(auth, runtime, eligibility, api, &pending);
+            return self.poll(auth, runtime, eligibility, api, spawn, &pending);
         }
         // Polls do not reset this class. Replenished valid caches and durable
         // unknown outcomes each receive a bounded share of non-poll idle turns.
@@ -601,7 +640,7 @@ impl Worker {
         if self.poll_at.is_some_and(|until| Instant::now() < until) {
             return Ok(());
         }
-        self.poll(auth, runtime, eligibility, api, &pending)
+        self.poll(auth, runtime, eligibility, api, spawn, &pending)
     }
     fn recover_one(
         &mut self,
@@ -647,6 +686,7 @@ impl Worker {
         runtime: Runtime<'_>,
         eligibility: &PeerEligibility,
         api: &dyn PeerApi,
+        spawn: Option<&std::sync::Arc<DataTransport>>,
         pending: &[PairingDecisionIntent],
     ) -> ResultPeer<()> {
         let now = self.live(auth, runtime, eligibility)?;
@@ -668,17 +708,50 @@ impl Worker {
         owner_turn(runtime, || effect.try_validate(&provider))?;
         check_peer_runtime(runtime)?;
         effect.check_boundary(&provider).map_err(owner_error)?;
-        let response = api.pending(eligibility.identity.host_id, &access);
-        self.live(auth, runtime, eligibility)?;
-        let Ok(response) = response else {
-            self.backoff();
-            return Ok(());
-        };
         let observation = std::sync::Arc::new(Observation::new(
             eligibility,
             started,
             effect.continuation(),
         ));
+        let host = eligibility.identity.host_id;
+        if let Some(transport) = spawn {
+            let transport = transport.clone();
+            let request = cloud::HelperRequest::spawn(
+                "lomi-pairing-poll",
+                runtime.operation.deadline(),
+                move |deadline, check| {
+                    transport
+                        .with_budget(deadline, check)
+                        .pairing_pending(host, &access)
+                },
+            )
+            .map_err(|_| PeerError::from(StepError::Stale))?;
+            self.inflight_poll = Some(InFlightPoll {
+                request,
+                observation,
+                io: runtime.public_io.retained_identity(),
+            });
+            return Ok(());
+        }
+        let response = api.pending(host, &access);
+        self.accept_pending(auth, runtime, eligibility, pending, response, observation)
+    }
+    /// The rest of a poll once its response arrived (synchronously or from
+    /// the helper thread).
+    fn accept_pending(
+        &mut self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'_>,
+        eligibility: &PeerEligibility,
+        pending: &[PairingDecisionIntent],
+        response: Result<PairingPendingResult, lomi_host_http::Error>,
+        observation: std::sync::Arc<Observation>,
+    ) -> ResultPeer<()> {
+        self.live(auth, runtime, eligibility)?;
+        let Ok(response) = response else {
+            self.backoff();
+            return Ok(());
+        };
         if !observation.current(eligibility) {
             return Ok(());
         }
@@ -1537,6 +1610,36 @@ impl Worker {
         source: lomi_host_store::AcknowledgedWorkspaceGrant,
         cutoff: Instant,
     ) -> ResultPeer<VerifiedCurrentPeer> {
+        match self.current_pairing_read(auth, runtime, eligibility, source, cutoff, false)? {
+            CurrentPairingRead::Verified(current) => Ok(current),
+            CurrentPairingRead::Prefetching(_) => Err(PeerError::Invalid),
+        }
+    }
+    /// Same pre-request checks as a blocking read, but the GET runs on a
+    /// helper thread. `finish_current_pairing` applies every post-response
+    /// check on the actor; any failure just leaves the blocking read to run.
+    pub(super) fn start_current_pairing<'r>(
+        &mut self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'r>,
+        eligibility: &PeerEligibility,
+        source: lomi_host_store::AcknowledgedWorkspaceGrant,
+        cutoff: Instant,
+    ) -> ResultPeer<PendingCurrentPairing> {
+        match self.current_pairing_read(auth, runtime, eligibility, source, cutoff, true)? {
+            CurrentPairingRead::Prefetching(pending) => Ok(pending),
+            CurrentPairingRead::Verified(_) => Err(PeerError::Invalid),
+        }
+    }
+    fn current_pairing_read<'r>(
+        &mut self,
+        auth: &HostAuth<'_, dyn SecretStorage + '_>,
+        runtime: Runtime<'r>,
+        eligibility: &PeerEligibility,
+        source: lomi_host_store::AcknowledgedWorkspaceGrant,
+        cutoff: Instant,
+        prefetch: bool,
+    ) -> ResultPeer<CurrentPairingRead> {
         check_peer_runtime(runtime)?;
         let trusted = auth.trusted_configuration();
         let origin = policy(RemoteOrigin::new(
@@ -1597,6 +1700,31 @@ impl Worker {
             .checked_add(runtime.anchor.elapsed().as_secs())
             .ok_or(PeerError::Invalid)?;
         let started = Instant::now();
+        #[cfg(not(test))]
+        if prefetch {
+            let pairing = source.intent.preparation.pairing_id;
+            let request = cloud::HelperRequest::spawn(
+                "lomi-pairing-get",
+                operation.deadline().min(cutoff),
+                move |deadline, check| {
+                    transport
+                        .with_budget(deadline, check)
+                        .pairing_get(pairing, &access)
+                },
+            )
+            .map_err(|_| PeerError::Invalid)?;
+            return Ok(CurrentPairingRead::Prefetching(PendingCurrentPairing {
+                request,
+                source,
+                origin,
+                // The heartbeat must predate the request, as for a blocking read.
+                observation: Observation::new(eligibility, started, effect.continuation()),
+                wall_at_start,
+                io: runtime.public_io.retained_identity(),
+            }));
+        }
+        #[cfg(test)]
+        let _ = prefetch;
         #[cfg(test)]
         let response = take_test_pairing_get(&check).unwrap_or_else(|| {
             transport
@@ -1629,7 +1757,68 @@ impl Worker {
             origin,
             wall_at_start,
         )
+        .map(CurrentPairingRead::Verified)
     }
+}
+#[allow(clippy::large_enum_variant, reason = "short-lived return value")]
+enum CurrentPairingRead {
+    Verified(VerifiedCurrentPeer),
+    Prefetching(PendingCurrentPairing),
+}
+/// A current-pairing GET running on a helper thread. Dropping it cancels the
+/// GET; nothing from it is trusted until `finish_current_pairing` verifies it.
+pub(super) struct PendingCurrentPairing {
+    request: cloud::HelperRequest<PairingResult>,
+    source: lomi_host_store::AcknowledgedWorkspaceGrant,
+    origin: RemoteOrigin,
+    observation: Observation,
+    wall_at_start: u64,
+    io: public_configuration::WorkerPublicIoIdentity,
+}
+impl PendingCurrentPairing {
+    pub(super) fn poll(&self) -> Option<Result<PairingResult, lomi_host_http::Error>> {
+        self.request.poll()
+    }
+}
+/// The post-response half of a blocking read, against the current runtime.
+/// The Domain continuation captured before the GET must still hold for this
+/// operation, so a replaced operation or IO lease rejects the result.
+pub(super) fn finish_current_pairing(
+    auth: &HostAuth<'_, dyn SecretStorage + '_>,
+    runtime: Runtime<'_>,
+    eligibility: &PeerEligibility,
+    pending: PendingCurrentPairing,
+    response: Result<PairingResult, lomi_host_http::Error>,
+) -> ResultPeer<VerifiedCurrentPeer> {
+    if !runtime.public_io.is_same_lease(&pending.io) {
+        return Err(PeerError::Invalid);
+    }
+    let response = response.map_err(|_| PeerError::Invalid)?;
+    check_peer_runtime(runtime)?;
+    let observation = pending.observation;
+    let provider = ProviderCapture::read(auth, runtime, eligibility)?;
+    let mut effect = owner_turn(runtime, || {
+        runtime.owner.capture_peer_effect(
+            runtime.operation,
+            eligibility,
+            shared_owner::PeerEffect::ApprovedPairingGet(Box::new(pending.source.clone())),
+            Some(&observation),
+            runtime.base,
+            runtime.anchor,
+        )
+    })?;
+    owner_turn(runtime, || effect.try_validate(&provider))?;
+    drop(effect);
+    verify_current_pairing(
+        auth,
+        runtime,
+        eligibility,
+        pending.source,
+        response,
+        observation,
+        pending.origin,
+        pending.wall_at_start,
+    )
 }
 #[expect(
     clippy::too_many_arguments,

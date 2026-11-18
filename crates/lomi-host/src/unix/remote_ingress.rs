@@ -167,6 +167,10 @@ const PEER_REFRESH_MARGIN: Duration = Duration::from_secs(3);
 // re-read the pairing on nearly every ingress pass (~150 ms each). Reuse a
 // still-current proof down to 2 s; it never outlives its own freshness.
 const PEER_PROOF_REUSE_MARGIN: Duration = Duration::from_secs(2);
+// Start the next current-pairing GET on a helper thread this long before the
+// cached proof runs out, so its ~0.2 s round trip lands before the reuse
+// margin instead of blocking an ingress pass.
+const PEER_PREFETCH_MARGIN: Duration = Duration::from_millis(2600);
 // A slow established channel may retain only a small number of already
 // authorized messages while Started Git continues to service terminal input.
 // The active encoder is included in both limits.
@@ -657,6 +661,11 @@ struct Connection<'cancel> {
     peer_cutoff: Instant,
     applied_observation: Instant,
     started_git_peer: Option<peer::StartedGitPeerObservation>,
+    /// Current-pairing GET started ahead of the cached proof's reuse margin,
+    /// so ingress passes do not block on it. Verified on the actor or dropped.
+    peer_prefetch: Option<peer::PendingCurrentPairing>,
+    /// After a failed prefetch, leave this proof round to the blocking read.
+    peer_prefetch_after: Option<Instant>,
 
     response: Option<PendingResponse<'cancel>>,
     git_read: Option<PendingGitRead<'cancel>>,
@@ -1354,6 +1363,8 @@ impl<'cancel> Driver<'cancel> {
             peer_cutoff: cutoff,
             applied_observation,
             started_git_peer: None,
+            peer_prefetch: None,
+            peer_prefetch_after: None,
 
             response: None,
             git_read: None,
@@ -3864,12 +3875,35 @@ impl<'cancel> Connection<'cancel> {
                 cancelled.ok_or(peer::PeerError::Invalid)?,
             );
             self.peer = None;
+            self.peer_prefetch = None;
         }
         let maintenance_runtime = Runtime {
             operation: &self.maintenance,
             aborted: &self.maintenance_aborted,
             ..runtime
         };
+        if let Some(response) = self.peer_prefetch.as_ref().and_then(|p| p.poll()) {
+            let pending = self.peer_prefetch.take().ok_or(peer::PeerError::Invalid)?;
+            // Any failure falls back to the blocking read below.
+            match peer::finish_current_pairing(
+                auth,
+                maintenance_runtime,
+                eligibility,
+                pending,
+                response,
+            ) {
+                Ok(fresh)
+                    if self
+                        .peer
+                        .as_ref()
+                        .is_none_or(|cached| cached.fresh_until() < fresh.fresh_until()) =>
+                {
+                    self.peer = Some(fresh);
+                }
+                Ok(_) => {}
+                Err(_) => self.peer_prefetch_after = Some(Instant::now() + PEER_PREFETCH_MARGIN),
+            }
+        }
         let current = current_proof(
             self.peer.take(),
             auth,
@@ -3878,6 +3912,28 @@ impl<'cancel> Connection<'cancel> {
             &self.source,
             self.peer_cutoff,
         )?;
+        #[cfg(not(test))]
+        if self.peer_prefetch.is_none()
+            && self
+                .peer_prefetch_after
+                .is_none_or(|after| Instant::now() >= after)
+            && Instant::now()
+                .checked_add(PEER_PREFETCH_MARGIN)
+                .is_some_and(|prefetch_by| current.fresh_until() <= prefetch_by)
+        {
+            self.peer_prefetch = peer::Worker::default()
+                .start_current_pairing(
+                    auth,
+                    maintenance_runtime,
+                    eligibility,
+                    self.source.clone(),
+                    self.peer_cutoff,
+                )
+                .ok();
+            if self.peer_prefetch.is_none() {
+                self.peer_prefetch_after = Some(Instant::now() + PEER_PREFETCH_MARGIN);
+            }
+        }
         self.assembler
             .expire(u64::try_from(self.origin.elapsed().as_millis()).map_err(invalid_at!())?)
             .map_err(invalid_at!())?;
@@ -5882,6 +5938,8 @@ mod terminal_renew_fast_path_tests {
                 + Duration::from_millis(eligibility.heartbeat.freshness_ms),
             applied_observation: Instant::now(),
             started_git_peer: None,
+            peer_prefetch: None,
+            peer_prefetch_after: None,
             response: None,
             git_read: None,
             git_mutation: None,
