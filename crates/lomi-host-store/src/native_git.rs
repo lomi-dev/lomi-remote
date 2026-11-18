@@ -234,7 +234,9 @@ impl HostStore {
             tx.commit()?;
             return Err(StoreError::ResourceExhausted);
         }
-        if has_active_native_writer(&tx)? || remote_file_git_effect_pending(&tx)? {
+        if has_active_native_writer(&tx)?
+            || remote_file_git_effect_pending(&tx, &self.unknown_effects)?
+        {
             tx.commit()?;
             return Err(StoreError::NativeWriterBusy);
         }

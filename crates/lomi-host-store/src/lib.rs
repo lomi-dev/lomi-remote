@@ -755,6 +755,8 @@ pub struct HostStore {
     limits: Limits,
     authorization_sealed: std::cell::Cell<bool>,
     #[cfg(any(unix, windows))]
+    unknown_effects: UnknownEffects,
+    #[cfg(any(unix, windows))]
     native_clock_anchor: Instant,
     #[cfg(any(unix, windows))]
     native_clock_anchor_ms: u64,
@@ -1617,6 +1619,8 @@ PRAGMA user_version=6;",
             generation,
             limits,
             authorization_sealed: std::cell::Cell::new(false),
+            #[cfg(any(unix, windows))]
+            unknown_effects: UnknownEffects::default(),
             #[cfg(any(unix, windows))]
             native_clock_anchor,
             #[cfg(any(unix, windows))]
@@ -2795,7 +2799,9 @@ PRAGMA user_version=6;",
             tx.commit()?;
             return Err(StoreError::ResourceExhausted);
         }
-        if has_active_native_writer(&tx)? || remote_file_git_effect_pending(&tx)? {
+        if has_active_native_writer(&tx)?
+            || remote_file_git_effect_pending(&tx, &self.unknown_effects)?
+        {
             tx.commit()?;
             return Err(StoreError::NativeWriterBusy);
         }
@@ -3391,7 +3397,9 @@ PRAGMA user_version=6;",
             tx.commit()?;
             return Err(StoreError::ResourceExhausted);
         }
-        if has_active_native_writer(&tx)? || remote_file_git_effect_pending(&tx)? {
+        if has_active_native_writer(&tx)?
+            || remote_file_git_effect_pending(&tx, &self.unknown_effects)?
+        {
             tx.commit()?;
             return Err(StoreError::NativeWriterBusy);
         }
@@ -3556,7 +3564,9 @@ PRAGMA user_version=6;",
             tx.commit()?;
             return Err(StoreError::Fenced);
         }
-        if has_active_native_writer(&tx)? || remote_file_git_effect_pending(&tx)? {
+        if has_active_native_writer(&tx)?
+            || remote_file_git_effect_pending(&tx, &self.unknown_effects)?
+        {
             tx.commit()?;
             return Err(StoreError::Fenced);
         }
@@ -4290,6 +4300,8 @@ PRAGMA user_version=6;",
             projection,
         )?;
         tx.commit()?;
+        #[cfg(any(unix, windows))]
+        self.unknown_effects.note(&permit.binding, &receipt);
         Ok(receipt)
     }
     /// Foreign actor/workspace/method/hash bindings are indistinguishable from
@@ -5146,11 +5158,55 @@ fn is_remote_file_git_write(method: Method) -> bool {
     )
 }
 
-/// Running receipts remain exclusive until their effect is finalized. An
-/// OutcomeUnknown write also blocks acquisition: receipt uncertainty is not a
-/// proof that a subprocess or external side effect stopped.
+/// Remote file and Git effects reach the workspace only from Host-process
+/// threads bounded by their request deadline (TimeoutMs caps it at 120 s).
 #[cfg(any(unix, windows))]
-fn remote_file_git_effect_pending(db: &Connection) -> Result<bool> {
+const UNKNOWN_EFFECT_WINDOW: Duration = Duration::from_secs(300);
+
+/// OutcomeUnknown receipts finalized by this Store's runtime, with the time
+/// they were written. Receipt uncertainty is not proof that the effect has
+/// stopped, so such a receipt keeps blocking until its bounded window ends. A
+/// receipt from an earlier runtime cannot have a live effect: its process,
+/// and every thread that could publish for it, is gone.
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+pub(crate) struct UnknownEffects(
+    std::cell::RefCell<std::collections::HashMap<[String; 3], Instant>>,
+);
+#[cfg(any(unix, windows))]
+impl UnknownEffects {
+    pub(crate) fn note(&self, binding: &OperationBinding, receipt: &OperationReceipt) {
+        if receipt.state() == OperationState::OutcomeUnknown {
+            self.0
+                .borrow_mut()
+                .insert(op_params(binding), Instant::now());
+        }
+    }
+    /// Running always blocks; OutcomeUnknown only while it may still be live.
+    pub(crate) fn may_be_live(&self, receipt: &OperationReceipt) -> Result<bool> {
+        match receipt.state() {
+            OperationState::Running => Ok(true),
+            OperationState::OutcomeUnknown => {
+                let key = op_params(&binding_from_receipt(receipt)?);
+                let mut live = self.0.borrow_mut();
+                match live.get(&key) {
+                    Some(written) if written.elapsed() < UNKNOWN_EFFECT_WINDOW => Ok(true),
+                    Some(_) => {
+                        live.remove(&key);
+                        Ok(false)
+                    }
+                    None => Ok(false),
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+/// Running receipts remain exclusive until their effect is finalized; an
+/// OutcomeUnknown one while its effect may still be live (see UnknownEffects).
+#[cfg(any(unix, windows))]
+fn remote_file_git_effect_pending(db: &Connection, unknown: &UnknownEffects) -> Result<bool> {
     let rows = {
         let mut query = db.prepare(
             "SELECT receipt FROM operations WHERE method IN('files.create','files.mkdir','files.rename','files.remove','git.stage','git.unstage','git.commit','git.fetch','git.push','git.pull')",
@@ -5161,10 +5217,7 @@ fn remote_file_git_effect_pending(db: &Connection) -> Result<bool> {
     };
     for row in rows {
         let receipt: OperationReceipt = decode(&row)?;
-        if matches!(
-            receipt.state(),
-            OperationState::Running | OperationState::OutcomeUnknown
-        ) {
+        if unknown.may_be_live(&receipt)? {
             return Ok(true);
         }
     }
@@ -6857,5 +6910,66 @@ mod schema_16_migration_tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read schema-15 backup version");
         assert_eq!(backup_version, 15);
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod unknown_effect_tests {
+    use super::*;
+    use lomi_remote_protocol::{
+        Capability, CapabilitySet, ConsumerAuthorizationId, StoredOperationRights,
+    };
+
+    fn receipt(state: OperationState, id: u8) -> (OperationBinding, OperationReceipt) {
+        let rights = StoredOperationRights::new(
+            OperationId::from_bytes([id; 16]).unwrap(),
+            ConsumerAuthorizationId::from_bytes([5; 16]).unwrap(),
+            WorkspaceId::from_bytes([7; 16]).unwrap(),
+            Method::FilesMkdir,
+            CapabilitySet::try_from(vec![
+                Capability::WorkspaceRead,
+                Capability::FilesRead,
+                Capability::FilesWrite,
+            ])
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        let hash: OperationParameterHash = "a".repeat(64).try_into().unwrap();
+        let effect = if state == OperationState::OutcomeUnknown {
+            Effect::Unknown
+        } else {
+            Effect::None
+        };
+        let receipt =
+            OperationReceipt::new(&rights, hash.clone(), state, false, effect, None).unwrap();
+        (
+            OperationBinding {
+                rights,
+                parameter_hash: hash,
+            },
+            receipt,
+        )
+    }
+
+    #[test]
+    fn only_this_runtime_unknown_effects_block_within_their_window() {
+        let unknown = UnknownEffects::default();
+        let (_, running) = receipt(OperationState::Running, 1);
+        assert!(unknown.may_be_live(&running).unwrap());
+
+        // Earlier runtime: nothing in this process can still publish for it.
+        let (binding, earlier) = receipt(OperationState::OutcomeUnknown, 2);
+        assert!(!unknown.may_be_live(&earlier).unwrap());
+
+        unknown.note(&binding, &earlier);
+        assert!(unknown.may_be_live(&earlier).unwrap());
+
+        let expired = Instant::now().checked_sub(UNKNOWN_EFFECT_WINDOW + Duration::from_secs(1));
+        if let Some(expired) = expired {
+            unknown.0.borrow_mut().insert(op_params(&binding), expired);
+            assert!(!unknown.may_be_live(&earlier).unwrap());
+            assert!(unknown.0.borrow().is_empty());
+        }
     }
 }

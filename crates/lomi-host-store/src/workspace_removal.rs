@@ -272,7 +272,12 @@ impl HostStore {
         {
             return Err(StoreError::Fenced);
         }
-        ensure_removal_quiescent(&tx, workspace_id, &project.local_root)?;
+        ensure_removal_quiescent(
+            &tx,
+            workspace_id,
+            &project.local_root,
+            &self.unknown_effects,
+        )?;
 
         let source_context = project.state.context.clone();
         let source_revision = project.state.domain_revision;
@@ -482,6 +487,7 @@ fn ensure_removal_quiescent(
     tx: &Transaction<'_>,
     workspace_id: WorkspaceId,
     local_root: &Path,
+    unknown: &super::UnknownEffects,
 ) -> Result<()> {
     let pending_operations = {
         let mut query = tx.prepare("SELECT reserved,receipt FROM operations WHERE workspace=?1")?;
@@ -493,12 +499,7 @@ fn ensure_removal_quiescent(
     };
     for (reserved, wire) in pending_operations {
         let receipt: OperationReceipt = super::decode(&wire)?;
-        if reserved > 0
-            || matches!(
-                receipt.state(),
-                OperationState::Running | OperationState::OutcomeUnknown
-            )
-        {
+        if reserved > 0 || unknown.may_be_live(&receipt)? {
             return Err(StoreError::Busy);
         }
     }

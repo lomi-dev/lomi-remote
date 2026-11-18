@@ -1363,6 +1363,7 @@ impl HostStore {
             now,
         )?;
         tx.commit()?;
+        self.unknown_effects.note(&permit.binding, &receipt);
         Ok(receipt)
     }
 
