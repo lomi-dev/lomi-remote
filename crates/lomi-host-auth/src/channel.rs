@@ -43,7 +43,12 @@ impl<S: SecretStorage + ?Sized> HostAuth<'_, S> {
     // watermark: Unix-second projections may straddle a wall-clock second.
     fn crypto_ready_at(&self, now: u64) -> Result<(&Record, &SignedBundle, &Credentials, u64)> {
         let record = self.current()?;
-        validate(record, &self.config)?;
+        // Re-deriving and re-verifying the identity is the actor's hottest
+        // path; the result only changes when commit() replaces the record.
+        if !self.record_validated.get() {
+            validate(record, &self.config)?;
+            self.record_validated.set(true);
+        }
         let State::Ready {
             signed,
             credentials,

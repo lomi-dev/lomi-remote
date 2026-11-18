@@ -389,6 +389,9 @@ pub struct HostAuth<'a, S: SecretStorage + ?Sized> {
     storage: &'a mut S,
     config: Config,
     record: Option<Record>,
+    /// validate(record, config) already passed for the current record. The
+    /// config is fixed after open and only commit() replaces the record.
+    record_validated: Cell<bool>,
     sealed: bool,
     observed: Cell<u64>,
     crypto_clock: Cell<(std::time::Duration, std::time::Instant)>,
@@ -421,6 +424,7 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
             storage,
             config,
             record,
+            record_validated: Cell::new(false),
             sealed: false,
             observed: Cell::new(now),
             crypto_clock: Cell::new((
@@ -506,11 +510,13 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
         match self.storage.replace(&bundle) {
             Ok(()) => {
                 self.record = Some(record);
+                self.record_validated.set(false);
                 Ok(())
             }
             Err(secrets::Error::CommitUncertain) => {
                 self.sealed = true;
                 self.record = None;
+                self.record_validated.set(false);
                 Err(Error::Storage(secrets::Error::CommitUncertain))
             }
             Err(e) => Err(Error::Storage(e)),
