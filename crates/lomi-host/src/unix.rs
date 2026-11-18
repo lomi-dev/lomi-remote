@@ -211,6 +211,8 @@ impl Coordinator {
         stopping: Arc<AtomicBool>,
         terminals: TerminalService,
     ) -> Result<Self, StoreError> {
+        let git_reads = remote_git::Reads::default();
+        let git_mutations = remote_git_mutations::Mutations::new(git_reads.roots());
         Ok(Self {
             profile: None,
             started: Instant::now(),
@@ -225,8 +227,8 @@ impl Coordinator {
             stopping,
             workspace_locks: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             files: remote_files::Roots::default(),
-            git_reads: remote_git::Reads::default(),
-            git_mutations: remote_git_mutations::Mutations::default(),
+            git_reads,
+            git_mutations,
             native_editor: Mutex::new(None),
             native_git: Mutex::new(None),
             #[cfg(target_os = "macos")]
@@ -2178,10 +2180,6 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
     coordinator.files.protect_host(profile);
     coordinator
         .git_reads
-        .protect_host(profile)
-        .map_err(|_| HostError::Unavailable)?;
-    coordinator
-        .git_mutations
         .protect_host(profile)
         .map_err(|_| HostError::Unavailable)?;
     let (auth_handle, auth_worker) = start_auth(

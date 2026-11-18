@@ -32,13 +32,17 @@ struct RootSlot {
 }
 
 #[derive(Default)]
-struct Roots {
+pub(super) struct Roots {
     slots: Mutex<BTreeMap<WorkspaceId, RootSlot>>,
     protected: Mutex<Vec<PathBuf>>,
 }
 
 impl Roots {
-    fn get(&self, context: &WorkspaceContext, path: &Path) -> Result<Arc<GitService>, RemoteError> {
+    pub(super) fn get(
+        &self,
+        context: &WorkspaceContext,
+        path: &Path,
+    ) -> Result<Arc<GitService>, RemoteError> {
         let mut slots = self.slots.lock().map_err(|_| fault(ErrorCode::HostBusy))?;
         if let Some(slot) = slots.get(&context.workspace_id)
             && slot.context == *context
@@ -80,6 +84,10 @@ pub(super) struct Reads {
 }
 
 impl Reads {
+    pub(super) fn roots(&self) -> Arc<Roots> {
+        self.roots.clone()
+    }
+
     /// Called at host initialization, before any remote job can be submitted.
     pub(super) fn protect_host(&self, path: &Path) -> Result<(), RemoteError> {
         self.roots

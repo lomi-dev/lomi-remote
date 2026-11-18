@@ -10,12 +10,11 @@ use lomi_git::{
     PreparedGitPush, PublishedGitMutation, RequestControl,
 };
 use lomi_remote_protocol::{
-    Effect, ErrorCode, ErrorDetails, RemoteError, WorkspaceContext, WorkspaceId,
-    ipc::LocalAuthConfiguration, rpc::RpcCall,
+    Effect, ErrorCode, ErrorDetails, RemoteError, WorkspaceContext, ipc::LocalAuthConfiguration,
+    rpc::RpcCall,
 };
 use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -27,59 +26,16 @@ use std::{
 };
 
 const MAX_WORKERS: usize = 2;
-const MAX_ROOTS: usize = 200;
-
-struct RootSlot {
-    context: WorkspaceContext,
-    path: PathBuf,
-    service: Arc<GitService>,
-}
-
-#[derive(Default)]
-struct Roots {
-    slots: Mutex<BTreeMap<WorkspaceId, RootSlot>>,
-    protected: Mutex<Vec<PathBuf>>,
-}
-
-impl Roots {
-    fn get(&self, context: &WorkspaceContext, path: &Path) -> Result<Arc<GitService>, RemoteError> {
-        let mut slots = self.slots.lock().map_err(|_| fault(ErrorCode::HostBusy))?;
-        if let Some(slot) = slots.get(&context.workspace_id)
-            && slot.context == *context
-            && slot.path == path
-        {
-            return Ok(slot.service.clone());
-        }
-        if slots.len() >= MAX_ROOTS && !slots.contains_key(&context.workspace_id) {
-            return Err(fault(ErrorCode::ResourceExhausted));
-        }
-        let protected = self
-            .protected
-            .lock()
-            .map_err(|_| fault(ErrorCode::HostBusy))?;
-        let paths: Vec<_> = protected.iter().map(PathBuf::as_path).collect();
-        let service = Arc::new(GitService::open(path, &paths, context.clone()).map_err(map_error)?);
-        slots.insert(
-            context.workspace_id,
-            RootSlot {
-                context: context.clone(),
-                path: path.to_owned(),
-                service: service.clone(),
-            },
-        );
-        Ok(service)
-    }
-}
-
 struct Worker {
     cancellation: CancellationToken,
     handle: JoinHandle<()>,
 }
 
 /// One bounded mutation-preparation executor per host.
-#[derive(Default)]
 pub(super) struct Mutations {
-    roots: Arc<Roots>,
+    // Shared with remote Git reads: status entry IDs are minted per
+    // GitService, so a mutation must resolve them in the same service.
+    roots: Arc<super::remote_git::Roots>,
     workers: Mutex<Vec<Worker>>,
 }
 
@@ -101,13 +57,11 @@ pub(super) fn credentials_provider(
 }
 
 impl Mutations {
-    pub(super) fn protect_host(&self, path: &Path) -> Result<(), RemoteError> {
-        self.roots
-            .protected
-            .lock()
-            .map_err(|_| fault(ErrorCode::HostBusy))?
-            .push(path.to_owned());
-        Ok(())
+    pub(super) fn new(roots: Arc<super::remote_git::Roots>) -> Self {
+        Self {
+            roots,
+            workers: Mutex::new(Vec::new()),
+        }
     }
 
     /// Start private Git preparation outside the ingress/owner actor. The path
@@ -569,5 +523,17 @@ impl GitCredentialProvider for MissingCredentials {
         _: &lomi_git::RemoteCredentialBinding,
     ) -> Option<lomi_git::GitCredentials> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutations_resolve_entries_in_the_read_services() {
+        let reads = super::super::remote_git::Reads::default();
+        let mutations = Mutations::new(reads.roots());
+        assert!(Arc::ptr_eq(&reads.roots(), &mutations.roots));
     }
 }
