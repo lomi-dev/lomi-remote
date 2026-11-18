@@ -3346,6 +3346,13 @@ impl<'cancel> Connection<'cancel> {
                             &pending.context,
                         )
                     })?;
+                    // Preparation failed before durable start, so the gate
+                    // ticket was never consumed. Retire it here; otherwise the
+                    // next request on this channel is refused as Busy.
+                    if let Some(queued) = pending.queued.take() {
+                        turn.finish_unsupported_after_wait(crypto, &queued)
+                            .map_err(invalid_at!())?;
+                    }
                     turn.check_response(crypto, &pending.request)
                         .map_err(invalid_at!())?;
                     drop(turn);
