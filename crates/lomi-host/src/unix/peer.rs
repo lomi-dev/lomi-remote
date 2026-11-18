@@ -219,6 +219,7 @@ struct InFlightPoll {
     observation: std::sync::Arc<Observation>,
     io: public_configuration::WorkerPublicIoIdentity,
 }
+const EXPIRED_GRANT_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Default)]
 pub(super) struct Worker {
     transport: Option<std::sync::Arc<DataTransport>>,
@@ -232,6 +233,10 @@ pub(super) struct Worker {
     cursor: Option<String>,
     clock: Option<PolicyClock>,
     capacity_blocked: bool,
+    /// Next time to look for expired grants when none was found. Without
+    /// eager cleanup every read parsed hundreds of dead grants per turn and a
+    /// new pairing failed once the 256-grant cap filled.
+    cleanup_after: Option<Instant>,
     cleanup_cursor: usize,
     retire_cursor: usize,
     turns_since_poll: u32,
@@ -655,8 +660,15 @@ impl Worker {
         if self.retire_expired_intent(auth, runtime, eligibility, pending, now)? {
             return Ok(true);
         }
-        if self.capacity_blocked && self.cleanup_expired(auth, runtime, eligibility, now)? {
-            return Ok(true);
+        if self.capacity_blocked
+            || self
+                .cleanup_after
+                .is_none_or(|after| Instant::now() >= after)
+        {
+            if self.cleanup_expired(auth, runtime, eligibility, now)? {
+                return Ok(true);
+            }
+            self.cleanup_after = Some(Instant::now() + EXPIRED_GRANT_SCAN_INTERVAL);
         }
         let start = self
             .cursor
