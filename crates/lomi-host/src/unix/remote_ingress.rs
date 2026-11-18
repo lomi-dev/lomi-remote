@@ -148,6 +148,7 @@ pub(super) use registry::Registry;
 /// it often so an RPC is not held for a whole idle wait before intake and
 /// again before its result is sent.
 pub(super) const ESTABLISHED_ACTOR_WAIT: Duration = Duration::from_millis(20);
+pub(super) const ESTABLISHED_IDLE_ACTOR_WAIT: Duration = Duration::from_millis(50);
 
 /// Keep the ordinary idle wait unless a successful stage left work for the next pass.
 pub(super) const fn actor_wait_duration(immediate_pass: bool) -> Duration {
@@ -3911,6 +3912,34 @@ impl<'cancel> Connection<'cancel> {
                 Err(_) => self.peer_prefetch_after = Some(Instant::now() + PEER_PREFETCH_MARGIN),
             }
         }
+        // Without a reusable proof, fetch one on a helper thread and yield this
+        // turn instead of blocking every other connection for a pairing GET.
+        // After a failed background read, fall back to the blocking read so
+        // its error still reaches the caller.
+        #[cfg(not(test))]
+        if !proof_reusable(self.peer.as_ref(), auth, maintenance_runtime, eligibility)?
+            && self
+                .peer_prefetch_after
+                .is_none_or(|after| Instant::now() >= after)
+        {
+            if self.peer_prefetch.is_none() {
+                self.peer_prefetch = peer::Worker::default()
+                    .start_current_pairing(
+                        auth,
+                        maintenance_runtime,
+                        eligibility,
+                        self.source.clone(),
+                        self.peer_cutoff,
+                    )
+                    .ok();
+                if self.peer_prefetch.is_none() {
+                    self.peer_prefetch_after = Some(Instant::now() + PEER_PREFETCH_MARGIN);
+                }
+            }
+            if self.peer_prefetch.is_some() {
+                return Ok(false);
+            }
+        }
         let current = current_proof(
             self.peer.take(),
             auth,
@@ -4240,11 +4269,30 @@ impl<'cancel> Connection<'cancel> {
                         | RpcCall::TerminalResize(_)
                         | RpcCall::TerminalAck(_)
                 );
+            // Read-only calls disclose what the maintenance proof already
+            // authorizes for terminal output, so they reuse it the same way
+            // instead of paying a blocking pairing read. Effects (and Claim)
+            // keep a fresh proof under their own admission.
+            let adopt_maintenance = terminal_control
+                || matches!(
+                    &request.call,
+                    RpcCall::WorkspaceGet(_)
+                        | RpcCall::WorkspaceCapabilities(_)
+                        | RpcCall::FilesList(_)
+                        | RpcCall::FilesStat(_)
+                        | RpcCall::FilesRead(_)
+                        | RpcCall::FilesSearchNames(_)
+                        | RpcCall::GitRepositories(_)
+                        | RpcCall::GitStatus(_)
+                        | RpcCall::GitDiff(_)
+                        | RpcCall::GitLog(_)
+                        | RpcCall::GitShow(_)
+                );
             let request_deadline = received
                 .checked_add(Duration::from_millis(request.timeout_ms.get()))
                 .ok_or(peer::PeerError::Invalid)?
                 .min(worker_deadline);
-            let (mut operation, aborted, cached_peer) = if terminal_control {
+            let (mut operation, aborted, cached_peer) = if adopt_maintenance {
                 let replacement_maintenance = super::OwnerOperation::new(
                     worker_deadline,
                     cancelled.ok_or(peer::PeerError::Invalid)?,
@@ -4269,7 +4317,7 @@ impl<'cancel> Connection<'cancel> {
                     None,
                 )
             };
-            if terminal_control {
+            if adopt_maintenance {
                 operation.cap_deadline(request_deadline);
             }
             let request_runtime = Runtime {
@@ -4277,7 +4325,7 @@ impl<'cancel> Connection<'cancel> {
                 aborted: &aborted,
                 ..runtime
             };
-            let (current, evidence) = if terminal_control {
+            let (current, evidence) = if adopt_maintenance {
                 let evidence = request_runtime.remote_worker_evidence(auth, eligibility)?;
                 let cached = if terminal_renew {
                     terminal_renew_cached_proof(
@@ -4811,6 +4859,8 @@ impl<'cancel> Connection<'cancel> {
                     | RpcCall::TerminalClaim(_)
                     | RpcCall::TerminalInput(_)
                     | RpcCall::TerminalResize(_)
+                    | RpcCall::WorkspaceGet(_)
+                    | RpcCall::WorkspaceCapabilities(_)
             );
             if terminal_control_response && frame_count(bytes.len()) == 1 {
                 self.encoder
@@ -4862,7 +4912,7 @@ impl<'cancel> Connection<'cancel> {
                         .send_binary(&frame, send_deadline, &check)
                         .map_err(invalid_at!())?;
                 }
-                if terminal_control {
+                if adopt_maintenance {
                     // Return the exact original admission (and capped deadline)
                     // with its proof; every later use rechecks both.
                     drop(evidence);
@@ -4895,6 +4945,23 @@ impl<'cancel> Connection<'cancel> {
         }
         Ok(advanced)
     }
+}
+
+#[cfg(not(test))]
+fn proof_reusable(
+    cached: Option<&peer::VerifiedCurrentPeer>,
+    auth: &HostAuth<'_, dyn SecretStorage + '_>,
+    runtime: RuntimeWithOperation<'_, '_>,
+    eligibility: &PeerEligibility,
+) -> peer::ResultPeer<bool> {
+    let Some(proof) = cached else {
+        return Ok(false);
+    };
+    let evidence = runtime.remote_worker_evidence(auth, eligibility)?;
+    Ok(proof.current(&evidence)
+        && Instant::now()
+            .checked_add(PEER_PROOF_REUSE_MARGIN)
+            .is_some_and(|refresh_by| refresh_by < proof.fresh_until()))
 }
 
 fn current_proof(

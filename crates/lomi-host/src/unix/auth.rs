@@ -3336,6 +3336,7 @@ mod publication_barrier_tests {
 // runtime read, heartbeat and pairing proof before each RPC (~0.6 s). Between
 // rotations the unit behaves as a retained one: heartbeats keep their cadence,
 // proofs still expire at their own freshness, and no deadline is extended.
+const ESTABLISHED_IDLE_ROTATIONS: u32 = 5;
 const WORKER_UNIT_ROTATION_AGE: Duration = Duration::from_secs(15);
 const WORKER_UNIT_ROTATION_REMAINING: Duration = Duration::from_secs(30);
 
@@ -3486,8 +3487,14 @@ fn run_with_apis_inner(
             || peer.has_inflight_poll()
         {
             // Also pick up an in-flight heartbeat result and handshake/ready
-            // frames of a channel being set up promptly.
-            wait = wait.min(remote_ingress::ESTABLISHED_ACTOR_WAIT);
+            // frames of a channel being set up promptly. A quiet session backs
+            // off so idle open terminals do not keep a core busy; any work
+            // returns to the short wait on the next pass.
+            wait = wait.min(if ingress.idle_rotations() > ESTABLISHED_IDLE_ROTATIONS {
+                remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT
+            } else {
+                remote_ingress::ESTABLISHED_ACTOR_WAIT
+            });
         }
         match receiver.recv_timeout(wait) {
             Ok(Command::Wake(id)) => {

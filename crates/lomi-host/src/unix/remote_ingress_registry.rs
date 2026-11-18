@@ -112,6 +112,14 @@ pub(in crate::unix::auth) struct Registry<'cancel> {
     round_robin: VecDeque<ChannelId>,
     idle_yield_pending: bool,
     ordinary_yield_pending: bool,
+    /// Channels still to visit in the current rotation. advance() serves one
+    /// channel per actor pass; without this every other channel also waited
+    /// out the idle actor sleep, so N channels each got a turn only every N
+    /// sleeps and handshakes timed out once several terminals were open.
+    rotation_remaining: usize,
+    rotation_progress: bool,
+    /// Consecutive full rotations in which no channel advanced.
+    idle_rotations: u32,
 }
 
 impl<'cancel> Registry<'cancel> {
@@ -143,6 +151,9 @@ impl<'cancel> Registry<'cancel> {
             round_robin: VecDeque::new(),
             idle_yield_pending: false,
             ordinary_yield_pending: false,
+            rotation_remaining: 0,
+            rotation_progress: false,
+            idle_rotations: 0,
         }
     }
 
@@ -237,6 +248,10 @@ impl<'cancel> Registry<'cancel> {
     /// must not hold back discovery of other channels.
     pub(in crate::unix::auth) fn has_local_setup_work(&self) -> bool {
         self.entries.values().any(Driver::has_local_setup_work)
+    }
+
+    pub(in crate::unix::auth) fn idle_rotations(&self) -> u32 {
+        self.idle_rotations
     }
 
     pub(in crate::unix::auth) fn has_active_git_writer(&self) -> bool {
@@ -538,6 +553,10 @@ impl<'cancel> Registry<'cancel> {
         let Some(channel_id) = self.next_registry_channel(due) else {
             return false;
         };
+        if self.rotation_remaining == 0 {
+            self.rotation_remaining = self.entries.len();
+        }
+        self.rotation_remaining = self.rotation_remaining.saturating_sub(1);
 
         let output_eligibility_live = eligibility.is_some_and(|eligibility| {
             output_eligibility_is_live(runtime, eligibility, Instant::now())
@@ -647,6 +666,14 @@ impl<'cancel> Registry<'cancel> {
             staged_remaining_after = after_remaining;
         }
 
+        self.rotation_progress |= first_advanced;
+        if self.rotation_remaining == 0 {
+            self.idle_rotations = if std::mem::take(&mut self.rotation_progress) {
+                0
+            } else {
+                self.idle_rotations.saturating_add(1)
+            };
+        }
         let staged_settled = staged_before
             && !self
                 .entries
@@ -659,6 +686,7 @@ impl<'cancel> Registry<'cancel> {
         self.sync_started_git_terminal_continuation();
         self.publish_client_observation();
         self.has_immediate_output(runtime, eligibility)
+            || (self.rotation_remaining > 0 && self.entries.len() > 1)
     }
 
     /// Global authorization loss closes and removes every channel entry.
