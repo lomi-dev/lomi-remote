@@ -57,6 +57,9 @@ const INPUT_FIELD_ACTION: usize = usize::MAX;
 /// setup is resumed.
 #[derive(Default)]
 pub struct SetupView {
+    // Kept open across status polls: re-entering the alternate screen every
+    // poll flickered and let keys echo into the shell between polls.
+    waiting: Option<TerminalSession>,
     login_reveal_handled: bool,
     login_reveal_authorized: bool,
     host_name_override: Option<LocalHostName>,
@@ -637,10 +640,18 @@ impl SetupView {
     }
 }
 
+impl SetupView {
+    fn take_waiting(&mut self) -> Result<TerminalSession, setup::SetupError> {
+        match self.waiting.take() {
+            Some(terminal) => Ok(terminal),
+            None => TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable),
+        }
+    }
+}
+
 impl setup::SetupInteraction for SetupView {
     fn wait_for_login_update(&mut self) -> Result<bool, setup::SetupError> {
-        let mut terminal =
-            TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
+        let mut terminal = self.take_waiting()?;
         let controls = Controls::default();
         let body = "The Host is waiting for approval in the device login flow. Complete verification in your browser or on a phone. Press v to request a one-time display of the verification URL and code, r or Enter to check status now, or Esc to stop waiting.";
         let primary = [
@@ -666,6 +677,7 @@ impl setup::SetupInteraction for SetupView {
                 .read_event_until(&controls, deadline)
                 .map_err(|_| setup::SetupError::InteractionUnavailable)?
             else {
+                self.waiting = Some(terminal);
                 return Ok(true);
             };
             let key = match event {
@@ -708,8 +720,7 @@ impl setup::SetupInteraction for SetupView {
     }
 
     fn wait_for_publication_update(&mut self) -> Result<bool, setup::SetupError> {
-        let mut terminal =
-            TerminalSession::enter().map_err(|_| setup::SetupError::InteractionUnavailable)?;
+        let mut terminal = self.take_waiting()?;
         let controls = Controls::default();
         let body = "The Host has not yet confirmed the current workspace publication. Wait for the Remote service to finish, then check the Host's durable publication status again. Waiting does not resend a share or unshare request. Press r or Enter to check now, or Esc to leave setup pending.";
         let primary = [("enter", "Check now"), ("r", "Retry"), ("tab", "Next")];
@@ -731,6 +742,7 @@ impl setup::SetupInteraction for SetupView {
                 .read_event_until(&controls, deadline)
                 .map_err(|_| setup::SetupError::InteractionUnavailable)?
             else {
+                self.waiting = Some(terminal);
                 return Ok(true);
             };
             let key = match event {
@@ -774,6 +786,7 @@ impl setup::SetupInteraction for SetupView {
         progress: Option<&setup::SetupProgress>,
         shells: &[setup::ShellCandidate],
     ) -> Result<setup::SetupChoices, setup::SetupError> {
+        self.waiting = None;
         let host_name = self.collect_host_name(preflight, progress)?;
         let auth_configuration = self.collect_auth_configuration(progress)?;
         let (workspace_name, workspace_root, create_missing_workspace) =
@@ -817,6 +830,7 @@ impl setup::SetupInteraction for SetupView {
     }
 
     fn confirm_review(&mut self, review: &setup::SetupReview) -> Result<bool, setup::SetupError> {
+        self.waiting = None;
         let mode = start_mode_label(review.mode);
         let account = match &review.account {
             setup::SetupAccount::Unix { uid, gid } => format!(
@@ -879,6 +893,7 @@ impl setup::SetupInteraction for SetupView {
     }
 
     fn confirm_authorization_context_change(&mut self) -> Result<bool, setup::SetupError> {
+        self.waiting = None;
         confirm(
             "Authorization context changed",
             "The Host now reports a different authorization generation than this setup journal. Continue only if you recognize the currently authorized account. The workspace will be checked again before any share change.",
@@ -911,6 +926,7 @@ impl setup::SetupInteraction for SetupView {
         &mut self,
         presentation: &lomi_remote_protocol::ipc::LocalLoginPresentation,
     ) {
+        self.waiting = None;
         self.login_reveal_authorized = false;
         self.login_reveal_handled = true;
         if let Ok(mut terminal) = TerminalSession::enter() {
@@ -929,6 +945,7 @@ impl setup::SetupInteraction for SetupView {
         workspace_name: &LocalProjectName,
         workspace_id: WorkspaceId,
     ) -> Result<bool, setup::SetupError> {
+        self.waiting = None;
         confirm(
             "Confirm a new share request",
             &format!(

@@ -145,7 +145,9 @@ impl SetupHost for LocalSetupHost {
             identity_pending_recovery,
             suggested_host_name: existing_host_name
                 .unwrap_or_else(|| lomi_host::suggested_host_display_name(existing_host_id)),
-            current_directory: std::env::current_dir().map_err(|_| SetupError::InvalidOptions)?,
+            // Under `sudo -u ACCOUNT` the caller's directory is often unreadable;
+            // then there is no default workspace and the user enters one.
+            current_directory: std::env::current_dir().unwrap_or_default(),
             release_version: env!("CARGO_PKG_VERSION").to_owned(),
             network,
             interactive_terminal: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
