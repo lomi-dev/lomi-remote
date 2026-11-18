@@ -245,9 +245,10 @@ pub(super) struct Worker {
     turns_since_poll: u32,
     prefer_recovery: bool,
     capacity_blocked: bool,
-    // Each admission adds an acknowledged record; retire one expired record on
-    // a later idle turn so the store stays below its cap instead of failing
-    // the next admission (ResourceExhausted, then a backoff) every time.
+    // Each admission adds an acknowledged record that expires within ~30 s.
+    // Retire expired ones on later idle turns until none is left: every peer
+    // effect reads all of them (~40 ms at the 256-record cap), and at the cap
+    // the next admission fails (ResourceExhausted, then a backoff).
     cleanup_due: bool,
     scheduled_item_consumed: bool,
     cached_first_due: bool,
@@ -363,6 +364,8 @@ impl Worker {
         self.scheduled_item_consumed = false;
         if self.scope.as_ref() != Some(&eligibility.binding.scope) {
             self.scope = Some(eligibility.binding.scope.clone());
+            // Records left by an earlier run may already have expired.
+            self.cleanup_due = true;
             self.cache.clear();
             self.active = None;
             self.pending_handoff = None;
@@ -1033,6 +1036,8 @@ impl Worker {
         if (self.capacity_blocked || std::mem::take(&mut self.cleanup_due))
             && self.cleanup_expired(auth, runtime, eligibility, now)?
         {
+            // Keep going, one record per idle turn, until none has expired.
+            self.cleanup_due = true;
             return Ok(true);
         }
         let start = self
