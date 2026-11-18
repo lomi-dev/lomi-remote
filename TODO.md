@@ -1,6 +1,6 @@
 # Lomi Remote — pozostałe prace
 
-Stan przekazania: 2026-11-17 (wieczór). Kod jest zapisany jako praca w toku.
+Stan przekazania: 2026-11-18. Kod jest zapisany jako praca w toku.
 **Pełny test CLI i przeglądarki nie jest zakończony. Publiczny release CLI
 pozostaje wstrzymany.**
 
@@ -60,13 +60,25 @@ pozostaje wstrzymany.**
 - Opóźnienie sieci: relay i API idą przez Cloudflare do odległego originu.
   Jedno RPC przez relay kosztuje ok. 0,25 s w każdą stronę niezależnie od Hosta.
 
-- **Echo klawisza (pomiar 2026-11-17, 0.1.12, instrumentowany Host): 0,8–2,1 s.**
-  Rozkład: przeglądarka → Host 160–1470 ms (Host odbiera ramki relaya tylko
-  między blokującymi zapytaniami HTTPS); Host od wejścia do pierwszej ramki
-  wyniku ok. 230 ms, a do 1,5 s, gdy trafi na odpytanie `channels/pending`,
-  odczyt pairingu lub odnowienie sterowania. Każde przejście aktora trwa
-  ok. 45 ms. Echo jednego znaku to 3 ramki (w tym delta ok. 2,5 KB JSON,
-  czyli ok. 9 KB na kablu), bo łatka obejmuje cały wiersz.
+- **Echo klawisza (pomiar 2026-11-18, Linux, Host z bieżącego `main` +
+  zmiany z tego dnia, instrumentowany): zwykle 0,29–0,6 s, mediana ok. 0,4 s**
+  (wcześniej 0,8–2,1 s). Odświeżenie strony do terminala: 5,0–5,6 s
+  (wcześniej 10–12 s). Wątek aktora: ok. 25% CPU zamiast 62%. Zmiany:
+  - `channels/pending`, `pairings/pending` i odczyt aktualnego pairingu
+    (`GET /pairings/{id}`, ok. 1/s na połączenie) idą w wątku pomocniczym;
+    wynik sprawdza aktor tymi samymi warunkami co wcześniej;
+  - resolver DNS: równoległe zapytanie czeka do 0,5 s na jedyny slot
+    zamiast od razu zwracać błąd (inaczej heartbeat padał z
+    `Timeout(Resolve)` i kanał terminala się zamykał);
+  - wygasłe potwierdzenia kanałów (żyją 5–30 s) są usuwane w kolejnych
+    wolnych turach i raz po starcie. Wcześniej magazyn stał na limicie 256
+    rekordów (ok. 4 MB), a każdy efekt peera czytał je wszystkie (ok. 40 ms
+    CPU, kilka razy na każdy odczyt pairingu). Po aktualizacji Hosta
+    zaległość schodzi ok. 1 rekord/s (ok. 4 min).
+  Pozostało: relay w obie strony (przeglądarka → Host 80–590 ms, ramka →
+  ekran ok. 120 ms), echo to 3 ramki (delta całego wiersza ok. 9 KB na
+  kablu), a 142 granty workspace w magazynie testowym kosztują ok. 8 ms na
+  efekt peera.
 - Po restarcie Hosta pierwsze otwarcie terminala przechodzi przez
   `STALE_EPOCH`, `CHANNEL_NOT_ADMITTED` i `WORKSPACE_UNSHARED`, a potem
   samo się udaje (ok. 24 s). Sesje PTY nie przeżywają restartu Hosta.
@@ -78,8 +90,8 @@ pozostaje wstrzymany.**
    wysyła wynik 0,2–0,4 s po klawiszu. Reszta opóźnienia to relay (ok.
    0,3–0,4 s w każdą stronę) i blokujące zapytania, które zostały na aktorze:
    odpytywanie `pairings/pending` i `channels/pending` (ok. 250 ms każde)
-   oraz odczyty pairingu (ok. 1/s). Następny krok: odpytywanie `pending`
-   w wątku pomocniczym, tym samym wzorcem (ok. 150 linii).
+   oraz odczyty pairingu (ok. 1/s). Zrobione 2026-11-18 (zob. „Echo
+   klawisza” wyżej).
    Zbadane: długie czekanie na snapshot po odświeżeniu wynikało z jego
    rozmiaru (pełne komórki JSON); rozwiązane przez `compact-cells-v1`.
 2. Serwer: pomiar 2026-11-17 bez aktywnych Hostów pokazał, że transakcja
