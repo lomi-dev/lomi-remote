@@ -240,7 +240,28 @@ impl SetupView {
             )?;
             return Ok(None);
         }
-        let keychain_path = if provider == bootstrap::NativeProvider::MacOsKeychainPathRequired {
+        let mut protected_file_acknowledged = false;
+        let mac_protected_file = if provider == bootstrap::NativeProvider::MacOsKeychainPathRequired
+        {
+            let Some(choice) = choose_index(
+                "Choose macOS authentication storage",
+                "A Host that starts at boot runs without a signed-in user, so no Keychain is unlocked for it. Use the protected file for that mode. A Keychain file must already exist and stay unlocked for the Host; Lomi will not create or unlock it.",
+                &[
+                    "Protected file — store credentials with OS permissions only",
+                    "Existing Keychain file — must stay unlocked for the Host",
+                ],
+                0,
+            )?
+            else {
+                return Err(setup::SetupError::InteractionUnavailable);
+            };
+            choice == 0
+        } else {
+            false
+        };
+        let keychain_path = if provider == bootstrap::NativeProvider::MacOsKeychainPathRequired
+            && !mac_protected_file
+        {
             loop {
                 let Some(path) = input_line(
                     "Choose authentication storage",
@@ -268,19 +289,23 @@ impl SetupView {
             None
         };
 
-        let mut protected_file_acknowledged = false;
-        if provider == bootstrap::NativeProvider::LinuxStorageChoiceRequired {
-            let Some(choice) = choose_index(
-                "Choose Linux authentication storage",
-                "Secret Service requires an already available and unlocked OS keyring. Lomi will not unlock it or switch providers automatically.",
-                &[
-                    "Secret Service — use this account's unlocked OS keyring",
-                    "Protected file — store credentials with OS permissions only",
-                ],
-                0,
-            )?
-            else {
-                return Err(setup::SetupError::InteractionUnavailable);
+        if mac_protected_file || provider == bootstrap::NativeProvider::LinuxStorageChoiceRequired {
+            let choice = if mac_protected_file {
+                1
+            } else {
+                let Some(choice) = choose_index(
+                    "Choose Linux authentication storage",
+                    "Secret Service requires an already available and unlocked OS keyring. Lomi will not unlock it or switch providers automatically.",
+                    &[
+                        "Secret Service — use this account's unlocked OS keyring",
+                        "Protected file — store credentials with OS permissions only",
+                    ],
+                    0,
+                )?
+                else {
+                    return Err(setup::SetupError::InteractionUnavailable);
+                };
+                choice
             };
             if choice == 1 {
                 let Some(accepted) = confirm(
@@ -304,7 +329,7 @@ impl SetupView {
         )
         .map_err(|_| setup::SetupError::InvalidOptions)?;
         let provider_name = match configuration.provider {
-            LocalAuthProvider::ProtectedFile => "Linux protected file (OS permissions only)",
+            LocalAuthProvider::ProtectedFile => "Protected file (OS permissions only)",
             LocalAuthProvider::MacOsKeychain => "macOS Keychain",
             LocalAuthProvider::WindowsDpapi => "Windows DPAPI for this account",
             LocalAuthProvider::LinuxSecretService => {

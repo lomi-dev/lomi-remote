@@ -5,7 +5,7 @@
 //! `LocalAuthConfiguration` candidate; the caller must obtain explicit user
 //! confirmation before sending `LocalCall::AuthConfigure`.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use lomi_remote_protocol::ipc::LocalFileAcknowledgement;
 #[cfg(target_os = "macos")]
 use lomi_remote_protocol::ipc::LocalRootPath;
@@ -152,20 +152,30 @@ pub fn default_auth_configuration(
     let (provider, encoded_keychain_path, acknowledgement) = {
         #[cfg(target_os = "macos")]
         {
+            // A boot-mode Host runs without a signed-in user, so no Keychain is
+            // unlocked for it; the acknowledged protected file is its option.
             if protected_file_acknowledged {
-                return Err(BootstrapError::UnexpectedProtectedFileAcknowledgement);
+                if keychain_path.is_some() {
+                    return Err(BootstrapError::UnexpectedKeychainPath);
+                }
+                (
+                    LocalAuthProvider::ProtectedFile,
+                    None,
+                    Some(LocalFileAcknowledgement::OsPermissionsOnly),
+                )
+            } else {
+                let path = keychain_path.ok_or(BootstrapError::KeychainPathRequired)?;
+                if !path.is_absolute()
+                    || path.canonicalize().ok().as_deref() != Some(path)
+                    || !path.is_file()
+                {
+                    return Err(BootstrapError::InvalidKeychainPath);
+                }
+                let text = path.to_str().ok_or(BootstrapError::InvalidKeychainPath)?;
+                let encoded = LocalRootPath::try_from(text.to_owned())
+                    .map_err(|_| BootstrapError::InvalidKeychainPath)?;
+                (LocalAuthProvider::MacOsKeychain, Some(encoded), None)
             }
-            let path = keychain_path.ok_or(BootstrapError::KeychainPathRequired)?;
-            if !path.is_absolute()
-                || path.canonicalize().ok().as_deref() != Some(path)
-                || !path.is_file()
-            {
-                return Err(BootstrapError::InvalidKeychainPath);
-            }
-            let text = path.to_str().ok_or(BootstrapError::InvalidKeychainPath)?;
-            let encoded = LocalRootPath::try_from(text.to_owned())
-                .map_err(|_| BootstrapError::InvalidKeychainPath)?;
-            (LocalAuthProvider::MacOsKeychain, Some(encoded), None)
         }
         #[cfg(windows)]
         {
