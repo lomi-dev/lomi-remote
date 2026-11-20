@@ -408,11 +408,17 @@ impl Handle {
                     {
                         return Err(LocalError::Conflict);
                     }
-                    return view
-                        .presentation
-                        .clone()
-                        .map(LocalResult::LoginPresentation)
-                        .ok_or(LocalError::Unavailable);
+                    let presentation =
+                        view.presentation.clone().ok_or(LocalError::Unavailable)?;
+                    if presentation_expired(presentation.expires_at.0) {
+                        // An expired code cannot be approved: wake the worker so
+                        // it replaces the enrollment, and show nothing stale.
+                        if let Some(intent) = intent {
+                            let _ = self.wake.try_send(Command::Wake(intent.operation_id));
+                        }
+                        return Err(LocalError::Unavailable);
+                    }
+                    return Ok(LocalResult::LoginPresentation(presentation));
                 }
                 let mut status = view.status.clone();
                 status.generation = DecimalU64(state.generation);
@@ -432,6 +438,19 @@ impl Handle {
             }
             _ => Err(LocalError::InvalidArgument),
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_expiry_tests {
+    #[test]
+    fn past_codes_are_expired_and_future_codes_are_not() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(super::presentation_expired(now - 1));
+        assert!(!super::presentation_expired(now + 600));
     }
 }
 
@@ -4485,6 +4504,11 @@ fn run_with_apis_inner(
             }
         }
     }
+}
+fn presentation_expired(expires_at: u64) -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .is_ok_and(|now| now.as_secs() >= expires_at)
 }
 fn fresh_access(auth: &HostAuth<'_, dyn SecretStorage + '_>, now: u64) -> bool {
     auth.status() == Status::Ready
