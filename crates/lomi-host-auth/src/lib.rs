@@ -1810,8 +1810,8 @@ fn validate(r: &Record, config: &Config) -> Result<()> {
     if let Some(c) = creds {
         if c.account != account
             || c.host != config.host
-            || c.expires < 300
-            || c.expires - 300 > r.observed_at
+            || c.expires < *ACCESS_LIFETIME_SECONDS.start()
+            || c.expires - ACCESS_LIFETIME_SECONDS.end() > r.observed_at
         {
             return Err(Error::InvalidBundle);
         }
@@ -1949,6 +1949,10 @@ mod self_retirement_tests {
     }
 
     fn ready_storage(config: &Config) -> MemoryStorage {
+        ready_storage_expiring(config, NOW + 300)
+    }
+
+    fn ready_storage_expiring(config: &Config, expires: u64) -> MemoryStorage {
         let host_id = config.host.to_bytes();
         let account = AccountId::try_from(ACCOUNT.to_owned()).unwrap();
         let family = HostAuthorizationId::try_from(FAMILY.to_owned()).unwrap();
@@ -1966,7 +1970,7 @@ mod self_retirement_tests {
             access: Text::new("initial_access_credential".to_owned()),
             refresh: Text::new("initial_refresh_credential".to_owned()),
             operation,
-            expires: NOW + 300,
+            expires,
         };
         let record = Record {
             version: 3,
@@ -1987,6 +1991,16 @@ mod self_retirement_tests {
         };
         let bytes = encode(&record).unwrap().expose().to_vec();
         MemoryStorage(Rc::new(RefCell::new(Some(bytes))))
+    }
+
+    #[test]
+    fn stored_one_hour_access_credential_reopens() {
+        let config = test_config();
+        let mut storage = ready_storage_expiring(&config, NOW + 3600);
+        let auth = HostAuth::open(&mut storage, config.clone(), NOW).unwrap();
+        assert_eq!(auth.status(), Status::Ready);
+        let mut too_long = ready_storage_expiring(&config, NOW + 3601);
+        assert!(HostAuth::open(&mut too_long, config, NOW).is_err());
     }
 
     #[test]
