@@ -497,14 +497,21 @@ fn print_response(response: LocalResponse, json: bool) -> u8 {
                 "Login started: {}\nUse `lomiremote login code` to display the user code.",
                 String::from(result.operation_id)
             ),
-            Ok(LocalResult::LoginStatus(status)) => println!(
-                "Authentication: {:?}\nStorage: {:?}\nNetwork: {:?}\nLocked: {}\nPending cloud revoke: {}",
-                status.phase,
-                status.storage,
-                status.network,
-                status.locked,
-                status.pending_cloud_revoke
-            ),
+            Ok(LocalResult::LoginStatus(status)) => {
+                println!(
+                    "Authentication: {:?}\nStorage: {:?}\nNetwork: {:?}\nLocked: {}\nPending cloud revoke: {}",
+                    status.phase,
+                    status.storage,
+                    status.network,
+                    status.locked,
+                    status.pending_cloud_revoke
+                );
+                if status.pending_cloud_revoke {
+                    println!(
+                        "The Host retries the cloud revoke by itself. If this stays pending, revoke this computer under Remote hosts on your Lomi account page; the Host then finishes the logout."
+                    );
+                }
+            }
             Ok(LocalResult::LoginPresentation(presentation)) => println!(
                 "Open: {}\nCode: {}\nExpires at: {}",
                 presentation.verification_url.as_str(),
