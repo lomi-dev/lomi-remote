@@ -309,7 +309,20 @@ pub(super) struct Driver<'cancel> {
     connection: Option<Connection<'cancel>>,
     candidate: Option<channel::AdmittedChannelHandoff>,
     ticketed: Option<TicketedAdmission>,
+    // Relay TLS/WebSocket setup runs on a helper thread so the single actor
+    // keeps serving established channels and admitting new ones meanwhile.
+    connecting: Option<RelayConnecting>,
     // Static diagnostic only; retained across discard so failure remains visible.
+}
+struct RelayConnecting {
+    request: super::cloud::HelperRequest<RelayConnection>,
+    pending: PendingRemoteConnection,
+    source: lomi_host_store::AcknowledgedWorkspaceGrant,
+    workspace: WorkspaceContext,
+    cutoff: Instant,
+    applied_observation: Instant,
+    // Owns the sealed peer continuation re-checked before adoption.
+    current: peer::VerifiedCurrentPeer,
 }
 struct PendingResponse<'cancel> {
     operation: super::OwnerOperation<'cancel>,
@@ -734,6 +747,7 @@ impl<'cancel> Driver<'cancel> {
     pub(super) fn has_retained_operation_at(&self, now: Instant) -> bool {
         self.candidate.is_some()
             || self.ticketed.is_some()
+            || self.connecting.is_some()
             || self
                 .connection
                 .as_ref()
@@ -742,6 +756,7 @@ impl<'cancel> Driver<'cancel> {
     pub(super) fn can_suspend_at_message_boundary(&self, now: Instant) -> bool {
         self.candidate.is_none()
             && self.ticketed.is_none()
+            && self.connecting.is_none()
             && self
                 .connection
                 .as_ref()
@@ -768,15 +783,19 @@ impl<'cancel> Driver<'cancel> {
         match (&self.candidate, &self.ticketed) {
             (Some(candidate), None) => now < candidate.deadline(),
             (None, Some(ticketed)) => ticketed.bounds_current_at(now),
+            // The helper's own connect deadline bounds this wait; adoption
+            // still requires a fresh eligibility.
+            (None, None) => self.connecting.is_some(),
             _ => false,
         }
     }
     pub(super) fn has_local_setup_work(&self) -> bool {
-        self.candidate.is_some() || self.ticketed.is_some()
+        self.candidate.is_some() || self.ticketed.is_some() || self.connecting.is_some()
     }
     pub(super) fn has_pending_setup(&self) -> bool {
         self.candidate.is_some()
             || self.ticketed.is_some()
+            || self.connecting.is_some()
             || self
                 .connection
                 .as_ref()
@@ -948,6 +967,8 @@ impl<'cancel> Driver<'cancel> {
     pub(super) fn has_immediate_output(&self) -> bool {
         self.candidate.is_some()
             || self.ticketed.is_some()
+            // Keep the registry polling until the helper finishes connecting.
+            || self.connecting.is_some()
             || self
                 .connection
                 .as_ref()
@@ -987,11 +1008,16 @@ impl<'cancel> Driver<'cancel> {
     /// Empty means no candidate, ticket, or live transport. A live transport
     /// can outlast its maintenance operation and must remain in the registry.
     pub(super) fn is_empty(&self) -> bool {
-        self.candidate.is_none() && self.ticketed.is_none() && self.connection.is_none()
+        self.candidate.is_none()
+            && self.ticketed.is_none()
+            && self.connecting.is_none()
+            && self.connection.is_none()
     }
     pub(super) fn discard(&mut self) {
         self.candidate = None;
         self.ticketed = None;
+        // Dropping the helper request cancels its connect attempt.
+        self.connecting = None;
         self.connection = None;
     }
     pub(super) fn accept(
@@ -1098,6 +1124,14 @@ impl<'cancel> Driver<'cancel> {
             }
             return false;
         };
+        if self.connecting.is_some() {
+            // finish_connect re-checks the boundary before adopting the socket.
+            if peer::check_peer_runtime(runtime).is_err() {
+                self.discard();
+                return false;
+            }
+            return true;
+        }
         let current = match (&self.candidate, &self.ticketed) {
             (Some(candidate), None) => candidate.check_current(auth, runtime, eligibility).is_ok(),
             (None, Some(ticketed)) => ticketed.poll_current(auth, runtime, eligibility),
@@ -1130,6 +1164,18 @@ impl<'cancel> Driver<'cancel> {
                     return false;
                 }
             }
+        }
+        if self.connecting.is_some() {
+            if eligibility.is_none() {
+                return false;
+            }
+            return match self.finish_connect(runtime) {
+                Ok(done) => done,
+                Err(_) => {
+                    self.discard();
+                    false
+                }
+            };
         }
         if self.ticketed.is_some() {
             let Some(eligibility) = eligibility else {
@@ -1308,33 +1354,76 @@ impl<'cancel> Driver<'cancel> {
         let cutoff = current.fresh_until();
         let applied_observation = current.observed_at();
         drop(evidence);
-        let operation = runtime.operation;
-        let gate = runtime.gate;
-        let paused = runtime.paused;
-        let stopping = runtime.stopping;
-        let public_pending = &runtime.public_io.setup().pending;
-        let owner = runtime.owner;
-        let continuation = current.continuation();
-        let check = || {
-            watch(operation, gate, paused, stopping, public_pending)?;
-            owner
-                .peer_original_boundary(operation, continuation)
-                .map_err(|_| BudgetStop::Cancelled)
-        };
+        // The boundary must hold when the attempt starts; finish_connect checks
+        // it again before adopting the socket.
+        watch(
+            runtime.operation,
+            runtime.gate,
+            runtime.paused,
+            runtime.stopping,
+            &runtime.public_io.setup().pending,
+        )
+        .map_err(invalid)?;
+        runtime
+            .owner
+            .peer_original_boundary(runtime.operation, current.continuation())
+            .map_err(invalid)?;
         let relay = RelayTransport::new(endpoint).map_err(|_| peer::PeerError::Invalid)?;
-
-        let socket = relay
-            .connect(
-                &WssAdmissionFrame {
-                    channel_id: ticketed.channel_id,
-                    ticket: ticketed.ticket,
-                },
-                ticketed.request_started,
-                ticketed.expires_in_ms,
-                connect_deadline,
-                &check,
-            )
-            .map_err(|_| peer::PeerError::Invalid)?;
+        let frame = WssAdmissionFrame {
+            channel_id: ticketed.channel_id,
+            ticket: ticketed.ticket,
+        };
+        let request_started = ticketed.request_started;
+        let expires_in_ms = ticketed.expires_in_ms;
+        let request = super::cloud::HelperRequest::spawn(
+            "lomi-relay-connect",
+            connect_deadline,
+            move |deadline, check| {
+                relay.connect(&frame, request_started, expires_in_ms, deadline, check)
+            },
+        )
+        .map_err(invalid)?;
+        self.connecting = Some(RelayConnecting {
+            request,
+            pending,
+            source,
+            workspace,
+            cutoff,
+            applied_observation,
+            current,
+        });
+        Ok(())
+    }
+    /// Adopt a relay socket the helper finished connecting. Ok(false) while it
+    /// is still connecting; the original boundary is checked again first.
+    fn finish_connect(
+        &mut self,
+        runtime: RuntimeWithOperation<'cancel, '_>,
+    ) -> peer::ResultPeer<bool> {
+        peer::check_peer_runtime(runtime)?;
+        let Some(result) = self
+            .connecting
+            .as_ref()
+            .ok_or(peer::PeerError::Invalid)?
+            .request
+            .poll()
+        else {
+            return Ok(false);
+        };
+        let connecting = self.connecting.take().ok_or(peer::PeerError::Invalid)?;
+        let socket = result.map_err(invalid)?;
+        watch(
+            runtime.operation,
+            runtime.gate,
+            runtime.paused,
+            runtime.stopping,
+            &runtime.public_io.setup().pending,
+        )
+        .map_err(invalid)?;
+        runtime
+            .owner
+            .peer_original_boundary(runtime.operation, connecting.current.continuation())
+            .map_err(invalid)?;
         self.connection = Some(Connection {
             coordinator: self.coordinator.clone(),
             terminal: None,
@@ -1348,21 +1437,23 @@ impl<'cancel> Driver<'cancel> {
             started_git_outputs: VecDeque::new(),
             git_output_reservation: 0,
             socket: ingress_socket(socket),
-            source,
-            workspace,
-            crypto: Crypto::ReadFirst(pending),
+            source: connecting.source,
+            workspace: connecting.workspace,
+            crypto: Crypto::ReadFirst(connecting.pending),
             maintenance: super::OwnerOperation::new(
                 runtime.operation.deadline(),
                 self.cancelled.ok_or(peer::PeerError::Invalid)?,
             ),
-            peer: None,
+            // The pairing proof read for this connect serves the first
+            // request; proof_reusable still validates it before any use.
+            peer: Some(connecting.current),
             suspended: false,
             maintenance_aborted: std::cell::Cell::new(false),
             assembler: MessageAssembler::new(),
             encoder: MessageEncoder::new(),
             origin: Instant::now(),
-            peer_cutoff: cutoff,
-            applied_observation,
+            peer_cutoff: connecting.cutoff,
+            applied_observation: connecting.applied_observation,
             started_git_peer: None,
             peer_prefetch: None,
             peer_prefetch_after: None,
@@ -1371,7 +1462,7 @@ impl<'cancel> Driver<'cancel> {
             git_read: None,
             git_mutation: None,
         });
-        Ok(())
+        Ok(true)
     }
     fn connection_turn(
         &mut self,
