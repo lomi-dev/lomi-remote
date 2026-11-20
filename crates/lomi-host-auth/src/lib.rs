@@ -1531,6 +1531,8 @@ fn enrollment_ref(state: &State) -> Option<&Enrollment> {
         _ => None,
     }
 }
+/// Access credential lifetimes the server may issue: 5 minutes up to 1 hour.
+const ACCESS_LIFETIME_SECONDS: std::ops::RangeInclusive<u64> = 300..=3600;
 fn check_intent_time(prepared_at: u64, now: u64) -> Result<()> {
     check_time(
         prepared_at.checked_add(300).ok_or(Error::InvalidBundle)?,
@@ -1633,11 +1635,14 @@ fn credentials(
         || v.host_id != host
         || family.is_some_and(|f| f != v.host_authorization_id)
         || v.rotation_id.to_bytes() != op
-        || v.expires_in_seconds.0 != 300
+        || !ACCESS_LIFETIME_SECONDS.contains(&v.expires_in_seconds.0)
     {
         return Err(Error::InvalidResponse);
     }
-    let expires = prepared_at.checked_add(300).ok_or(Error::InvalidResponse)?;
+    // Measured from the local request start, so it never outlives the server's view.
+    let expires = prepared_at
+        .checked_add(v.expires_in_seconds.0)
+        .ok_or(Error::InvalidResponse)?;
     check_time(expires, now)?;
     Ok(Credentials {
         account,
@@ -1658,7 +1663,7 @@ fn duplicate(c: &Credentials, v: Received) -> Result<()> {
         && v.rotation_id == c.operation
         && access == c.access
         && refresh == c.refresh
-        && v.expires_in_seconds.0 == 300
+        && ACCESS_LIFETIME_SECONDS.contains(&v.expires_in_seconds.0)
     {
         Ok(())
     } else {
@@ -1982,6 +1987,30 @@ mod self_retirement_tests {
         };
         let bytes = encode(&record).unwrap().expose().to_vec();
         MemoryStorage(Rc::new(RefCell::new(Some(bytes))))
+    }
+
+    #[test]
+    fn rotation_accepts_server_access_lifetimes_from_five_minutes_to_one_hour() {
+        let account = AccountId::try_from(ACCOUNT.to_owned()).unwrap();
+        let host = HostId::try_from(HOST.to_owned()).unwrap();
+        let family = HostAuthorizationId::try_from(FAMILY.to_owned()).unwrap();
+        let rotation = OperationId::try_from(ROTATION.to_owned()).unwrap();
+        let received = |seconds: u64| Received {
+            account_id: account,
+            host_id: host,
+            host_authorization_id: family,
+            access: Text::new("access".to_owned()),
+            refresh: Text::new("refresh".to_owned()),
+            rotation_id: rotation,
+            expires_in_seconds: DecimalU64(seconds),
+        };
+        let issue = |seconds| {
+            credentials(received(seconds), account, host, Some(family), rotation.to_bytes(), NOW, NOW + 1)
+        };
+        assert_eq!(issue(300).unwrap().expires, NOW + 300);
+        assert_eq!(issue(3600).unwrap().expires, NOW + 3600);
+        assert!(matches!(issue(299), Err(Error::InvalidResponse)));
+        assert!(matches!(issue(3601), Err(Error::InvalidResponse)));
     }
 
     #[test]
