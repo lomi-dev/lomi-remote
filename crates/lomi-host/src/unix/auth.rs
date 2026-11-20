@@ -4206,7 +4206,7 @@ fn run_with_apis_inner(
                 // A failure during logout is never a revoke acknowledgement and
                 // must preserve the exact logout generation/recovery material.
                 if fence.pending_cloud_revoke {
-                    network(state, LocalAuthNetwork::Unavailable);
+                    network(state, LocalAuthNetwork::Available);
                     for _ in 0..4 {
                         if stopping.load(Ordering::Acquire) {
                             return;
@@ -4246,7 +4246,7 @@ fn run_with_apis_inner(
                     if let Ok(mut view) = state.lock() {
                         view.presentation = None;
                     }
-                    network(state, LocalAuthNetwork::Unavailable);
+                    network(state, LocalAuthNetwork::Available);
                     continue;
                 }
                 let selected_configuration =
@@ -4264,7 +4264,7 @@ fn run_with_apis_inner(
                         if let Ok(mut view) = state.lock() {
                             view.presentation = None;
                         }
-                        network(state, LocalAuthNetwork::Unavailable);
+                        network(state, LocalAuthNetwork::Available);
                     }
                     Err(OwnerError::Domain(
                         DomainError::Stale | DomainError::Cancelled | DomainError::Deadline,
@@ -4289,7 +4289,7 @@ fn run_with_apis_inner(
                 // Workspace/contract rejection keeps the existing generic
                 // fence semantics; it is not credential-specific proof.
                 if fence.pending_cloud_revoke {
-                    network(state, LocalAuthNetwork::Unavailable);
+                    network(state, LocalAuthNetwork::Available);
                     for _ in 0..4 {
                         if stopping.load(Ordering::Acquire) {
                             return;
@@ -4309,7 +4309,7 @@ fn run_with_apis_inner(
                 if let Ok(mut view) = state.lock() {
                     view.presentation = None;
                 }
-                network(state, LocalAuthNetwork::Unavailable);
+                network(state, LocalAuthNetwork::Available);
             }
             Err(StepError::ExpiredEnrollment) => {
                 if publication_barrier.is_active() {
