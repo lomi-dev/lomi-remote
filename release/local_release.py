@@ -864,7 +864,8 @@ def _promote(web_root: Path, candidate: Path, index: dict) -> None:
 
 
 def assemble(state: Path | None = None, *, version: str | None = None,
-             snapshot_id: str | None = None, promote: bool = True) -> Path:
+             snapshot_id: str | None = None, promote: bool = True,
+             platforms: list[str] | None = None) -> Path:
     paths = secure_state(state)
     config = local_config(paths)
     snapshot = selected_snapshot(state, version, snapshot_id)
@@ -872,7 +873,7 @@ def assemble(state: Path | None = None, *, version: str | None = None,
     tag = f"v{version}"
     run_origin = artifact_origin(config, version, snapshot["snapshotId"])
     bundles = paths["bundles"] / snapshot["snapshotId"]
-    selected = set(PLATFORMS)
+    selected = set(platforms or PLATFORMS)
     for name in selected:
         if not _bundle_complete(bundles / name, platform_name=name, version=version,
                                 artifact_url=run_origin, revision=snapshot["snapshotRevision"],
@@ -1132,6 +1133,8 @@ def _arguments(argv: list[str] | None = None):
     assemble_parser = commands.add_parser("assemble", help="make a local immutable candidate")
     assemble_parser.add_argument("--version", help="snapshot workspace version override")
     assemble_parser.add_argument("--snapshot", help="assemble a specific built source snapshot")
+    assemble_parser.add_argument("--platform", action="append", choices=PLATFORMS, dest="platforms",
+                                 help="local testing only: assemble just these platforms; repeatable")
     assemble_parser.add_argument("--stage-only", action="store_true",
                                  help="prepare versioned artifacts without changing local latest")
 
@@ -1158,7 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
                   ssh_options=tuple(args.ssh_option), snapshot_id=args.snapshot)
         elif args.command == "assemble":
             assemble(args.state, version=args.version, snapshot_id=args.snapshot,
-                     promote=not args.stage_only)
+                     promote=not args.stage_only, platforms=args.platforms)
         elif args.command == "serve":
             serve(args.state, ssh=args.ssh, ssh_options=tuple(args.ssh_option))
         elif args.command == "install":
