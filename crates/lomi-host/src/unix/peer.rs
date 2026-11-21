@@ -209,8 +209,19 @@ pub(super) struct Work {
 
 /// Pending pairing/channel discovery cadence: every second, or every three
 /// while a remote channel is established and shares the actor.
+/// New pairings and channels wait for this poll, so the normal cadence is
+/// short; quiet mode (an established connection) keeps peer polls sparse.
 pub(super) fn discovery_interval(quiet: bool) -> Duration {
-    Duration::from_secs(if quiet { 3 } else { 1 })
+    Duration::from_millis(if quiet { 3_000 } else { 500 })
+}
+
+#[cfg(test)]
+mod discovery_interval_tests {
+    #[test]
+    fn normal_discovery_is_twice_a_second_and_quiet_stays_sparse() {
+        assert_eq!(super::discovery_interval(false).as_millis(), 500);
+        assert_eq!(super::discovery_interval(true).as_millis(), 3_000);
+    }
 }
 
 /// `pairings/pending` GET on a helper thread; same rules as the channel poll.
