@@ -2019,7 +2019,15 @@ mod self_retirement_tests {
             expires_in_seconds: DecimalU64(seconds),
         };
         let issue = |seconds| {
-            credentials(received(seconds), account, host, Some(family), rotation.to_bytes(), NOW, NOW + 1)
+            credentials(
+                received(seconds),
+                account,
+                host,
+                Some(family),
+                rotation.to_bytes(),
+                NOW,
+                NOW + 1,
+            )
         };
         assert_eq!(issue(300).unwrap().expires, NOW + 300);
         assert_eq!(issue(3600).unwrap().expires, NOW + 3600);

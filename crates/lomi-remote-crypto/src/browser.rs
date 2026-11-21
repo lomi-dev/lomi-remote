@@ -1,9 +1,9 @@
 //! Historical live/mailbox browser exports. New Remote callers use BrowserHandshakeV3.
 use crate::{
-    Channel, ChannelContext, Envelope, Handshake, Identity, MAX_JSON, MailboxPolicy, Role,
-    SignedBundle, TransportFrame,
+    Channel, ChannelContext, Envelope, Handshake, Identity, MailboxPolicy, Role, SignedBundle,
+    TransportFrame, MAX_JSON,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use wasm_bindgen::prelude::*;
 pub(crate) fn error(message: impl AsRef<str>) -> JsValue {
     JsValue::from_str(message.as_ref())
@@ -27,7 +27,11 @@ pub(crate) fn fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N], JsValue> {
         .map_err(|_| error("wrong byte array length"))
 }
 fn role(host: bool) -> Role {
-    if host { Role::Host } else { Role::Device }
+    if host {
+        Role::Host
+    } else {
+        Role::Device
+    }
 }
 /// Rust-held identity with a one-time seed-blob bridge for immediate WebCrypto
 /// encryption. JavaScript copies remain outside Rust zeroization guarantees.
@@ -170,7 +174,6 @@ impl BrowserIdentity {
             .map(|p| p.to_vec())
             .map_err(error)
     }
-
 }
 #[wasm_bindgen]
 pub struct BrowserHandshake(Handshake);

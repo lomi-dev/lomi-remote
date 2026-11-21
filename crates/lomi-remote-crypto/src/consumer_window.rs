@@ -2,10 +2,9 @@
 //! short challenge lifetimes and atomic single use; signatures alone do not
 //! prevent replay or approve an account.
 use crate::{
-    Identity, Result, Role,
     identity::verify_signature,
     public_identity_wire::{fixed, wire},
-    verify_consumer_window_identity,
+    verify_consumer_window_identity, Identity, Result, Role,
 };
 use ed25519_dalek::Signer;
 use lomi_remote_protocol::{AccountSessionId, DecimalU64, EnrollmentProof};

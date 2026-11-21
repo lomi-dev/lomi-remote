@@ -141,7 +141,6 @@ impl Identity {
     pub fn public_bundle(&self) -> SignedBundle {
         self.signed.clone()
     }
-
 }
 
 impl Identity {

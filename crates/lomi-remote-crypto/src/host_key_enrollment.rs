@@ -265,7 +265,6 @@ impl PendingHostIdentity {
         }
         Ok(pending)
     }
-
 }
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> Result<T> {
     if json.len() > crate::MAX_JSON {

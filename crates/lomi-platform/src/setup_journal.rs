@@ -77,9 +77,13 @@ impl SetupJournalStore {
     /// taking setup.lock. No setup transition may be based on this alone.
     pub fn read_existing(profile: &Path) -> Result<Option<Vec<u8>>, Error> {
         #[cfg(unix)]
-        { crate::unix::setup_journal::read_existing(profile) }
+        {
+            crate::unix::setup_journal::read_existing(profile)
+        }
         #[cfg(windows)]
-        { crate::windows::setup_journal::read_existing(profile) }
+        {
+            crate::windows::setup_journal::read_existing(profile)
+        }
     }
     /// Create or open the already-selected account's private Host profile.
     /// The platform implementation rejects foreign ownership and unsafe paths.

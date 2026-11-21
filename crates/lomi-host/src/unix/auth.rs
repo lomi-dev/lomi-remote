@@ -408,8 +408,7 @@ impl Handle {
                     {
                         return Err(LocalError::Conflict);
                     }
-                    let presentation =
-                        view.presentation.clone().ok_or(LocalError::Unavailable)?;
+                    let presentation = view.presentation.clone().ok_or(LocalError::Unavailable)?;
                     if presentation_expired(presentation.expires_at.0) {
                         // An expired code cannot be approved: wake the worker so
                         // it replaces the enrollment, and show nothing stale.
