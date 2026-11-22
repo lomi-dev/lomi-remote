@@ -104,7 +104,14 @@ Its working directory is `~/.local/share/lomi-remote-runner-work`; keep this
 path free of spaces because GitHub's default Bash command does not quote its
 temporary script path.
 The LaunchAgent uses `SessionCreate=false` to inherit the GUI security session
-that owns the Data Protection Keychain notarization profile. Reinstalling the
+that owns the Data Protection Keychain notarization profile. That profile is
+unreadable while the screen is locked: keep the Mac unlocked until both macOS
+jobs finish. A locked screen fails notarization with `InvalidResponse` and no
+submission ID; unlock and rerun only the failed jobs
+(`gh run rerun RUN_ID --failed`).
+The runner reads Python 3.12 first from its `.path` file
+(`/opt/homebrew/opt/python@3.12/libexec/bin`); the system Python 3.9 lacks
+`tomllib`. Re-registering the runner rewrites `.path`; restore that entry. Reinstalling the
 runner service restores its default plist; preserve this setting when doing so.
 Public pull requests do not run the tag workflow. Repository write access can
 run release code on this signing machine; restrict write access accordingly.
