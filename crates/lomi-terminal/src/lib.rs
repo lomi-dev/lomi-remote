@@ -805,6 +805,7 @@ impl TerminalService {
                 });
             }
 
+            #[cfg(unix)]
             let (pty, reader) = match &self.worker_executable {
                 Some(executable) => {
                     #[cfg(all(
