@@ -1419,9 +1419,43 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
         else {
             return Err(Error::InvalidState);
         };
+        self.commit_rotation_intent(*account, signed.clone(), credentials.clone(), *epoch, now)
+    }
+    /// Replaces a rotation intent whose window lapsed without an accepted
+    /// response (e.g. the computer slept). The refresh credential stays
+    /// single-use: if the lapsed intent was consumed, the server fences the
+    /// family on the new one.
+    pub fn restart_expired_rotation(&mut self, now: u64) -> Result<()> {
+        self.observe(now)?;
+        let r = self.current()?;
+        let State::Rotating {
+            account,
+            signed,
+            credentials,
+            epoch,
+            prepared_at,
+            ..
+        } = &r.lifecycle
+        else {
+            return Err(Error::InvalidState);
+        };
+        if check_intent_time(*prepared_at, now).is_ok() {
+            return Err(Error::InvalidState);
+        }
+        self.commit_rotation_intent(*account, signed.clone(), credentials.clone(), *epoch, now)
+    }
+    fn commit_rotation_intent(
+        &mut self,
+        account: AccountId,
+        signed: SignedBundle,
+        credentials: Credentials,
+        epoch: u64,
+        now: u64,
+    ) -> Result<()> {
+        let r = self.current()?;
         let operation = OperationId::from_bytes(*uuid::Uuid::new_v4().as_bytes())
             .map_err(|_| Error::InvalidState)?;
-        let identity = crypto(Identity::import_secret_seed_blob(&r.seed.0, signed))?;
+        let identity = crypto(Identity::import_secret_seed_blob(&r.seed.0, &signed))?;
         let proof = crypto(identity.sign_host_refresh_proof(
             credentials.family.to_bytes(),
             operation.to_bytes(),
@@ -1430,10 +1464,10 @@ impl<'a, S: SecretStorage + ?Sized> HostAuth<'a, S> {
         ))?;
         let mut next = r.clone();
         next.lifecycle = State::Rotating {
-            account: *account,
-            signed: signed.clone(),
-            credentials: credentials.clone(),
-            epoch: *epoch,
+            account,
+            signed,
+            credentials,
+            epoch,
             operation,
             proof,
             prepared_at: now,
@@ -2033,6 +2067,36 @@ mod self_retirement_tests {
         assert_eq!(issue(3600).unwrap().expires, NOW + 3600);
         assert!(matches!(issue(299), Err(Error::InvalidResponse)));
         assert!(matches!(issue(3601), Err(Error::InvalidResponse)));
+    }
+
+    #[test]
+    fn lapsed_rotation_intent_restarts_with_a_fresh_operation() {
+        let config = test_config();
+        let mut storage = ready_storage(&config);
+        let mut auth = HostAuth::open(&mut storage, config.clone(), NOW).unwrap();
+        assert!(matches!(
+            auth.restart_expired_rotation(NOW),
+            Err(Error::InvalidState)
+        ));
+        auth.prepare_rotation(NOW).unwrap();
+        let lapsed = auth.rotation_request(NOW + 1).unwrap();
+        assert!(matches!(
+            auth.restart_expired_rotation(NOW + 299),
+            Err(Error::InvalidState)
+        ));
+        assert!(matches!(
+            auth.rotation_request(NOW + 300),
+            Err(Error::Expired)
+        ));
+        auth.restart_expired_rotation(NOW + 300).unwrap();
+        let fresh = auth.rotation_request(NOW + 301).unwrap();
+        assert_ne!(fresh.rotation_id, lapsed.rotation_id);
+        assert_ne!(fresh.proof, lapsed.proof);
+        assert_eq!(fresh.refresh, lapsed.refresh);
+        assert_eq!(fresh.host_authorization_id, lapsed.host_authorization_id);
+        drop(auth);
+        let reopened = HostAuth::open(&mut storage, config, NOW + 302).unwrap();
+        assert_eq!(reopened.rotation_request(NOW + 302).unwrap(), fresh);
     }
 
     #[test]

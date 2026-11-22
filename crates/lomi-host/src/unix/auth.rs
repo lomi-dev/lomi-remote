@@ -4453,6 +4453,18 @@ fn run_with_apis_inner(
                     publication_barrier.reset();
                     ingress.discard();
                 }
+                // Sleep or an outage outlived the intent before any response.
+                // Retry with a fresh intent; a consumed old one fences remotely.
+                let restarted = trusted_now(runtime)
+                    .and_then(|now| auth.restart_expired_rotation(now).map_err(StepError::Auth));
+                match restarted {
+                    Ok(()) => {
+                        network(state, LocalAuthNetwork::Unavailable);
+                        continue;
+                    }
+                    Err(StepError::Stale) => continue,
+                    Err(_) => {}
+                }
                 match suspend_expired(runtime, fence.generation) {
                     Ok(()) => return,
                     Err(StepError::Stale) => continue,
