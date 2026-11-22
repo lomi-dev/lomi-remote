@@ -74,7 +74,12 @@ function color(value, name) {
   }
 }
 const FLAGS = ["bold", "dim", "italic", "inverse", "hidden", "strike", "blink"];
+// compact-cells-v1 omits fields that hold these values; trimmed rows omit
+// trailing blank cells. Both are restored before strict validation.
+const blankCell = () => ({ text: " ", width: 1, fg: { kind: "default" }, bg: { kind: "default" }, flags: [], underlineStyle: 0, underlineColor: null, hyperlink: null });
 function cell(value, name) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value))
+    for (const [key, fallback] of Object.entries(blankCell())) if (!Object.hasOwn(value, key)) value[key] = fallback;
   object(
     value,
     [
@@ -142,6 +147,7 @@ function buffer(value, snapshot, alternate, total) {
   for (const line of value.lines) {
     object(line, ["wrapped", "cells"], "line");
     boolean(line.wrapped, "line.wrapped");
+    if (Array.isArray(line.cells)) while (line.cells.length < snapshot.cols) line.cells.push(blankCell());
     check(
       Array.isArray(line.cells) && line.cells.length === snapshot.cols,
       "line: wrong column count",
