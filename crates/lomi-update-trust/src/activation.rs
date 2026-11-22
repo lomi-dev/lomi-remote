@@ -1098,7 +1098,11 @@ fn active_supports_volume_identity_locked(root: &Path) -> Result<bool> {
     if read_journal(root)?.is_some() {
         return Ok(false);
     }
-    let active = read_pointer(root, ACTIVE)?.ok_or_else(|| invalid("no active admin release"))?;
+    // After a non-purge uninstall nothing is active yet; reinstall upgrades
+    // formats only once its own capable image is active.
+    let Some(active) = read_pointer(root, ACTIVE)? else {
+        return Ok(false);
+    };
     verify_object(root, &active)?;
     stable_matches(root, STABLE_EXECUTABLE, Some(&active))?;
     Ok(supports_volume_identity(&release_custom(root, &active)?))
@@ -1891,6 +1895,24 @@ mod volume_format_tests {
             custom["lomiMacosVolumeIdentity"] = serde_json::json!({"format": 2});
         }
         custom
+    }
+
+    #[test]
+    fn missing_active_release_is_not_volume_identity_capable() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        let root = canonical.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!active_supports_volume_identity_locked(root).unwrap());
+        activate_verified_target(
+            root,
+            b"volume UUID image",
+            &policy("0.1.8", true),
+            "macos-aarch64",
+            14,
+        )
+        .unwrap();
+        assert!(active_supports_volume_identity_locked(root).unwrap());
     }
 
     #[test]
