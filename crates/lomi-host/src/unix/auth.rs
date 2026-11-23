@@ -2577,6 +2577,16 @@ fn advance_clock_projection(
     *base = fresh.base;
     *anchor = fresh.anchor;
 }
+/// Token rotation keeps ingress only when nothing fences it and every
+/// channel settled at a message boundary; anything else closes as before.
+fn rotation_keeps_ingress(
+    fenced: bool,
+    publication_barrier_active: bool,
+    suspend: impl FnOnce() -> bool,
+) -> bool {
+    !fenced && !publication_barrier_active && suspend()
+}
+
 #[cfg(any(unix, windows))]
 fn ready_from_existing_worker(
     auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
@@ -3281,6 +3291,15 @@ mod publication_barrier_tests {
     }
 
     #[test]
+    fn token_rotation_keeps_only_unfenced_settled_ingress() {
+        assert!(rotation_keeps_ingress(false, false, || true));
+        assert!(!rotation_keeps_ingress(false, false, || false));
+        assert!(!rotation_keeps_ingress(false, true, || true));
+        // A fence never even attempts suspension.
+        assert!(!rotation_keeps_ingress(true, false, || panic!("suspended")));
+    }
+
+    #[test]
     fn idle_units_rotate_by_age_or_near_deadline_only() {
         let cancelled = AtomicBool::new(false);
         let aborted = std::cell::Cell::new(false);
@@ -3873,13 +3892,33 @@ fn run_with_apis_inner(
                 }
                 Status::Ready => {
                     let mut ingress_serviced = false;
-                    if intent.is_some()
-                        || fence.locked
-                        || gate.load(Ordering::Acquire)
-                        || auth.credential_deadlines()?.refresh_at <= now
-                    {
-                        publication_barrier.reset();
-                        ingress.discard();
+                    let fenced = intent.is_some() || fence.locked || gate.load(Ordering::Acquire);
+                    let deadlines = auth.credential_deadlines()?;
+                    // Within 30 s of refresh_at, rotate early only at an idle pass
+                    // without a due peer refresh, so suspended channels keep most
+                    // of their peer-proof lifetime; refresh_at still forces it.
+                    let rotation_due = deadlines.refresh_at <= now
+                        || (deadlines.refresh_at <= now.saturating_add(30)
+                            && !cloud.has_retained_operation()
+                            && !peer.has_retained_operation()
+                            && !channel.has_retained_operation()
+                            && !publication_barrier.is_active()
+                            && !ingress.has_retained_operation_at(std::time::Instant::now())
+                            && ingress
+                                .next_due_established_peer_cutoff(std::time::Instant::now())
+                                .is_none());
+                    if fenced || rotation_due {
+                        if rotation_keeps_ingress(fenced, publication_barrier.is_active(), || {
+                            ingress.suspend_at_message_boundary(std::time::Instant::now())
+                        }) {
+                            // Idle established channels stay suspended without
+                            // IO; they resume only after a fresh peer proof
+                            // under the rotated credentials.
+                            ingress.poll(auth, runtime, None);
+                        } else {
+                            publication_barrier.reset();
+                            ingress.discard();
+                        }
                     } else {
                         let expected_scope = publication_barrier.expected_scope().or_else(|| {
                             cloud
@@ -3944,17 +3983,20 @@ fn run_with_apis_inner(
                         }
                         ready_from_existing_worker(auth, handoff, transport)?;
                         was_active = true;
-                    } else if intent.is_some()
-                        || fence.locked
-                        || gate.load(Ordering::Acquire)
-                        || auth.credential_deadlines()?.refresh_at <= now
-                    {
+                    } else if fenced || rotation_due {
                         cloud.finish_operation();
                         peer.discard_retained_operation();
                         channel.discard_retained_operation();
                         idle.reset_reservation();
-                        ingress.discard();
-                        auth.prepare_rotation(now)?;
+                        if fenced {
+                            ingress.discard();
+                        }
+                        if let Err(error) = auth.prepare_rotation(now) {
+                            ingress.discard();
+                            return Err(error.into());
+                        }
+                        // Suspended channels perform no IO until rotation completes.
+                        ingress_serviced = true;
                     } else {
                         // Recheck heartbeat eligibility every Ready turn, even
                         // while a peer or channel operation is retained.
@@ -4171,16 +4213,29 @@ fn run_with_apis_inner(
                     }
                 }
                 Status::Rotating => {
-                    ingress.discard();
+                    // Suspended channels survive only while their original
+                    // peer cutoff and the open gate hold; poll(None) closes
+                    // the rest.
+                    ingress.poll(auth, runtime, None);
                     channel.discard_retained_operation();
                     idle.reset_reservation();
-                    now = trusted_now(runtime)?;
+                    now = match trusted_now(runtime) {
+                        Ok(now) => now,
+                        Err(error) => {
+                            ingress.discard();
+                            return Err(error);
+                        }
+                    };
                     let handoff = runtime.with_clock_floor(now);
                     if !retained {
                         base = handoff.base;
                         anchor = handoff.anchor;
                     }
-                    ready_from_existing_worker(auth, handoff, transport)?;
+                    if let Err(error) = ready_from_existing_worker(auth, handoff, transport) {
+                        // A failed, expired or stale rotation closes channels as before.
+                        ingress.discard();
+                        return Err(error);
+                    }
                     was_active = true;
                 }
                 _ => {}
