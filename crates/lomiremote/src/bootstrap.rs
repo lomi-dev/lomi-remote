@@ -136,20 +136,71 @@ pub fn native_provider() -> NativeProvider {
     }
 }
 
-/// Default storage when nobody is asked: the protected file on macOS (no
-/// Keychain path needed) and on Linux without a desktop session bus, the OS
-/// keyring otherwise. Used for a fresh Host and by quick setup, whose review
-/// screen states the choice.
-pub fn quick_auth_configuration() -> Result<LocalAuthConfiguration, BootstrapError> {
-    let protected_file = match native_provider() {
-        NativeProvider::MacOsKeychainPathRequired => true,
-        NativeProvider::LinuxStorageChoiceRequired => {
-            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
-        }
-        NativeProvider::WindowsDpapi => false,
-        NativeProvider::Unsupported => return Err(BootstrapError::UnsupportedProvider),
-    };
-    default_auth_configuration(None, protected_file)
+/// Outcome of the automatic storage choice. The protected file is never
+/// chosen here: it needs an explicit, plain-language confirmation first.
+#[derive(Debug)]
+pub enum QuickAuth {
+    SecureStore(LocalAuthConfiguration),
+    FileConsentRequired,
+}
+
+/// Prefer the OS secure store when it is usable for the Host's context:
+/// the login Keychain on macOS and Secret Service on Linux (session bus
+/// present), only for a Host that starts inside a login session. Otherwise
+/// the caller must ask for the protected-file consent.
+pub fn quick_auth_configuration(login_session: bool) -> Result<QuickAuth, BootstrapError> {
+    quick_auth_for(
+        native_provider(),
+        login_keychain().as_deref(),
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some(),
+        login_session,
+    )
+}
+
+fn quick_auth_for(
+    provider: NativeProvider,
+    keychain: Option<&Path>,
+    session_bus: bool,
+    login_session: bool,
+) -> Result<QuickAuth, BootstrapError> {
+    if !secure_store_usable(provider, keychain, session_bus, login_session) {
+        return if provider == NativeProvider::Unsupported {
+            Err(BootstrapError::UnsupportedProvider)
+        } else {
+            Ok(QuickAuth::FileConsentRequired)
+        };
+    }
+    let keychain = (provider == NativeProvider::MacOsKeychainPathRequired)
+        .then_some(keychain)
+        .flatten();
+    default_auth_configuration(keychain, false).map(QuickAuth::SecureStore)
+}
+
+fn secure_store_usable(
+    provider: NativeProvider,
+    keychain: Option<&Path>,
+    session_bus: bool,
+    login_session: bool,
+) -> bool {
+    match provider {
+        NativeProvider::MacOsKeychainPathRequired => login_session && keychain.is_some(),
+        NativeProvider::LinuxStorageChoiceRequired => login_session && session_bus,
+        NativeProvider::WindowsDpapi => true,
+        NativeProvider::Unsupported => false,
+    }
+}
+
+/// The signed-in user's default file Keychain, only for a local login (a
+/// remote shell cannot rely on an unlocked Keychain).
+fn login_keychain() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") || std::env::var_os("SSH_CONNECTION").is_some() {
+        return None;
+    }
+    let path = Path::new(&std::env::var_os("HOME")?)
+        .join("Library/Keychains/login.keychain-db")
+        .canonicalize()
+        .ok()?;
+    path.is_file().then_some(path)
 }
 
 /// Construct the native provider selection and the embedded public pins.
@@ -247,4 +298,81 @@ pub fn default_auth_configuration(
         .validate()
         .map_err(|_| BootstrapError::InvalidCompiledConfiguration)?;
     Ok(configuration)
+}
+
+#[cfg(test)]
+mod quick_auth_tests {
+    use super::*;
+    use NativeProvider::*;
+
+    #[test]
+    fn secure_store_is_preferred_only_when_usable() {
+        let keychain = Some(Path::new("/Users/a/Library/Keychains/login.keychain-db"));
+        assert!(secure_store_usable(
+            MacOsKeychainPathRequired,
+            keychain,
+            false,
+            true
+        ));
+        assert!(secure_store_usable(
+            LinuxStorageChoiceRequired,
+            None,
+            true,
+            true
+        ));
+        assert!(secure_store_usable(WindowsDpapi, None, false, false));
+        assert!(!secure_store_usable(
+            MacOsKeychainPathRequired,
+            None,
+            false,
+            true
+        ));
+        assert!(!secure_store_usable(
+            LinuxStorageChoiceRequired,
+            None,
+            false,
+            true
+        ));
+        // Boot-mode Hosts have no unlocked user keychain or session bus.
+        assert!(!secure_store_usable(
+            MacOsKeychainPathRequired,
+            keychain,
+            false,
+            false
+        ));
+        assert!(!secure_store_usable(
+            LinuxStorageChoiceRequired,
+            None,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn unusable_store_requires_consent_and_never_picks_the_file() {
+        for (provider, keychain, bus, login) in [
+            (MacOsKeychainPathRequired, None, false, true),
+            (LinuxStorageChoiceRequired, None, false, true),
+            (LinuxStorageChoiceRequired, None, true, false),
+        ] {
+            assert!(matches!(
+                quick_auth_for(provider, keychain, bus, login),
+                Ok(QuickAuth::FileConsentRequired)
+            ));
+        }
+        assert!(matches!(
+            quick_auth_for(Unsupported, None, true, true),
+            Err(BootstrapError::UnsupportedProvider)
+        ));
+    }
+
+    #[test]
+    fn usable_store_never_asks_for_file_consent() {
+        let result = quick_auth_for(LinuxStorageChoiceRequired, None, true, true);
+        // Debug builds without release pins fail closed instead.
+        assert!(!matches!(result, Ok(QuickAuth::FileConsentRequired)));
+        if let Ok(QuickAuth::SecureStore(configuration)) = result {
+            assert!(configuration.protected_file_acknowledgement.is_none());
+        }
+    }
 }

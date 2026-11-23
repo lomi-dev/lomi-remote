@@ -704,6 +704,7 @@ impl SetupView {
         preflight: &setup::HostPreflight,
         progress: Option<&setup::SetupProgress>,
         shells: &[setup::ShellCandidate],
+        auth_configuration: Option<LocalAuthConfiguration>,
     ) -> Result<setup::SetupChoices, setup::SetupError> {
         let host_name = self
             .host_name_override
@@ -714,7 +715,6 @@ impl SetupView {
                     .and_then(|name| LocalHostName::try_from(name).ok())
             })
             .unwrap_or_else(|| preflight.suggested_host_name.clone());
-        let auth_configuration = quick_auth_configuration(progress)?;
         let (workspace_root, create_missing_workspace) = quick_workspace(preflight, progress)?;
         let workspace_name = progress
             .map(|progress| progress.workspace_name.clone())
@@ -896,7 +896,11 @@ impl setup::SetupInteraction for SetupView {
     ) -> Result<setup::SetupChoices, setup::SetupError> {
         self.waiting = None;
         if self.quick()? {
-            return self.collect_quick_choices(preflight, progress, shells);
+            match quick_auth_configuration(binding, progress)? {
+                Some(auth) => return self.collect_quick_choices(preflight, progress, shells, auth),
+                // File storage declined: continue with the full wizard.
+                None => self.quick = Some(false),
+            }
         }
         let host_name = self.collect_host_name(preflight, progress)?;
         let auth_configuration = self.collect_auth_configuration(progress)?;
@@ -2064,14 +2068,16 @@ fn is_filesystem_root(path: &Path) -> bool {
         .all(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
 }
 
-/// Quick setup stores sign-in credentials where no unlocked keyring is
-/// needed, unless a desktop keyring session is clearly present on Linux.
-/// The quick review screen states the choice before anything is saved.
+/// Quick setup uses the OS secure store when it is usable. Otherwise the
+/// protected file is used only after the user explicitly confirms that it is
+/// protected by OS permissions alone; declining returns `Ok(None)` so the
+/// caller falls back to the full wizard.
 fn quick_auth_configuration(
+    binding: &setup::ServiceBinding,
     progress: Option<&setup::SetupProgress>,
-) -> Result<Option<LocalAuthConfiguration>, setup::SetupError> {
+) -> Result<Option<Option<LocalAuthConfiguration>>, setup::SetupError> {
     if progress.is_some_and(|progress| progress.auth_generation.is_some()) {
-        return Ok(None);
+        return Ok(Some(None));
     }
     if bootstrap::public_release_pins().is_none() {
         notice(
@@ -2079,8 +2085,22 @@ fn quick_auth_configuration(
         )?;
         return Err(setup::SetupError::InteractionUnavailable);
     }
-    match bootstrap::quick_auth_configuration() {
-        Ok(configuration) => Ok(Some(configuration)),
+    match bootstrap::quick_auth_configuration(binding.mode != LocalStartMode::Boot) {
+        Ok(bootstrap::QuickAuth::SecureStore(configuration)) => Ok(Some(Some(configuration))),
+        Ok(bootstrap::QuickAuth::FileConsentRequired) => {
+            let accepted = confirm(
+                "Save your sign-in in a file?",
+                "Secure operating-system storage is not available for this Host. Your sign-in tokens would be stored in a file protected only by operating-system permissions. Administrators and disk backups can read it.\n\nChoose No to pick another option in custom setup.",
+                false,
+            )?
+            .ok_or(setup::SetupError::InteractionUnavailable)?;
+            if !accepted {
+                return Ok(None);
+            }
+            bootstrap::default_auth_configuration(None, true)
+                .map(|configuration| Some(Some(configuration)))
+                .map_err(|_| setup::SetupError::InvalidOptions)
+        }
         Err(bootstrap::BootstrapError::UnsupportedProvider) => {
             notice("Lomi Remote cannot store a sign-in on this operating system.")?;
             Err(setup::SetupError::InteractionUnavailable)

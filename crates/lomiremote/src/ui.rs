@@ -228,6 +228,9 @@ pub struct SetupDraft {
     pub saved_start_mode: Option<LocalStartMode>,
 }
 
+const AUTH_NOT_CONFIGURED: &str =
+    "Authentication is not configured. Press c here, or run: lomiremote auth configure";
+
 #[derive(Default)]
 pub struct Dashboard {
     workspace_panel: WorkspacePanel,
@@ -680,7 +683,7 @@ impl Dashboard {
                 safe_configuration_value(&draft.keychain_path),
             ),
             AuthSetupStep::ProtectedFileConsent => format!(
-                "{}Trusted identity origin: {}\nRemote API: {}\nRelay: {}\nPublic client ID: {}\n\nLinux protected-file storage keeps plaintext credentials protected only by OS file permissions. Administrators and disk backups can read them.\n\nPress y only if you explicitly accept this storage policy. No credentials are created until a separate login action.",
+                "{}Trusted identity origin: {}\nRemote API: {}\nRelay: {}\nPublic client ID: {}\n\nYour sign-in tokens would be stored in a file protected only by operating-system permissions. Administrators and disk backups can read them. Secure OS storage is not available here.\n\nPress y only if you explicitly accept this storage policy, or n to keep sign-in unconfigured. No credentials are created until a separate login action.",
                 error,
                 safe_configuration_value(pins.identity_origin),
                 safe_configuration_value(pins.remote_api_origin),
@@ -697,6 +700,11 @@ impl Dashboard {
             ),
             AuthSetupStep::Confirm => {
                 let provider = match bootstrap::native_provider() {
+                    NativeProvider::MacOsKeychainPathRequired
+                        if draft.protected_file_acknowledged =>
+                    {
+                        "Protected file, acknowledged as permissions-only.".to_owned()
+                    }
                     NativeProvider::MacOsKeychainPathRequired => format!(
                         "macOS Keychain at {}. The keychain is not unlocked here.",
                         safe_configuration_value(&draft.keychain_path)
@@ -707,7 +715,7 @@ impl Dashboard {
                     NativeProvider::LinuxStorageChoiceRequired
                         if draft.protected_file_acknowledged =>
                     {
-                        "Linux protected file, acknowledged as permissions-only.".to_owned()
+                        "Protected file, acknowledged as permissions-only.".to_owned()
                     }
                     NativeProvider::LinuxStorageChoiceRequired => {
                         "Linux Secret Service for this account's unlocked keyring.".to_owned()
@@ -900,9 +908,7 @@ impl Dashboard {
                             self.refresh_login_status(backend);
                         }
                         Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
-                            self.login_message = Some(
-                                "Sign-in is not set up yet. Close and reopen lomiremote to set it up.",
-                            )
+                            self.login_message = Some(AUTH_NOT_CONFIGURED)
                         }
                         Err("AUTH_UNAVAILABLE") | Err("LOGIN_UNAVAILABLE") => {
                             self.login_message = Some(
@@ -924,9 +930,7 @@ impl Dashboard {
                         self.login_message = None;
                     }
                     Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
-                        self.login_message = Some(
-                            "Sign-in is not set up yet. Close and reopen lomiremote to set it up.",
-                        )
+                        self.login_message = Some(AUTH_NOT_CONFIGURED)
                     }
                     _ => {
                         self.login_message =
@@ -1251,6 +1255,12 @@ impl Dashboard {
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme::MUTED)),
             Rect::new(middle.x, middle.y.saturating_add(2), middle.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("[l] Configure authentication or start device login")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme::MUTED)),
+            Rect::new(middle.x, middle.y.saturating_add(3), middle.width, 1),
         );
         if !self.overlay_active() {
             self.controls.key(button, KeyCode::Char('a'));
@@ -1793,8 +1803,7 @@ impl Dashboard {
                 self.login_message = None;
             }
             Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
-                self.login_message =
-                    Some("Sign-in is not set up yet. Close and reopen lomiremote to set it up.")
+                self.login_message = Some(AUTH_NOT_CONFIGURED)
             }
             _ => {
                 self.login_message = Some(
@@ -2033,6 +2042,31 @@ impl<C: Cleanup> Drop for RestoreGuard<C> {
 
 pub fn run(backend: &mut impl Backend) -> io::Result<()> {
     run_dashboard(backend, Dashboard::default())
+}
+/// Open the dashboard after first-run setup. A fresh Host without a usable
+/// secure store starts on the explicit protected-file consent screen.
+pub fn run_with_auth(
+    backend: &mut impl Backend,
+    auth: crate::setup_entry::DefaultAuth,
+) -> io::Result<()> {
+    use crate::setup_entry::DefaultAuth;
+    let mut state = Dashboard::default();
+    match auth {
+        DefaultAuth::FileConsentRequired => {
+            state.auth_setup = Some(AuthSetupDraft {
+                step: AuthSetupStep::ProtectedFileConsent,
+                keychain_path: String::new(),
+                protected_file_acknowledged: false,
+                error: None,
+            });
+        }
+        DefaultAuth::Failed(_) => {
+            state.login_open = true;
+            state.login_message = Some(AUTH_NOT_CONFIGURED);
+        }
+        DefaultAuth::NotFresh | DefaultAuth::Configured => {}
+    }
+    run_dashboard(backend, state)
 }
 pub fn run_setup(backend: &mut impl Backend) -> io::Result<()> {
     let draft = load_setup_draft(backend);
