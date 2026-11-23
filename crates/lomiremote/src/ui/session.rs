@@ -273,7 +273,7 @@ mod tests {
         backend.phase = Some(LocalAuthPhase::Ready);
         assert!(session.poll(&mut backend));
         assert!(session.authenticated);
-        assert!(frame(&session).contains("No workspaces"));
+        assert!(frame(&session).contains("Create new workspace"));
         assert_eq!(
             backend
                 .calls

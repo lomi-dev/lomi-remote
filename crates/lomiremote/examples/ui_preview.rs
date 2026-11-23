@@ -1,5 +1,5 @@
 //! Appearance-only preview of the real dashboard. No Host, IPC or OS services.
-//! Run with: cargo run --locked -p lomiremote --example ui_preview
+//! Run with: cargo run --locked -p lomiremote --example ui_preview [-- --empty]
 
 use lomi_remote_protocol::{
     CapabilitySet, DecimalU64, HostId, PaneId, RuntimeId, SessionEpoch, TabId, TerminalContext,
@@ -357,5 +357,10 @@ fn main() -> io::Result<()> {
     // This explicit visual preview must show the theme even when launched
     // from development tools that export NO_COLOR for their command logs.
     crossterm::style::force_color_output(true);
-    ui::run(&mut PreviewBackend::new())
+    let mut backend = PreviewBackend::new();
+    // `--empty` shows a fresh install with no workspaces.
+    if std::env::args().any(|arg| arg == "--empty") {
+        backend.workspaces.clear();
+    }
+    ui::run(&mut backend)
 }

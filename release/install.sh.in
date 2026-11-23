@@ -29,6 +29,14 @@ installed() {
     fi
 }
 
+# Open Lomi Remote right away when a person is watching, so `curl | sh` is
+# the only command to type. LOMI_REMOTE_SKIP_SETUP=1 only prints the command.
+setup_now() {
+    [ -z "${LOMI_REMOTE_SKIP_SETUP:-}" ] && [ -t 2 ] && [ "${TERM:-dumb}" != dumb ] || return 1
+    { : </dev/tty; } 2>/dev/null || return 1
+    printf '\n%s\n' 'Opening Lomi Remote...' >&2
+}
+
 print_shell_argument() {
     lomi_quote_remainder=$1
     printf "'"
@@ -515,18 +523,19 @@ case "$mode" in
     admin-install|admin-uninstall)
         admin_boot_install
         if [ "$mode" = admin-install ]; then
-            printf '%s\n' 'Complete device login, workspace and sharing setup as the selected account with:'
+            printf '%s\n' 'Open Lomi Remote as the selected account to sign in and create a workspace:'
             printf '  sudo -H -u '
             print_shell_argument "$ADMIN_ACCOUNT"
             printf ' -- '
             print_shell_argument "$CLI"
             printf ' --profile-dir '
             print_shell_argument "$PROFILE_DIR"
-            printf ' setup --account '
-            print_shell_argument "$ADMIN_ACCOUNT"
-            printf ' --mode '
-            print_shell_argument "$ADMIN_HOST_MODE"
             printf '\n'
+            if setup_now; then
+                /usr/bin/sudo -H -u "$ADMIN_ACCOUNT" -- "$CLI" --profile-dir "$PROFILE_DIR" \
+                    </dev/tty >/dev/tty 2>&1 \
+                    || printf '%s\n' 'Run the command above to open Lomi Remote again.' >&2
+            fi
         fi
         exit 0
         ;;
@@ -717,14 +726,21 @@ fi
 
 if [ "$profile_owner_authenticated" -eq 0 ]; then
     installed
-    printf '%s\n' 'Complete account, workspace and sharing setup with:'
+    printf '%s\n' 'Open Lomi Remote to sign in and create a workspace:'
     printf '  '
     print_shell_argument "$CLI"
     if [ -n "${LOMI_PROFILE_DIR:-}" ]; then
         printf ' --profile-dir '
         print_shell_argument "$PROFILE_DIR"
     fi
-    printf ' setup\n'
+    printf '\n'
+    if setup_now; then
+        if [ -n "${LOMI_PROFILE_DIR:-}" ]; then
+            "$CLI" --profile-dir "$PROFILE_DIR" </dev/tty >/dev/tty 2>&1
+        else
+            "$CLI" </dev/tty >/dev/tty 2>&1
+        fi || printf '%s\n' 'Run the command above to open Lomi Remote again.' >&2
+    fi
     exit 0
 fi
 

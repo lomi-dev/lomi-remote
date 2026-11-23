@@ -398,14 +398,19 @@ fn footer_actions_open_add_search_help_and_quit_without_requests() {
         &mut add,
         &mut add_backend,
         &add_terminal,
-        "Add workspace",
+        "Create new workspace",
         true,
     ));
     assert!(add.workspace_form.is_some());
     assert!(add_backend.calls.is_empty());
 
-    let mut search = Dashboard::default();
-    let mut search_backend = FakeBackend::default();
+    // Search is offered only once there is something to search.
+    let workspaces = vec![workspace(1, "Alpha", LocalSharing::Disabled)];
+    let mut search = Dashboard {
+        workspaces: workspaces.clone(),
+        ..Dashboard::default()
+    };
+    let mut search_backend = FakeBackend::with_workspaces(workspaces);
     let mut search_terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     search_terminal.draw(|frame| search.draw(frame)).unwrap();
     assert!(click_text(
@@ -574,5 +579,28 @@ fn wrapped_service_footer_targets_visible_label_and_preserves_uppercase_r() {
     assert!(text_position(&terminal, "Confirm service action: Restart").is_some());
     assert_eq!(backend.service_status_calls, 1);
     assert!(backend.service_actions.is_empty());
+    assert!(backend.calls.is_empty());
+}
+
+#[test]
+fn empty_dashboard_enter_and_centered_button_open_the_workspace_form() {
+    let mut dashboard = Dashboard::default();
+    let mut backend = FakeBackend::default();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| dashboard.draw(frame)).unwrap();
+    assert!(text_position(&terminal, "No workspaces yet").is_some());
+    assert!(dashboard.handle_key(key(KeyCode::Enter), &mut backend));
+    assert!(dashboard.workspace_form.is_some());
+
+    let mut clicked = Dashboard::default();
+    terminal.draw(|frame| clicked.draw(frame)).unwrap();
+    assert!(click_text(
+        &mut clicked,
+        &mut backend,
+        &terminal,
+        "Create new workspace",
+        false
+    ));
+    assert!(clicked.workspace_form.is_some());
     assert!(backend.calls.is_empty());
 }

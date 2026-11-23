@@ -20,10 +20,10 @@ use lomi_remote_protocol::{OperationId, WorkspaceId, rpc::Confirmed};
 use ratatui::{
     Frame, Terminal,
     backend::Backend as TerminalBackend,
-    layout::{Constraint, Layout, Rect},
-    style::Style,
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
     cell::Cell,
@@ -301,7 +301,9 @@ impl Dashboard {
             Ok(LocalResult::Status(status)) => self.status = Some(status),
             _ => {
                 self.status = None;
-                self.message = Some("Host unavailable. Start it with: lomiremote daemon start");
+                self.message = Some(
+                    "Lomi Remote is not running on this computer. Start it with: lomiremote daemon start",
+                );
             }
         }
         match backend.request(LocalCall::Workspaces {}) {
@@ -445,6 +447,12 @@ impl Dashboard {
                 left,
                 &mut list_state,
             );
+            if self.workspaces.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(" No workspaces yet").style(Style::default().fg(theme::MUTED)),
+                    theme::panel("", theme::SIDEBAR).inner(left),
+                );
+            }
             if self.can_select_workspace() && !self.overlay_active() {
                 let inner = theme::panel("", theme::SIDEBAR).inner(left);
                 for index in list_state.offset()..visible_workspaces.len() {
@@ -531,8 +539,8 @@ impl Dashboard {
             )
         } else if let Some(message) = self.message {
             message.to_owned()
-        } else if self.workspaces.is_empty() {
-            "No workspaces registered.\n\n[a] Add workspace\nEnter a name and select an existing directory. Sharing requires separate confirmation.\n[l] Configure authentication or start device login\n\nCLI: lomiremote workspace add --name NAME --path PATH\nProject files remain on this host.".to_owned()
+        } else if self.empty_state() {
+            String::new()
         } else if self.selected_workspace().is_some() {
             String::new()
         } else {
@@ -557,7 +565,13 @@ impl Dashboard {
             .line_count(inner.width)
             .saturating_sub(usize::from(inner.height));
         self.content_max_scroll.set(max_scroll);
-        if self.workspace_view_active() {
+        if self.empty_state() {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme::CANVAS)),
+                right,
+            );
+            self.draw_create_workspace(frame, right);
+        } else if self.workspace_view_active() {
             self.workspace_panel.draw(
                 frame,
                 right,
@@ -575,12 +589,16 @@ impl Dashboard {
                 right,
             );
         }
-        let mut workspace_hints = vec![
-            ("↑↓", "Select"),
-            ("←→", "Navigate"),
-            ("/", "Search"),
-            ("a", "Add workspace"),
-        ];
+        let mut workspace_hints = if self.empty_state() {
+            vec![("enter", "Create workspace")]
+        } else {
+            vec![
+                ("↑↓", "Select"),
+                ("←→", "Navigate"),
+                ("/", "Search"),
+                ("a", "Add workspace"),
+            ]
+        };
         if let Some(workspace) = self.selected_workspace() {
             workspace_hints.push((
                 "s",
@@ -883,7 +901,7 @@ impl Dashboard {
                         }
                         Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
                             self.login_message = Some(
-                                "Authentication is not configured. Run: lomiremote auth configure",
+                                "Sign-in is not set up yet. Close and reopen lomiremote to set it up.",
                             )
                         }
                         Err("AUTH_UNAVAILABLE") | Err("LOGIN_UNAVAILABLE") => {
@@ -906,8 +924,9 @@ impl Dashboard {
                         self.login_message = None;
                     }
                     Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
-                        self.login_message =
-                            Some("Authentication is not configured. Run: lomiremote auth configure")
+                        self.login_message = Some(
+                            "Sign-in is not set up yet. Close and reopen lomiremote to set it up.",
+                        )
                     }
                     _ => {
                         self.login_message =
@@ -1044,7 +1063,9 @@ impl Dashboard {
                 self.operations.open(Page::Settings, None, backend);
                 true
             }
-            KeyCode::Char('a') => {
+            KeyCode::Char('a') | KeyCode::Enter
+                if key.code != KeyCode::Enter || self.empty_state() =>
+            {
                 self.controls.reset();
                 self.content_scroll = 0;
                 self.message = None;
@@ -1189,6 +1210,51 @@ impl Dashboard {
 
     fn overlay_active(&self) -> bool {
         self.help || self.sharing_confirmation.is_some() || self.directory_picker.is_some()
+    }
+
+    /// Nothing registered and no other view open: offer the first workspace.
+    fn empty_state(&self) -> bool {
+        self.workspaces.is_empty()
+            && self.message.is_none()
+            && self.auth_setup.is_none()
+            && !self.login_open
+            && !self.search_active
+            && self.setup_draft.is_none()
+    }
+
+    fn draw_create_workspace(&self, frame: &mut Frame, area: Rect) {
+        const LABEL: &str = "  Create new workspace  ";
+        let width = (LABEL.len() as u16).min(area.width);
+        let [_, middle, _] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(4),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        let [_, button, _] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(width),
+            Constraint::Fill(1),
+        ])
+        .areas(Rect::new(middle.x, middle.y, middle.width, 1));
+        frame.render_widget(
+            Paragraph::new(LABEL).style(
+                Style::default()
+                    .fg(theme::ON_ACCENT)
+                    .bg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            button,
+        );
+        frame.render_widget(
+            Paragraph::new("Choose a folder on this computer to open from the Lomi app.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme::MUTED)),
+            Rect::new(middle.x, middle.y.saturating_add(2), middle.width, 1),
+        );
+        if !self.overlay_active() {
+            self.controls.key(button, KeyCode::Char('a'));
+        }
     }
 
     fn workspace_view_active(&self) -> bool {
@@ -1728,7 +1794,7 @@ impl Dashboard {
             }
             Err("AUTH_UNCONFIGURED") | Err("AUTH_CONFIGURATION_MISSING") => {
                 self.login_message =
-                    Some("Authentication is not configured. Run: lomiremote auth configure")
+                    Some("Sign-in is not set up yet. Close and reopen lomiremote to set it up.")
             }
             _ => {
                 self.login_message = Some(

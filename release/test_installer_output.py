@@ -625,7 +625,7 @@ else:
             b"The updater will read any retained SQLite schema under the native owner lock",
             stderr,
         )
-        self.assertIn(b"Complete account, workspace and sharing setup", stdout)
+        self.assertIn(b"Open Lomi Remote to sign in and create a workspace", stdout)
         install = self.install_call()
         self.assertEqual(install[7], "-")
         self.assertEqual(install[8], "1.2.3")
