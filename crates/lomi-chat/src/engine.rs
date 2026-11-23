@@ -55,6 +55,8 @@ pub struct Inner {
 
 struct Shared {
     root: PathBuf,
+    /// Remote Host mode: read-only CLI sends get the hardened argv.
+    restricted: bool,
     hooks: Hooks,
     inner: Mutex<Option<Inner>>,
     /// Stop tokens of running streams by thread. Never held across `.await`.
@@ -93,8 +95,18 @@ pub fn valid_operation(op: &str) -> Result<(), String> {
 impl Engine {
     /// `root` is the data directory (`ai-chat`); storage opens lazily on first use.
     pub fn new(root: PathBuf, hooks: Hooks) -> Self {
+        Self::build(root, hooks, false)
+    }
+
+    /// Like [`Engine::new`], but read-only CLI sends use the restricted argv (remote Host).
+    pub fn restricted(root: PathBuf, hooks: Hooks) -> Self {
+        Self::build(root, hooks, true)
+    }
+
+    fn build(root: PathBuf, hooks: Hooks, restricted: bool) -> Self {
         Self(Arc::new(Shared {
             root,
+            restricted,
             hooks,
             inner: Mutex::new(None),
             active: Mutex::new(HashMap::new()),
@@ -294,6 +306,7 @@ impl Engine {
                             session,
                             &settings.behavior.system_instructions,
                             agent_file.as_deref(),
+                            self.0.restricted,
                         ))
                     }
                 };
@@ -390,6 +403,7 @@ enum Provider {
     Cli(String, std::path::PathBuf),
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Builds the argv and working directory of a CLI send; a thread without a directory uses home.
 fn cli_job(
     cli_id: &str,
@@ -399,6 +413,7 @@ fn cli_job(
     session: Option<String>,
     system: &str,
     agent_file: Option<&str>,
+    restricted: bool,
 ) -> CliJob {
     let (thread, files) = (&accepted.thread, &accepted.user.attachments);
     let cwd = thread
@@ -431,6 +446,7 @@ fn cli_job(
         effort: thread.effort.as_deref(),
         attach_dir: (!files.is_empty()).then_some(&*attach_dir),
         images: &images,
+        restricted,
     });
     CliJob {
         cli: cli_id.into(),

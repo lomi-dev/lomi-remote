@@ -23,6 +23,14 @@ const MAX_MODELS: usize = 500;
 /// kimi and agy take the prompt as an argument; bound it well below the OS argv limit.
 const ARG_PROMPT_CAP: usize = 100 * 1024;
 
+/// Binary lookup only; never spawns.
+pub fn installed_clis() -> Vec<String> {
+    CLIS.into_iter()
+        .filter(|id| crate::cli_bin::resolve(id).is_some())
+        .map(String::from)
+        .collect()
+}
+
 pub fn supported(cli: &str) -> bool {
     CLIS.contains(&cli)
 }
@@ -84,6 +92,9 @@ pub struct Invocation<'a> {
     pub attach_dir: Option<&'a str>,
     /// Absolute paths of attached images (Codex `--image`).
     pub images: &'a [String],
+    /// Host-only hardening: read-only threads also drop user/project config and
+    /// tools that run code. The desktop always passes false.
+    pub restricted: bool,
 }
 
 /// Appends the attachment list to the prompt; `files` holds (absolute path, display name).
@@ -114,6 +125,9 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 add(&["--resume", sid]);
             }
             match i.permissions {
+                Permissions::ReadOnly if i.restricted => {
+                    add(&["--restricted", "--strict-mcp-config"])
+                }
                 Permissions::ReadOnly => {}
                 Permissions::Edit => add(&["--permission-mode", "acceptEdits"]),
                 Permissions::Full => add(&["--permission-mode", "bypassPermissions"]),
@@ -161,6 +175,10 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
             if let Some(e) = i.effort {
                 add(&["-c", &format!("model_reasoning_effort=\"{e}\"")]);
             }
+            if i.restricted && i.permissions == Permissions::ReadOnly {
+                // Skips the user's config.toml (MCP servers, hooks) and exec-policy rules.
+                add(&["--ignore-user-config", "--ignore-rules"]);
+            }
             add(&["-m", i.model, "-"]);
             Some(i.prompt.to_string())
         }
@@ -199,6 +217,7 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 add(&["--conversation", sid]);
             }
             match i.permissions {
+                Permissions::ReadOnly if i.restricted => add(&["--mode", "plan", "--sandbox"]),
                 Permissions::ReadOnly => add(&["--mode", "plan"]),
                 Permissions::Edit => add(&["--mode", "accept-edits"]),
                 Permissions::Full => add(&["--mode", "auto", "--dangerously-skip-permissions"]),
@@ -1075,6 +1094,51 @@ not json"#,
             effort: None,
             attach_dir: None,
             images: &[],
+            restricted: false,
+        }
+    }
+
+    #[test]
+    fn argv_restricted_only_hardens_read_only() {
+        let r = |cli, session, permissions, restricted| {
+            argv(&Invocation {
+                permissions,
+                restricted,
+                ..inv(cli, session, "")
+            })
+            .0
+        };
+        let has = |a: &[String], items: &[&str]| a.windows(items.len()).any(|w| w == strs(items));
+        use Permissions::*;
+        for session in [None, Some("s1")] {
+            let a = r("claude", session, ReadOnly, true);
+            assert!(has(&a, &["--restricted", "--strict-mcp-config"]));
+            let a = r("codex", session, ReadOnly, true);
+            assert!(
+                has(&a, &["--ignore-user-config", "--ignore-rules"]) && a.last().unwrap() == "-"
+            );
+            assert!(has(
+                &r("agy", session, ReadOnly, true),
+                &["--mode", "plan", "--sandbox"]
+            ));
+        }
+        assert!(has(&r("codex", None, ReadOnly, true), &["-s", "read-only"]));
+        // Kimi keeps its read-only agent file: `--plan` cannot be combined with `--prompt`.
+        assert_eq!(
+            r("kimi", None, ReadOnly, true),
+            r("kimi", None, ReadOnly, false)
+        );
+        // Unrestricted (desktop) and writable threads keep the old argv.
+        for cli in ["claude", "codex", "agy"] {
+            let plain = r(cli, None, ReadOnly, false);
+            assert!(
+                !plain
+                    .iter()
+                    .any(|v| v.contains("restricted") || v.contains("ignore") || v == "--sandbox")
+            );
+            for p in [Edit, Full] {
+                assert_eq!(r(cli, None, p, true), r(cli, None, p, false), "{cli}");
+            }
         }
     }
 

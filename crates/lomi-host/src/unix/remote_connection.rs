@@ -628,6 +628,17 @@ impl GateCore {
         if call.validate().is_err() {
             return false;
         }
+        // Chat calls carry no WorkspaceContext: the channel's grant workspace is the
+        // only scope, so they are allowed on a workspace channel by static rights.
+        if is_chat_call(call) {
+            return self.binding.context.purpose == ChannelPurposeV3::Workspace
+                && match call.method().rights() {
+                    MethodRights::Static(rights) => rights
+                        .iter()
+                        .all(|c| self.binding.context.grant.capabilities.contains(*c)),
+                    MethodRights::StoredOperationRights => false,
+                };
+        }
         let target = match call {
             RpcCall::WorkspaceGet(p) | RpcCall::WorkspaceCapabilities(p) => {
                 Some((&p.context, None))
@@ -1576,6 +1587,34 @@ impl RemoteConnectionState {
             .map(|()| self.core.binding.context.grant.capabilities.clone());
         self.finish_gate(result)
     }
+    /// Consumes a queued chat request and returns it with the identity of the
+    /// grant that issued it (for limits and audit). Workspace channels only.
+    pub(in super::super) fn chat_after_wait(
+        &mut self,
+        queued: &QueuedRequest,
+        operation: &Operation<'_>,
+        f: &OwnerFacts<'_>,
+        sample: &mut impl FnMut() -> TrustedNow,
+    ) -> Result<(RpcRequest, super::remote_chat::Grant)> {
+        let request = self.after_wait(queued, operation, f, sample)?;
+        let grant = &self.core.binding.context.grant;
+        if self.core.binding.context.purpose != ChannelPurposeV3::Workspace
+            || !is_chat_call(&request.call)
+        {
+            self.dispose();
+            return Err(GateError::Denied);
+        }
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let value = super::remote_chat::Grant {
+            capabilities: grant.capabilities.clone(),
+            account: hex(&grant.account_id),
+            consumer: hex(&grant.consumer_id),
+            fingerprint: hex(&grant.consumer_fingerprint),
+            grant_id: hex(&grant.grant_id),
+        };
+        let result = self.core.live(f, sample).map(|()| value);
+        self.finish_gate(result).map(|value| (request, value))
+    }
     pub(in super::super) fn cached_response(
         &mut self,
         original: &RpcRequest,
@@ -2360,4 +2399,19 @@ pub(in crate::unix) fn with_test_established_connections(
     test: impl FnOnce(RemoteConnectionState, RemoteConnectionState),
 ) {
     tests::with_established_connections(test);
+}
+
+pub(super) fn is_chat_call(call: &RpcCall) -> bool {
+    matches!(
+        call,
+        RpcCall::ChatProviders(_)
+            | RpcCall::ChatThreadsList(_)
+            | RpcCall::ChatThreadGet(_)
+            | RpcCall::ChatSubscribe(_)
+            | RpcCall::ChatThreadCreate(_)
+            | RpcCall::ChatThreadUpdate(_)
+            | RpcCall::ChatThreadDelete(_)
+            | RpcCall::ChatSend(_)
+            | RpcCall::ChatStop(_)
+    )
 }

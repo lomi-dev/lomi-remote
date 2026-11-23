@@ -7,8 +7,8 @@ import type {
   WorkspaceStreamFrameContract,
 } from '../generated/index.js';
 
-export type RemoteV2MessageKind = 1 | 2 | 3 | 4 | 5;
-export type RemoteV2StreamKind = 3 | 4 | 5;
+export type RemoteV2MessageKind = 1 | 2 | 3 | 4 | 5 | 6;
+export type RemoteV2StreamKind = 3 | 4 | 5 | 6;
 
 export const REMOTE_V2_RPC_DEFAULT_TIMEOUT_MS = 10_000;
 export const REMOTE_V2_RPC_MAX_TIMEOUT_MS = 60_000;
@@ -140,6 +140,8 @@ function streamContract(kind: RemoteV2StreamKind): ContractName {
       return 'terminal-stream-frame';
     case 5:
       return 'file-watch-frame';
+    case 6:
+      return 'chat-stream-frame';
   }
 }
 
@@ -265,7 +267,7 @@ export class RemoteV2RpcCore {
     if (this.closedError) return;
     if (
       !message ||
-      ![2, 3, 4, 5].includes(message.kind) ||
+      ![2, 3, 4, 5, 6].includes(message.kind) ||
       !(message.bytes instanceof Uint8Array) ||
       message.bytes.byteLength < 1 ||
       message.bytes.byteLength > REMOTE_V2_RPC_MAX_LOGICAL_BYTES ||

@@ -1526,6 +1526,423 @@
         "title": "ChannelTicketResult",
         "type": "object"
       },
+      "ChatStreamFrame": {
+        "$defs": {
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatKind": {
+            "enum": [
+              "api",
+              "cli"
+            ],
+            "type": "string"
+          },
+          "ChatMessage": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageContent"
+              },
+              "createdMs": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ChatStreamFrame/$defs/DisplayText"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "messageId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageId"
+              },
+              "model": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatModelId"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatProviderId"
+              },
+              "role": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatRole"
+              },
+              "seq": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "state": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageState"
+              },
+              "stopReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "messageId",
+              "seq",
+              "role",
+              "content",
+              "truncated",
+              "state",
+              "providerId",
+              "model",
+              "streamSeq",
+              "createdMs"
+            ],
+            "type": "object"
+          },
+          "ChatMessageContent": {
+            "maxLength": 524288,
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 524288
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessageState": {
+            "enum": [
+              "committed",
+              "dispatching",
+              "streaming",
+              "completed",
+              "stopped",
+              "failed",
+              "interrupted"
+            ],
+            "type": "string"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatRole": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "type": "string"
+          },
+          "ChatSnapshotPart": {
+            "maximum": 170,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ChatStopReason": {
+            "maxLength": 64,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 64
+          },
+          "ChatStreamText": {
+            "maxLength": 12288,
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 12288
+          },
+          "ChatThread": {
+            "additionalProperties": false,
+            "properties": {
+              "createdMs": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatKind"
+              },
+              "model": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatModelId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatProviderId"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "streaming": {
+                "type": "boolean"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatTitle"
+              },
+              "updatedMs": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "threadId",
+              "kind",
+              "providerId",
+              "model",
+              "title",
+              "permissions",
+              "workspaceMode",
+              "revision",
+              "createdMs",
+              "updatedMs",
+              "streaming"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
+          },
+          "DecimalU64": {
+            "maxLength": 20,
+            "not": {
+              "pattern": "[^0-9]"
+            },
+            "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+            "type": "string"
+          },
+          "DisplayText": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "ResyncReason": {
+            "enum": [
+              "gap",
+              "stale_cursor",
+              "workspace_epoch_changed",
+              "runtime_changed",
+              "session_epoch_changed",
+              "profile_changed",
+              "subscriber_overflow",
+              "watch_overflow",
+              "snapshot_invalid",
+              "assembly_timeout"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Kind 6 stream frames. Snapshot and delta frames must fit one plaintext frame\n(`MAX_FRAGMENT_PAYLOAD_LEN`); `message` and `thread` may span fragments up to the\n1 MiB logical message cap.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "last": {
+                "type": "boolean"
+              },
+              "messageId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageId"
+              },
+              "part": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatSnapshotPart"
+              },
+              "state": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageState"
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "text": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatStreamText"
+              },
+              "type": {
+                "const": "snapshot",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "messageId",
+              "state",
+              "streamSeq",
+              "part",
+              "last",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "messageId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessageId"
+              },
+              "seq": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/DecimalU64"
+              },
+              "text": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatStreamText"
+              },
+              "type": {
+                "const": "delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "messageId",
+              "seq",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatMessage"
+              },
+              "type": {
+                "const": "message",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "thread": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatThread"
+              },
+              "type": {
+                "const": "thread",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "thread"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "threadId": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ChatThreadId"
+              },
+              "type": {
+                "const": "threadDeleted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "threadId"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/components/schemas/ChatStreamFrame/$defs/ResyncReason"
+              },
+              "type": {
+                "const": "resync",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ChatStreamFrame"
+      },
       "ConsumerAuthorizationContext": {
         "$defs": {
           "AccountId": {
@@ -1943,7 +2360,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -2935,6 +3356,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -4452,6 +4882,31 @@
             "pattern": "^([0-9a-f]{2})+$",
             "type": "string"
           },
+          "Capability": {
+            "enum": [
+              "workspace.read",
+              "terminal.observe",
+              "terminal.control",
+              "terminal.manage",
+              "files.read",
+              "files.write",
+              "git.read",
+              "git.write",
+              "git.network",
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
+            ],
+            "type": "string"
+          },
+          "CapabilitySet": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryResult/$defs/Capability"
+            },
+            "type": "array"
+          },
           "CommitmentHostRole": {
             "enum": [
               "host"
@@ -4744,7 +5199,18 @@
           },
           "PublishedWorkspace": {
             "additionalProperties": false,
+            "description": "`capabilities` is the published ceiling; omitted (not null) when the Host\npublishes none, so Hosts without it keep byte-identical JSON.",
             "properties": {
+              "capabilities": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InventoryResult/$defs/CapabilitySet"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "terminals": {
                 "$ref": "#/components/schemas/InventoryResult/$defs/PublicationTerminals"
               },
@@ -4990,6 +5456,354 @@
             },
             "maxItems": 200,
             "type": "array"
+          },
+          "ChatCursor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatLevel": {
+            "description": "Owner-granted Chat AI level of one workspace. `Off` is the default: nothing\nchat-related enters the ceiling or the publication.",
+            "enum": [
+              "off",
+              "send",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessagePageLimit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatProvidersParams": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "ChatSendParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/OperationId"
+              },
+              "text": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatText"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision",
+              "text"
+            ],
+            "type": "object"
+          },
+          "ChatStopParams": {
+            "additionalProperties": false,
+            "properties": {
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId"
+            ],
+            "type": "object"
+          },
+          "ChatStreamCursor": {
+            "additionalProperties": false,
+            "properties": {
+              "messageId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatMessageId"
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "messageId",
+              "streamSeq"
+            ],
+            "type": "object"
+          },
+          "ChatSubscribeParams": {
+            "additionalProperties": false,
+            "properties": {
+              "after": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatStreamCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "threadId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "ChatText": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "not": {
+              "pattern": "\\u0000"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 65536
+          },
+          "ChatThreadCreateParams": {
+            "additionalProperties": false,
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatModelId"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/OperationId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatProviderId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "operationId",
+              "providerId",
+              "model",
+              "permissions",
+              "workspaceMode"
+            ],
+            "type": "object"
+          },
+          "ChatThreadDeleteParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadGetParams": {
+            "additionalProperties": false,
+            "properties": {
+              "beforeSeq": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/DecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatMessagePageLimit"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadUpdateParams": {
+            "additionalProperties": false,
+            "description": "Omitted fields stay unchanged; `effort: null` clears it back to the provider default.",
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "expectedRevision": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/DecimalU64"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatModelId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadsListParams": {
+            "additionalProperties": false,
+            "properties": {
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/PageLimit"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
           },
           "CommitMessage": {
             "maxLength": 16384,
@@ -6650,6 +7464,91 @@
                 "additionalProperties": false,
                 "properties": {
                   "method": {
+                    "const": "chat.level.set",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalChatLevelSet"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalWorkspaceRead"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalChatThreadTarget"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalChatThreadDelete"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.audit",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalChatAuditRead"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
                     "const": "rpc",
                     "type": "string"
                   },
@@ -6800,6 +7699,66 @@
                 "type": "object"
               }
             ]
+          },
+          "LocalChatAuditRead": {
+            "additionalProperties": false,
+            "properties": {
+              "limit": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/PageLimit"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "LocalChatLevelSet": {
+            "additionalProperties": false,
+            "properties": {
+              "level": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatLevel"
+              },
+              "operatorIntent": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/Confirmed"
+              },
+              "workspaceId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/WorkspaceId"
+              }
+            },
+            "required": [
+              "workspaceId",
+              "level",
+              "operatorIntent"
+            ],
+            "type": "object"
+          },
+          "LocalChatThreadDelete": {
+            "additionalProperties": false,
+            "properties": {
+              "operatorIntent": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/Confirmed"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId",
+              "operatorIntent"
+            ],
+            "type": "object"
+          },
+          "LocalChatThreadTarget": {
+            "additionalProperties": false,
+            "properties": {
+              "threadId": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId"
+            ],
+            "type": "object"
           },
           "LocalDiagnosticLogsRead": {
             "additionalProperties": false,
@@ -8494,6 +9453,159 @@
                 "additionalProperties": false,
                 "properties": {
                   "method": {
+                    "const": "chat.providers",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatProvidersParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadsListParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadGetParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatSubscribeParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.update",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadUpdateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatThreadDeleteParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.send",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatSendParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/ChatStopParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
                     "const": "operation.status",
                     "type": "string"
                   },
@@ -9122,63 +10234,73 @@
           },
           "BoundedList10": {
             "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/FileMetadata"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList11": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 1048576,
+            "type": "array"
+          },
+          "BoundedList12": {
+            "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRepository"
             },
             "maxItems": 32,
             "type": "array"
           },
-          "BoundedList11": {
+          "BoundedList13": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRemote"
             },
             "maxItems": 32,
             "type": "array"
           },
-          "BoundedList12": {
+          "BoundedList14": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/RefId"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList13": {
+          "BoundedList15": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRemoteSelector"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList14": {
+          "BoundedList16": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitStatusEntry"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList15": {
+          "BoundedList17": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffFile"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList16": {
+          "BoundedList18": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffHunk"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList17": {
+          "BoundedList19": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffLine"
-            },
-            "maxItems": 200,
-            "type": "array"
-          },
-          "BoundedList18": {
-            "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitCommitSummary"
             },
             "maxItems": 200,
             "type": "array"
@@ -9188,6 +10310,48 @@
               "$ref": "#/components/schemas/LocalResponse/$defs/DiagnosticLogEntry"
             },
             "maxItems": 128,
+            "type": "array"
+          },
+          "BoundedList20": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitCommitSummary"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList21": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/ChatProvider"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "BoundedList22": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/ChatModel"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "BoundedList23": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/ChatEffort"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "BoundedList24": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList25": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessage"
+            },
+            "maxItems": 50,
             "type": "array"
           },
           "BoundedList3": {
@@ -9220,26 +10384,23 @@
           },
           "BoundedList7": {
             "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/HostProfile"
+              "$ref": "#/components/schemas/LocalResponse/$defs/LocalChatThread"
             },
-            "maxItems": 32,
+            "maxItems": 200,
             "type": "array"
           },
           "BoundedList8": {
             "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/FileMetadata"
+              "$ref": "#/components/schemas/LocalResponse/$defs/LocalChatAuditLine"
             },
             "maxItems": 200,
             "type": "array"
           },
           "BoundedList9": {
             "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/LocalResponse/$defs/HostProfile"
             },
-            "maxItems": 1048576,
+            "maxItems": 32,
             "type": "array"
           },
           "Capability": {
@@ -9253,7 +10414,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -9262,6 +10427,437 @@
               "$ref": "#/components/schemas/LocalResponse/$defs/Capability"
             },
             "type": "array"
+          },
+          "ChatCursor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatKind": {
+            "enum": [
+              "api",
+              "cli"
+            ],
+            "type": "string"
+          },
+          "ChatLevel": {
+            "description": "Owner-granted Chat AI level of one workspace. `Off` is the default: nothing\nchat-related enters the ceiling or the publication.",
+            "enum": [
+              "off",
+              "send",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatMessage": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessageContent"
+              },
+              "createdMs": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/DisplayText"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "messageId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessageId"
+              },
+              "model": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatModelId"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatProviderId"
+              },
+              "role": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatRole"
+              },
+              "seq": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "state": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessageState"
+              },
+              "stopReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "messageId",
+              "seq",
+              "role",
+              "content",
+              "truncated",
+              "state",
+              "providerId",
+              "model",
+              "streamSeq",
+              "createdMs"
+            ],
+            "type": "object"
+          },
+          "ChatMessageContent": {
+            "maxLength": 524288,
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 524288
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessageState": {
+            "enum": [
+              "committed",
+              "dispatching",
+              "streaming",
+              "completed",
+              "stopped",
+              "failed",
+              "interrupted"
+            ],
+            "type": "string"
+          },
+          "ChatModel": {
+            "additionalProperties": false,
+            "properties": {
+              "modelId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatModelId"
+              },
+              "name": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatName"
+              }
+            },
+            "required": [
+              "modelId",
+              "name"
+            ],
+            "type": "object"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProvider": {
+            "additionalProperties": false,
+            "properties": {
+              "cli": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatName"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "efforts": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList23"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatKind"
+              },
+              "loggedIn": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "models": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList22"
+              },
+              "name": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatName"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatProviderId"
+              },
+              "readOnlyEnforced": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "providerId",
+              "kind",
+              "name",
+              "models",
+              "efforts",
+              "readOnlyEnforced"
+            ],
+            "type": "object"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatProvidersResult": {
+            "additionalProperties": false,
+            "properties": {
+              "providers": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList21"
+              }
+            },
+            "required": [
+              "providers"
+            ],
+            "type": "object"
+          },
+          "ChatRole": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "type": "string"
+          },
+          "ChatSendResult": {
+            "additionalProperties": false,
+            "properties": {
+              "assistant": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessage"
+              },
+              "thread": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
+              },
+              "user": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessage"
+              }
+            },
+            "required": [
+              "thread",
+              "user",
+              "assistant"
+            ],
+            "type": "object"
+          },
+          "ChatStopReason": {
+            "maxLength": 64,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 64
+          },
+          "ChatSubscribeResult": {
+            "additionalProperties": false,
+            "properties": {
+              "subscriptionId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/SubscriptionId"
+              }
+            },
+            "required": [
+              "subscriptionId"
+            ],
+            "type": "object"
+          },
+          "ChatThread": {
+            "additionalProperties": false,
+            "properties": {
+              "createdMs": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatKind"
+              },
+              "model": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatModelId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatProviderId"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "streaming": {
+                "type": "boolean"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatTitle"
+              },
+              "updatedMs": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "threadId",
+              "kind",
+              "providerId",
+              "model",
+              "title",
+              "permissions",
+              "workspaceMode",
+              "revision",
+              "createdMs",
+              "updatedMs",
+              "streaming"
+            ],
+            "type": "object"
+          },
+          "ChatThreadDeleteResult": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "ChatThreadGetResult": {
+            "additionalProperties": false,
+            "properties": {
+              "hasMore": {
+                "type": "boolean"
+              },
+              "messages": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList25"
+              },
+              "thread": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
+              }
+            },
+            "required": [
+              "thread",
+              "messages",
+              "hasMore"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadResult": {
+            "additionalProperties": false,
+            "properties": {
+              "thread": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
+              }
+            },
+            "required": [
+              "thread"
+            ],
+            "type": "object"
+          },
+          "ChatThreadsListResult": {
+            "additionalProperties": false,
+            "properties": {
+              "nextCursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "threads": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList24"
+              }
+            },
+            "required": [
+              "threads"
+            ],
+            "type": "object"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
           },
           "ChunkCount": {
             "maximum": 1024,
@@ -9525,6 +11121,7 @@
               "FILE_CHANGED",
               "IDEMPOTENCY_CONFLICT",
               "HOST_BUSY",
+              "CHAT_BUSY",
               "CONTROL_REQUIRED",
               "CONTROL_REVOKED",
               "SESSION_EXITED",
@@ -9617,7 +11214,7 @@
             "additionalProperties": false,
             "properties": {
               "entries": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList8"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList10"
               },
               "nextCursor": {
                 "anyOf": [
@@ -9643,7 +11240,7 @@
             "additionalProperties": false,
             "properties": {
               "bytes": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList9"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList11"
               },
               "encoding": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/FileEncoding"
@@ -9741,7 +11338,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/EntryId"
               },
               "hunks": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList16"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList18"
               },
               "truncated": {
                 "type": "boolean"
@@ -9760,7 +11357,7 @@
             "additionalProperties": false,
             "properties": {
               "lines": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList17"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList19"
               },
               "newStart": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
@@ -9796,7 +11393,7 @@
             "additionalProperties": false,
             "properties": {
               "files": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList15"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList17"
               },
               "nextCursor": {
                 "anyOf": [
@@ -9826,7 +11423,7 @@
             "additionalProperties": false,
             "properties": {
               "commits": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList18"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList20"
               },
               "nextCursor": {
                 "anyOf": [
@@ -9859,7 +11456,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/DisplayText"
               },
               "refs": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList12"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList14"
               },
               "refsStateToken": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepoStateToken"
@@ -9868,7 +11465,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/RemoteId"
               },
               "selectors": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList13"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList15"
               }
             },
             "required": [
@@ -9923,7 +11520,7 @@
             "additionalProperties": false,
             "properties": {
               "repositories": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList10"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList12"
               }
             },
             "required": [
@@ -9938,7 +11535,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/DisplayText"
               },
               "remotes": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList11"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList13"
               },
               "repositoryId": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepositoryId"
@@ -10003,7 +11600,7 @@
             "additionalProperties": false,
             "properties": {
               "entries": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList14"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList16"
               },
               "head": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepoStateToken"
@@ -10188,6 +11785,67 @@
               "unavailable"
             ],
             "type": "string"
+          },
+          "LocalChatAuditLine": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "LocalChatLevelState": {
+            "additionalProperties": false,
+            "properties": {
+              "level": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatLevel"
+              },
+              "workspaceId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/WorkspaceId"
+              }
+            },
+            "required": [
+              "workspaceId",
+              "level"
+            ],
+            "type": "object"
+          },
+          "LocalChatThread": {
+            "additionalProperties": false,
+            "properties": {
+              "permissions": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatProviderId"
+              },
+              "streaming": {
+                "type": "boolean"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/ChatTitle"
+              },
+              "updatedMs": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "workspaceId": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/WorkspaceId"
+              }
+            },
+            "required": [
+              "workspaceId",
+              "threadId",
+              "title",
+              "providerId",
+              "permissions",
+              "streaming",
+              "updatedMs"
+            ],
+            "type": "object"
           },
           "LocalDoctorReport": {
             "additionalProperties": false,
@@ -11109,6 +12767,92 @@
                 "additionalProperties": false,
                 "properties": {
                   "type": {
+                    "const": "chatLevel",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalChatLevelState"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "chatThreads",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList7"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "chatThread",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalChatThread"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "chatDeleted",
+                    "type": "string"
+                  },
+                  "value": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "chatAudit",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList8"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
                     "const": "rpc",
                     "type": "string"
                   },
@@ -11451,6 +13195,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -12565,6 +14318,159 @@
                 "additionalProperties": false,
                 "properties": {
                   "method": {
+                    "const": "chat.providers",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatProvidersResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadsListResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadGetResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatSubscribeResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.update",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadDeleteResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.send",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatSendResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/ChatThreadResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
                     "const": "operation.status",
                     "type": "string"
                   },
@@ -13061,7 +14967,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/CapabilitySet"
               },
               "profiles": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList7"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList9"
               }
             },
             "required": [
@@ -13312,7 +15218,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -13572,6 +15482,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -15253,7 +17172,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -15346,6 +17269,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -15585,7 +17517,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -15643,6 +17579,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -15714,7 +17659,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -16627,6 +18576,31 @@
       },
       "PublicationParams": {
         "$defs": {
+          "Capability": {
+            "enum": [
+              "workspace.read",
+              "terminal.observe",
+              "terminal.control",
+              "terminal.manage",
+              "files.read",
+              "files.write",
+              "git.read",
+              "git.write",
+              "git.network",
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
+            ],
+            "type": "string"
+          },
+          "CapabilitySet": {
+            "items": {
+              "$ref": "#/components/schemas/PublicationParams/$defs/Capability"
+            },
+            "type": "array"
+          },
           "DecimalU64": {
             "maxLength": 20,
             "not": {
@@ -16682,7 +18656,18 @@
           },
           "PublishedWorkspace": {
             "additionalProperties": false,
+            "description": "`capabilities` is the published ceiling; omitted (not null) when the Host\npublishes none, so Hosts without it keep byte-identical JSON.",
             "properties": {
+              "capabilities": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PublicationParams/$defs/CapabilitySet"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "terminals": {
                 "$ref": "#/components/schemas/PublicationParams/$defs/PublicationTerminals"
               },
@@ -16886,6 +18871,7 @@
               "FILE_CHANGED",
               "IDEMPOTENCY_CONFLICT",
               "HOST_BUSY",
+              "CHAT_BUSY",
               "CONTROL_REQUIRED",
               "CONTROL_REVOKED",
               "SESSION_EXITED",
@@ -17034,6 +19020,344 @@
             },
             "maxItems": 200,
             "type": "array"
+          },
+          "ChatCursor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessagePageLimit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatProvidersParams": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "ChatSendParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/OperationId"
+              },
+              "text": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatText"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision",
+              "text"
+            ],
+            "type": "object"
+          },
+          "ChatStopParams": {
+            "additionalProperties": false,
+            "properties": {
+              "threadId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId"
+            ],
+            "type": "object"
+          },
+          "ChatStreamCursor": {
+            "additionalProperties": false,
+            "properties": {
+              "messageId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatMessageId"
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "messageId",
+              "streamSeq"
+            ],
+            "type": "object"
+          },
+          "ChatSubscribeParams": {
+            "additionalProperties": false,
+            "properties": {
+              "after": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatStreamCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "threadId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "ChatText": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "not": {
+              "pattern": "\\u0000"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 65536
+          },
+          "ChatThreadCreateParams": {
+            "additionalProperties": false,
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatModelId"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/OperationId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatProviderId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "operationId",
+              "providerId",
+              "model",
+              "permissions",
+              "workspaceMode"
+            ],
+            "type": "object"
+          },
+          "ChatThreadDeleteParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadGetParams": {
+            "additionalProperties": false,
+            "properties": {
+              "beforeSeq": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/DecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatMessagePageLimit"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadUpdateParams": {
+            "additionalProperties": false,
+            "description": "Omitted fields stay unchanged; `effort: null` clears it back to the provider default.",
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/DecimalU64"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatModelId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadsListParams": {
+            "additionalProperties": false,
+            "properties": {
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcRequest/$defs/PageLimit"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
           },
           "CommitMessage": {
             "maxLength": 16384,
@@ -18571,6 +20895,159 @@
                 "additionalProperties": false,
                 "properties": {
                   "method": {
+                    "const": "chat.providers",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatProvidersParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadsListParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadGetParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatSubscribeParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.update",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadUpdateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatThreadDeleteParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.send",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatSendParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcRequest/$defs/ChatStopParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
                     "const": "operation.status",
                     "type": "string"
                   },
@@ -19169,6 +21646,41 @@
             "maxItems": 200,
             "type": "array"
           },
+          "BoundedList14": {
+            "items": {
+              "$ref": "#/components/schemas/RpcResponse/$defs/ChatProvider"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "BoundedList15": {
+            "items": {
+              "$ref": "#/components/schemas/RpcResponse/$defs/ChatModel"
+            },
+            "maxItems": 256,
+            "type": "array"
+          },
+          "BoundedList16": {
+            "items": {
+              "$ref": "#/components/schemas/RpcResponse/$defs/ChatEffort"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "BoundedList17": {
+            "items": {
+              "$ref": "#/components/schemas/RpcResponse/$defs/ChatThread"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList18": {
+            "items": {
+              "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessage"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
           "BoundedList2": {
             "items": {
               "$ref": "#/components/schemas/RpcResponse/$defs/HostProfile"
@@ -19239,7 +21751,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -19248,6 +21764,427 @@
               "$ref": "#/components/schemas/RpcResponse/$defs/Capability"
             },
             "type": "array"
+          },
+          "ChatCursor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatKind": {
+            "enum": [
+              "api",
+              "cli"
+            ],
+            "type": "string"
+          },
+          "ChatMessage": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessageContent"
+              },
+              "createdMs": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/DisplayText"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "messageId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessageId"
+              },
+              "model": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatModelId"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatProviderId"
+              },
+              "role": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatRole"
+              },
+              "seq": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "state": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessageState"
+              },
+              "stopReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "messageId",
+              "seq",
+              "role",
+              "content",
+              "truncated",
+              "state",
+              "providerId",
+              "model",
+              "streamSeq",
+              "createdMs"
+            ],
+            "type": "object"
+          },
+          "ChatMessageContent": {
+            "maxLength": 524288,
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 524288
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessageState": {
+            "enum": [
+              "committed",
+              "dispatching",
+              "streaming",
+              "completed",
+              "stopped",
+              "failed",
+              "interrupted"
+            ],
+            "type": "string"
+          },
+          "ChatModel": {
+            "additionalProperties": false,
+            "properties": {
+              "modelId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatModelId"
+              },
+              "name": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatName"
+              }
+            },
+            "required": [
+              "modelId",
+              "name"
+            ],
+            "type": "object"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProvider": {
+            "additionalProperties": false,
+            "properties": {
+              "cli": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatName"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "efforts": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/BoundedList16"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatKind"
+              },
+              "loggedIn": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "models": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/BoundedList15"
+              },
+              "name": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatName"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatProviderId"
+              },
+              "readOnlyEnforced": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "providerId",
+              "kind",
+              "name",
+              "models",
+              "efforts",
+              "readOnlyEnforced"
+            ],
+            "type": "object"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatProvidersResult": {
+            "additionalProperties": false,
+            "properties": {
+              "providers": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/BoundedList14"
+              }
+            },
+            "required": [
+              "providers"
+            ],
+            "type": "object"
+          },
+          "ChatRole": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "type": "string"
+          },
+          "ChatSendResult": {
+            "additionalProperties": false,
+            "properties": {
+              "assistant": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessage"
+              },
+              "thread": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatThread"
+              },
+              "user": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatMessage"
+              }
+            },
+            "required": [
+              "thread",
+              "user",
+              "assistant"
+            ],
+            "type": "object"
+          },
+          "ChatStopReason": {
+            "maxLength": 64,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 64
+          },
+          "ChatSubscribeResult": {
+            "additionalProperties": false,
+            "properties": {
+              "subscriptionId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/SubscriptionId"
+              }
+            },
+            "required": [
+              "subscriptionId"
+            ],
+            "type": "object"
+          },
+          "ChatThread": {
+            "additionalProperties": false,
+            "properties": {
+              "createdMs": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatKind"
+              },
+              "model": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatModelId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatProviderId"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "streaming": {
+                "type": "boolean"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatTitle"
+              },
+              "updatedMs": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/DecimalU64"
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "threadId",
+              "kind",
+              "providerId",
+              "model",
+              "title",
+              "permissions",
+              "workspaceMode",
+              "revision",
+              "createdMs",
+              "updatedMs",
+              "streaming"
+            ],
+            "type": "object"
+          },
+          "ChatThreadDeleteResult": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "ChatThreadGetResult": {
+            "additionalProperties": false,
+            "properties": {
+              "hasMore": {
+                "type": "boolean"
+              },
+              "messages": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/BoundedList18"
+              },
+              "thread": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatThread"
+              }
+            },
+            "required": [
+              "thread",
+              "messages",
+              "hasMore"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadResult": {
+            "additionalProperties": false,
+            "properties": {
+              "thread": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/ChatThread"
+              }
+            },
+            "required": [
+              "thread"
+            ],
+            "type": "object"
+          },
+          "ChatThreadsListResult": {
+            "additionalProperties": false,
+            "properties": {
+              "nextCursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "threads": {
+                "$ref": "#/components/schemas/RpcResponse/$defs/BoundedList17"
+              }
+            },
+            "required": [
+              "threads"
+            ],
+            "type": "object"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
           },
           "ChunkCount": {
             "maximum": 1024,
@@ -19352,6 +22289,7 @@
               "FILE_CHANGED",
               "IDEMPOTENCY_CONFLICT",
               "HOST_BUSY",
+              "CHAT_BUSY",
               "CONTROL_REQUIRED",
               "CONTROL_REVOKED",
               "SESSION_EXITED",
@@ -20003,6 +22941,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -20953,6 +23900,159 @@
                   },
                   "params": {
                     "$ref": "#/components/schemas/RpcResponse/$defs/OperationReceipt"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.providers",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatProvidersResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadsListResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadGetResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatSubscribeResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.update",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadDeleteResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.send",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatSendResult"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcResponse/$defs/ChatThreadResult"
                   }
                 },
                 "required": [
@@ -22576,7 +25676,11 @@
               "git.read",
               "git.write",
               "git.network",
-              "git.execute"
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
             ],
             "type": "string"
           },
@@ -22729,6 +25833,15 @@
               "git.fetch",
               "git.push",
               "git.pull",
+              "chat.providers",
+              "chat.threads.list",
+              "chat.thread.get",
+              "chat.subscribe",
+              "chat.thread.create",
+              "chat.thread.update",
+              "chat.thread.delete",
+              "chat.send",
+              "chat.stop",
               "operation.status",
               "operation.cancel"
             ],
@@ -27622,6 +30735,7 @@
   },
   "x-lomi-error-statuses": {
     "AUTH_REQUIRED": 401,
+    "CHAT_BUSY": 409,
     "CONTROL_REQUIRED": 409,
     "CONTROL_REVOKED": 409,
     "CREDENTIALS_REQUIRED": 403,

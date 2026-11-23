@@ -1,0 +1,417 @@
+{
+  "$defs": {
+    "ChatEffort": {
+      "maxLength": 16,
+      "minLength": 1,
+      "pattern": "^[a-z]{1,16}$",
+      "type": "string"
+    },
+    "ChatKind": {
+      "enum": [
+        "api",
+        "cli"
+      ],
+      "type": "string"
+    },
+    "ChatMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/ChatMessageContent"
+        },
+        "createdMs": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisplayText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messageId": {
+          "$ref": "#/$defs/ChatMessageId"
+        },
+        "model": {
+          "$ref": "#/$defs/ChatModelId"
+        },
+        "providerId": {
+          "$ref": "#/$defs/ChatProviderId"
+        },
+        "role": {
+          "$ref": "#/$defs/ChatRole"
+        },
+        "seq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "state": {
+          "$ref": "#/$defs/ChatMessageState"
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatStopReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "streamSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "messageId",
+        "seq",
+        "role",
+        "content",
+        "truncated",
+        "state",
+        "providerId",
+        "model",
+        "streamSeq",
+        "createdMs"
+      ],
+      "type": "object"
+    },
+    "ChatMessageContent": {
+      "maxLength": 524288,
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 524288
+    },
+    "ChatMessageId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatMessageState": {
+      "enum": [
+        "committed",
+        "dispatching",
+        "streaming",
+        "completed",
+        "stopped",
+        "failed",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "ChatModelId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "ChatPermissions": {
+      "enum": [
+        "read-only",
+        "edit",
+        "full"
+      ],
+      "type": "string"
+    },
+    "ChatProviderId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "ChatRole": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "type": "string"
+    },
+    "ChatSnapshotPart": {
+      "maximum": 170,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ChatStopReason": {
+      "maxLength": 64,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 64
+    },
+    "ChatStreamText": {
+      "maxLength": 12288,
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 12288
+    },
+    "ChatThread": {
+      "additionalProperties": false,
+      "properties": {
+        "createdMs": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ChatKind"
+        },
+        "model": {
+          "$ref": "#/$defs/ChatModelId"
+        },
+        "permissions": {
+          "$ref": "#/$defs/ChatPermissions"
+        },
+        "providerId": {
+          "$ref": "#/$defs/ChatProviderId"
+        },
+        "revision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        },
+        "title": {
+          "$ref": "#/$defs/ChatTitle"
+        },
+        "updatedMs": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "workspaceMode": {
+          "$ref": "#/$defs/ChatWorkspaceMode"
+        }
+      },
+      "required": [
+        "threadId",
+        "kind",
+        "providerId",
+        "model",
+        "title",
+        "permissions",
+        "workspaceMode",
+        "revision",
+        "createdMs",
+        "updatedMs",
+        "streaming"
+      ],
+      "type": "object"
+    },
+    "ChatThreadId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatTitle": {
+      "maxLength": 200,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "ChatWorkspaceMode": {
+      "enum": [
+        "project",
+        "private"
+      ],
+      "type": "string"
+    },
+    "DecimalU64": {
+      "maxLength": 20,
+      "not": {
+        "pattern": "[^0-9]"
+      },
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+      "type": "string"
+    },
+    "DisplayText": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "ResyncReason": {
+      "enum": [
+        "gap",
+        "stale_cursor",
+        "workspace_epoch_changed",
+        "runtime_changed",
+        "session_epoch_changed",
+        "profile_changed",
+        "subscriber_overflow",
+        "watch_overflow",
+        "snapshot_invalid",
+        "assembly_timeout"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Kind 6 stream frames. Snapshot and delta frames must fit one plaintext frame\n(`MAX_FRAGMENT_PAYLOAD_LEN`); `message` and `thread` may span fragments up to the\n1 MiB logical message cap.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "last": {
+          "type": "boolean"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ChatMessageId"
+        },
+        "part": {
+          "$ref": "#/$defs/ChatSnapshotPart"
+        },
+        "state": {
+          "$ref": "#/$defs/ChatMessageState"
+        },
+        "streamSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "text": {
+          "$ref": "#/$defs/ChatStreamText"
+        },
+        "type": {
+          "const": "snapshot",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "messageId",
+        "state",
+        "streamSeq",
+        "part",
+        "last",
+        "text"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/ChatMessageId"
+        },
+        "seq": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "text": {
+          "$ref": "#/$defs/ChatStreamText"
+        },
+        "type": {
+          "const": "delta",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "messageId",
+        "seq",
+        "text"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "$ref": "#/$defs/ChatMessage"
+        },
+        "type": {
+          "const": "message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/ChatThread"
+        },
+        "type": {
+          "const": "thread",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "thread"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        },
+        "type": {
+          "const": "threadDeleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/ResyncReason"
+        },
+        "type": {
+          "const": "resync",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reason"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ChatStreamFrame"
+}

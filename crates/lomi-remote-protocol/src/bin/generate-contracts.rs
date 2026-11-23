@@ -69,6 +69,7 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
     add!("workspace-stream-frame", WorkspaceStreamFrame);
     add!("terminal-stream-frame", TerminalStreamFrame);
     add!("file-watch-frame", FileWatchFrame);
+    add!("chat-stream-frame", ChatStreamFrame);
     add!("remote-error", RemoteError);
     add!("operation-receipt", OperationReceipt);
     add!("operation-tombstone", OperationTombstone);
@@ -285,7 +286,7 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
     artifacts.push(("openapi.json".into(), pretty(&json!({"openapi":"3.1.0","jsonSchemaDialect":"https://json-schema.org/draft/2020-12/schema","info":{"title":"Lomi Remote E0 draft contract","version":"2.0.0-draft","description":"Generated logical contract; not frozen S0.5 or a declaration of deployed endpoints. No production server is specified."},"paths":paths,"components":{"schemas":components},"x-lomi-error-statuses":statuses,"x-lomi-wss-admission":{"schema":"wss-admission-frame.schema.json","transport":"first WSS frame before payload routing; no URL credentials","maxBytes":WSS_ADMISSION_MAX_BYTES,"timeoutMs":WSS_ADMISSION_TIMEOUT_MS}}))?));
     let capabilities: Vec<_> = Capability::ALL.into_iter().map(|c| json!({
         "name": c, "requires": c.dependencies(), "allowsShellExecution": c.allows_shell_execution(),
-        "defaultControlWithWorkspaceTools": c != Capability::GitExecute,
+        "defaultControlWithWorkspaceTools": c != Capability::GitExecute && !c.is_chat(),
     })).collect();
     let methods: Vec<_> = Method::ALL.iter().map(|method| {
         let rights = match method.rights() {

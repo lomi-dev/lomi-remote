@@ -297,11 +297,37 @@ dto!(PublishedTerminal {
     session_id: TerminalSessionId,
     session_epoch: SessionEpoch
 });
-dto!(PublishedWorkspace {
-    workspace_id: WorkspaceId,
-    workspace_epoch: WorkspaceEpoch,
-    terminals: PublicationTerminals
-});
+/// `capabilities` is the published ceiling; omitted (not null) when the Host
+/// publishes none, so Hosts without it keep byte-identical JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishedWorkspace {
+    pub workspace_id: WorkspaceId,
+    pub workspace_epoch: WorkspaceEpoch,
+    pub terminals: PublicationTerminals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CapabilitySet>,
+}
+impl<'de> Deserialize<'de> for PublishedWorkspace {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            workspace_id: WorkspaceId,
+            workspace_epoch: WorkspaceEpoch,
+            terminals: PublicationTerminals,
+            #[serde(default)]
+            capabilities: Option<CapabilitySet>,
+        }
+        let w: Wire = crate::rpc::deserialize_object(deserializer)?;
+        Ok(Self {
+            workspace_id: w.workspace_id,
+            workspace_epoch: w.workspace_epoch,
+            terminals: w.terminals,
+            capabilities: w.capabilities,
+        })
+    }
+}
 
 // Explicit implementations avoid macro type names inside serde string attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

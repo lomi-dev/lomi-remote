@@ -438,6 +438,15 @@ impl SharedOwner {
         self.begin_workspace_write(operation, WorkspaceChange::UnshareAuthorized(authorization))
     }
 
+    pub(super) fn begin_chat_level<'d, 'o>(
+        &'d self,
+        operation: &'o Operation<'o>,
+        id: WorkspaceId,
+        level: lomi_remote_protocol::ipc::ChatLevel,
+    ) -> Result<WorkspaceWrite<'d, 'o>, Error> {
+        self.begin_workspace_write(operation, WorkspaceChange::ChatLevel(id, level))
+    }
+
     pub(super) fn begin_rename_project<'d, 'o>(
         &'d self,
         operation: &'o Operation<'o>,
@@ -486,6 +495,7 @@ enum WorkspaceChange {
     ShareAuthorized(LocalWorkspaceConsentAuthorized, u64),
     Unshare(WorkspaceId),
     UnshareAuthorized(LocalWorkspaceConsentAuthorized),
+    ChatLevel(WorkspaceId, lomi_remote_protocol::ipc::ChatLevel),
     Remove(WorkspaceId),
 }
 
@@ -652,6 +662,7 @@ fn current_publication_workspaces(
             workspace_id: project.state.context.workspace_id,
             workspace_epoch: project.state.context.workspace_epoch,
             terminals,
+            capabilities: project.chat_level.ceiling(),
         });
     }
     Ok(PublicationWorkspaces::try_from(workspaces).ok())
@@ -711,6 +722,7 @@ impl WorkspaceWrite<'_, '_> {
                     WorkspaceChange::UnshareAuthorized(authorization) => {
                         store.unshare_if_authorized(&authorization)
                     }
+                    WorkspaceChange::ChatLevel(id, level) => store.set_chat_level(id, level),
                     WorkspaceChange::Remove(id) => store.remove_project(id),
                 };
                 if let Err(error) = result
@@ -8000,7 +8012,7 @@ impl SharedOwner {
             running_terminals: published
                 .try_into()
                 .map_err(|_| Error::Domain(domain::Error::Stale))?,
-            capability_ceiling: None,
+            capability_ceiling: project.chat_level.ceiling(),
         };
         guard.validate_current(&snapshot).map_err(Error::Domain)?;
         drop(store); // Intentional: no Store/provider/Domain acquisition under Core.
@@ -9411,7 +9423,7 @@ fn derive_remote_view_from_grant(
         running_terminals: published
             .try_into()
             .map_err(|_| Error::Domain(domain::Error::Stale))?,
-        capability_ceiling: None,
+        capability_ceiling: project.chat_level.ceiling(),
     };
     Ok((remote_workspace, local, running))
 }
@@ -9658,7 +9670,7 @@ impl RemoteWorkspaceTurn<'_, '_, '_, '_, '_, '_> {
         )?;
         // Advertise only implemented services, intersected with this grant.
         // Git mutations use the journaled, revocation-gated execution path.
-        const IMPLEMENTED: [Capability; 9] = [
+        const IMPLEMENTED: [Capability; 13] = [
             Capability::WorkspaceRead,
             Capability::TerminalObserve,
             Capability::TerminalControl,
@@ -9668,6 +9680,10 @@ impl RemoteWorkspaceTurn<'_, '_, '_, '_, '_, '_> {
             Capability::GitRead,
             Capability::GitWrite,
             Capability::GitNetwork,
+            Capability::ChatRead,
+            Capability::ChatSend,
+            Capability::ChatPermissionsEdit,
+            Capability::ChatPermissionsFull,
         ];
         let capabilities = CapabilitySet::try_from(
             IMPLEMENTED
@@ -9738,6 +9754,42 @@ impl RemoteWorkspaceTurn<'_, '_, '_, '_, '_, '_> {
         };
         self.check_connection(connection)?;
         Ok((request, target))
+    }
+    /// Consumes a queued chat request after the same live gates as Explorer and
+    /// returns the Host-resolved scope (workspace, root, level) with the grant
+    /// identity. The owner turn is dropped by the caller before any chat work.
+    pub(super) fn chat_after_wait(
+        &self,
+        connection: &mut super::auth::remote_connection::RemoteConnectionState,
+        queued: &super::auth::remote_connection::QueuedRequest,
+    ) -> Result<
+        (
+            lomi_remote_protocol::rpc::RpcRequest,
+            super::remote_chat::Grant,
+            super::remote_chat::Scope,
+        ),
+        super::auth::remote_connection::GateError,
+    > {
+        self.check_connection(connection)?;
+        let (request, grant) = connection.chat_after_wait(
+            queued,
+            self.worker.operation(),
+            &self.facts(),
+            &mut || self.now(),
+        )?;
+        let local = self
+            .rows
+            .local
+            .as_ref()
+            .ok_or(super::auth::remote_connection::GateError::Denied)?;
+        let scope = super::remote_chat::Scope {
+            workspace: local.state.context.workspace_id,
+            root: local.local_root.clone(),
+            level: local.chat_level,
+            fence: local.fence,
+        };
+        self.check_connection(connection)?;
+        Ok((request, grant, scope))
     }
     /// Consume a Git read using the same current owner/peer gates as Explorer.
     /// The host-selected root leaves this turn only as an internal target;

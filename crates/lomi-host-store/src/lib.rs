@@ -1,7 +1,11 @@
 //! Single-owner durable local domain coordinator. No IPC, credentials, processes,
 //! shell execution or authority verification live here. Callers authenticate and
 //! authorize independently before constructing trusted operation bindings.
-use lomi_remote_protocol::{ipc::IpcProfileId, rpc::*, *};
+use lomi_remote_protocol::{
+    ipc::{self, IpcProfileId},
+    rpc::*,
+    *,
+};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -460,11 +464,16 @@ fn read_cloud_history(db: &Connection) -> Result<Option<bool>> {
     .transpose()
 }
 #[cfg(target_os = "linux")]
-const VERSION: i64 = 16;
+const VERSION: i64 = 17;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const VERSION: i64 = 14;
+const VERSION: i64 = 15;
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-const VERSION: i64 = 14;
+const VERSION: i64 = 15;
+/// Schema that introduced `projects.chat_level` (the last migration of each platform).
+#[cfg(target_os = "linux")]
+const CHAT_LEVEL_SCHEMA: i64 = 17;
+#[cfg(all(any(unix, windows), not(target_os = "linux")))]
+const CHAT_LEVEL_SCHEMA: i64 = 15;
 #[cfg(any(unix, windows))]
 const MAX_NATIVE_INTENT_ROWS: usize = 16_384;
 #[cfg(not(any(unix, windows)))]
@@ -628,6 +637,8 @@ pub struct ProjectRecord {
     pub state: WorkspaceState,
     pub consent: bool,
     pub fence: u64,
+    /// Owner-granted Chat AI level; always `Off` while the workspace is not shared.
+    pub chat_level: ipc::ChatLevel,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TerminalStatus {
@@ -1214,6 +1225,7 @@ impl HostStore {
             Connection::open(path)?
         };
         db.busy_timeout(Duration::ZERO)?;
+        install_chat_hooks(&db);
         // Opening the same SQLite connection first lets it recover a committed
         // WAL transaction before classifying the schema. Do not change journal
         // mode, migrate, or create a Host identity until the durable identity
@@ -1577,6 +1589,21 @@ PRAGMA user_version=6;",
             tx.commit()?;
         }
         #[cfg(any(unix, windows))]
+        if version < CHAT_LEVEL_SCHEMA {
+            if version != 0 {
+                // Adds the per-workspace Chat AI level; existing rows stay 'off'.
+                migration_backup(
+                    &db,
+                    &path.with_extension(format!("before-v{CHAT_LEVEL_SCHEMA}.sqlite")),
+                    CHAT_LEVEL_SCHEMA - 1,
+                )?;
+            }
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure_chat_level_column(&tx)?;
+            tx.execute_batch(&format!("PRAGMA user_version={CHAT_LEVEL_SCHEMA};"))?;
+            tx.commit()?;
+        }
+        #[cfg(any(unix, windows))]
         {
             if !allow_profile_purge && profile_purge::profile_purge_incomplete(&db)? {
                 return Err(StoreError::PurgeInProgress);
@@ -1585,7 +1612,11 @@ PRAGMA user_version=6;",
                 profile_purge::validate_profile_identity(&db, identity)?;
             }
         }
-        read_authorization_state(&db)?;
+        let opened = read_authorization_state(&db)?;
+        AUTHORIZATION_LOCKED.store(
+            opened.locked || opened.pending_cloud_revoke,
+            std::sync::atomic::Ordering::Release,
+        );
         let integrity: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if integrity != "ok" {
             return Err(StoreError::Storage);
@@ -3915,6 +3946,7 @@ PRAGMA user_version=6;",
             state,
             consent: false,
             fence: 0,
+            chat_level: ipc::ChatLevel::Off,
         })
     }
     pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
@@ -4568,6 +4600,28 @@ PRAGMA user_version=6;",
         p.fence = increment(p.fence)?;
         rotate_workspace_epoch(&mut p.state)?;
         p.consent = false;
+        save_project(&tx, &p)?;
+        force_event_room(&tx, self.limits)?;
+        append_event(&tx, &p.state, None)?;
+        queue_publication(&tx, &p)?;
+        tx.commit()?;
+        Ok(p.fence)
+    }
+    /// Owner decision: changes the workspace's Chat AI level. Like share it bumps
+    /// the fence (invalidating existing grants and channels) and queues a fresh
+    /// publication, so the new ceiling is announced before anyone can pair.
+    #[cfg(any(unix, windows))]
+    pub fn set_chat_level(&mut self, id: WorkspaceId, level: ipc::ChatLevel) -> Result<u64> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_capacity(&tx, self.limits, 1, false)?;
+        let mut p = project(&tx, id)?;
+        if !p.consent {
+            return Err(StoreError::Invalid);
+        }
+        p.fence = increment(p.fence)?;
+        p.chat_level = level;
         save_project(&tx, &p)?;
         force_event_room(&tx, self.limits)?;
         append_event(&tx, &p.state, None)?;
@@ -5465,7 +5519,7 @@ fn project(db: &Connection, id: WorkspaceId) -> Result<ProjectRecord> {
     project_row(db, id, false)
 }
 fn project_row(db: &Connection, id: WorkspaceId, include_removed: bool) -> Result<ProjectRecord> {
-    let(root,state,consent,fence):(String,String,bool,String)=db.query_row("SELECT root,state,consent,fence FROM projects WHERE workspace=?1 AND (?2 OR removed=0)",params![key(id),include_removed],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(StoreError::NotFound)?;
+    let(root,state,consent,fence,chat_level):(String,String,bool,String,String)=db.query_row(&format!("SELECT root,state,consent,fence,{CHAT_LEVEL_COLUMN} FROM projects WHERE workspace=?1 AND (?2 OR removed=0)"),params![key(id),include_removed],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(StoreError::NotFound)?;
     let state: WorkspaceState = decode(&state)?;
     state.validate().map_err(|_| StoreError::Storage)?;
     Ok(ProjectRecord {
@@ -5473,8 +5527,13 @@ fn project_row(db: &Connection, id: WorkspaceId, include_removed: bool) -> Resul
         state,
         consent,
         fence: fence.parse().map_err(|_| StoreError::Storage)?,
+        chat_level: ipc::ChatLevel::parse(&chat_level).ok_or(StoreError::Storage)?,
     })
 }
+#[cfg(any(unix, windows))]
+const CHAT_LEVEL_COLUMN: &str = "chat_level";
+#[cfg(not(any(unix, windows)))]
+const CHAT_LEVEL_COLUMN: &str = "'off'";
 fn projects(db: &Connection) -> Result<Vec<ProjectRecord>> {
     #[cfg(any(unix, windows))]
     let mut q = db.prepare(
@@ -5496,7 +5555,122 @@ fn projects(db: &Connection) -> Result<Vec<ProjectRecord>> {
         })
         .collect()
 }
+/// Chat access lowered or ended since the last `take_chat_revocations`.
+/// Process-wide and filled only when the transaction that caused it COMMITS
+/// (SQLite commit/rollback hooks), so a rolled-back change never revokes anything.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ChatRevocations {
+    /// Host authorization was lost or locked: every generation must stop.
+    pub all: bool,
+    /// Workspaces whose effective level dropped: new level and the workspace fence
+    /// that committed it (a consumer ignores it once a newer fence is current).
+    pub workspaces: Vec<(WorkspaceId, ipc::ChatLevel, u64)>,
+}
+static CHAT_REVOCATIONS: std::sync::Mutex<ChatRevocations> =
+    std::sync::Mutex::new(ChatRevocations {
+        all: false,
+        workspaces: Vec::new(),
+    });
+static AUTHORIZATION_LOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Whether Host authorization is currently locked or revoking (committed state).
+pub fn authorization_locked() -> bool {
+    AUTHORIZATION_LOCKED.load(std::sync::atomic::Ordering::Acquire)
+}
+/// Returns and clears the pending revocations.
+pub fn take_chat_revocations() -> ChatRevocations {
+    CHAT_REVOCATIONS
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
+}
+fn merge_revocation(
+    pending: &mut ChatRevocations,
+    id: WorkspaceId,
+    level: ipc::ChatLevel,
+    fence: u64,
+) {
+    if let Some(entry) = pending.workspaces.iter_mut().find(|(w, _, _)| *w == id) {
+        if fence > entry.2 {
+            *entry = (id, level, fence);
+        } else if fence == entry.2 {
+            entry.1 = entry.1.min(level);
+        }
+    } else if pending.workspaces.len() >= 1024 {
+        // Bounded: beyond this everything is stopped anyway.
+        pending.all = true;
+    } else {
+        pending.workspaces.push((id, level, fence));
+    }
+}
+#[derive(Default)]
+struct Staged {
+    revocations: ChatRevocations,
+    locked: Option<bool>,
+}
+thread_local! {
+    /// Changes of the transaction in progress on this thread.
+    static STAGED: std::cell::RefCell<Staged> = std::cell::RefCell::new(Staged::default());
+}
+fn stage_chat_revocation(workspace: (WorkspaceId, ipc::ChatLevel, u64)) {
+    STAGED.with(|staged| {
+        let (id, level, fence) = workspace;
+        merge_revocation(&mut staged.borrow_mut().revocations, id, level, fence);
+    });
+}
+fn stage_authorization_lock(locked: bool) {
+    STAGED.with(|staged| {
+        let mut staged = staged.borrow_mut();
+        staged.locked = Some(locked);
+        if locked {
+            staged.revocations.all = true;
+        }
+    });
+}
+/// Publishes the staged changes on commit and drops them on rollback.
+fn install_chat_hooks(db: &Connection) {
+    db.commit_hook(Some(|| {
+        let staged = STAGED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        if let Some(locked) = staged.locked {
+            AUTHORIZATION_LOCKED.store(locked, std::sync::atomic::Ordering::Release);
+        }
+        if let Ok(mut pending) = CHAT_REVOCATIONS.lock() {
+            pending.all |= staged.revocations.all;
+            for (id, level, fence) in staged.revocations.workspaces {
+                merge_revocation(&mut pending, id, level, fence);
+            }
+        }
+        false
+    }));
+    db.rollback_hook(Some(|| {
+        STAGED.with(|s| *s.borrow_mut() = Staged::default());
+    }));
+}
+/// Adds `projects.chat_level` when missing (also for databases still migrating
+/// through older schemas, which fence projects before the column exists).
+#[cfg(any(unix, windows))]
+fn ensure_chat_level_column(db: &Connection) -> Result<()> {
+    let has: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name='chat_level')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        db.execute_batch("ALTER TABLE projects ADD COLUMN chat_level TEXT NOT NULL DEFAULT 'off' CHECK(chat_level IN('off','send','edit','full'));")?;
+    }
+    Ok(())
+}
 fn save_project(tx: &Transaction<'_>, p: &ProjectRecord) -> Result<()> {
+    #[cfg(any(unix, windows))]
+    ensure_chat_level_column(tx)?;
+    #[cfg(any(unix, windows))]
+    let before: Option<String> = tx
+        .query_row(
+            "SELECT chat_level FROM projects WHERE workspace=?1",
+            [key(p.state.context.workspace_id)],
+            |r| r.get(0),
+        )
+        .optional()?;
     tx.execute(
         "UPDATE projects SET state=?2,consent=?3,fence=?4 WHERE workspace=?1",
         params![
@@ -5506,6 +5680,28 @@ fn save_project(tx: &Transaction<'_>, p: &ProjectRecord) -> Result<()> {
             p.fence.to_string()
         ],
     )?;
+    // Chat access never outlives sharing, whichever path cleared consent.
+    #[cfg(any(unix, windows))]
+    {
+        let level = if p.consent {
+            p.chat_level
+        } else {
+            ipc::ChatLevel::Off
+        };
+        tx.execute(
+            "UPDATE projects SET chat_level=?2 WHERE workspace=?1",
+            params![key(p.state.context.workspace_id), level.as_str()],
+        )?;
+        // Every fence/unshare/removal path commits through here, so lowering is
+        // noted once for all of them (a later rollback only costs a spurious stop).
+        if before
+            .as_deref()
+            .and_then(ipc::ChatLevel::parse)
+            .is_some_and(|old| level < old)
+        {
+            stage_chat_revocation((p.state.context.workspace_id, level, p.fence));
+        }
+    }
     Ok(())
 }
 fn queue_publication(tx: &Transaction<'_>, p: &ProjectRecord) -> Result<()> {
@@ -5846,6 +6042,8 @@ fn fence_workspaces(tx: &Transaction<'_>, limits: Limits) -> Result<()> {
 /// The v1/v2 migration runs before migration 12 creates `workspace_removals`.
 /// Keep this path independent from the current project-availability gate.
 fn fence_workspaces_before_removal_schema(tx: &Transaction<'_>, limits: Limits) -> Result<()> {
+    #[cfg(any(unix, windows))]
+    ensure_chat_level_column(tx)?;
     let ids = {
         let mut query =
             tx.prepare("SELECT workspace FROM projects WHERE removed=0 ORDER BY workspace")?;
@@ -5961,6 +6159,8 @@ fn validate_workspace_consent_guard(
     Ok(project)
 }
 fn save_authorization_state(tx: &Transaction<'_>, state: AuthorizationState) -> Result<()> {
+    // Logout, revoke or any lock of Host authorization ends all remote access.
+    stage_authorization_lock(state.locked || state.pending_cloud_revoke);
     if tx.execute("UPDATE authorization_state SET generation=?1,locked=?2,pending_cloud_revoke=?3,clock_floor=?4 WHERE id=1",
         params![state.generation.to_string(),state.locked,state.pending_cloud_revoke,state.clock_floor.to_string()])? != 1 {
         return Err(StoreError::Storage);
@@ -6818,7 +7018,9 @@ mod schema_16_migration_tests {
 
     #[test]
     fn schema_15_to_16_preserves_all_tables_rows_and_identity() {
-        assert_eq!(PROFILE_SCHEMA_VERSION, 16);
+        // Schema 17 only adds projects.chat_level; this fixture rewinds to 15 and
+        // therefore removes that column again before migrating.
+        assert_eq!(PROFILE_SCHEMA_VERSION, 17);
         let profile = private_test_profile();
         let lock =
             lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
@@ -6840,6 +7042,9 @@ mod schema_16_migration_tests {
                 [],
             )
             .expect("insert migration preservation marker");
+        writer
+            .execute("ALTER TABLE projects DROP COLUMN chat_level", [])
+            .expect("remove the schema-17 column from the fixture");
         writer
             .pragma_update(None, "user_version", 15)
             .expect("mark schema-15 fixture");
@@ -6887,10 +7092,26 @@ mod schema_16_migration_tests {
                 |row| row.get(0),
             )
             .expect("read preservation marker");
-        assert_eq!(after_version, 16);
-        assert_eq!(after_tables, before_tables, "schema 16 adds no tables");
+        assert_eq!(after_version, 17);
+        // `projects` gained the schema-17 column; everything else is untouched.
+        let others = |rows: Vec<Vec<rusqlite::types::Value>>| {
+            rows.into_iter()
+                .filter(|row| row.get(2) != Some(&rusqlite::types::Value::Text("projects".into())))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            after_rows, before_rows,
+            others(after_tables),
+            others(before_tables),
+            "schema 16 adds no tables"
+        );
+        let others_rows = |rows: Vec<(String, Vec<Vec<rusqlite::types::Value>>)>| {
+            rows.into_iter()
+                .filter(|(name, _)| name != "projects")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            others_rows(after_rows),
+            others_rows(before_rows),
             "schema 16 preserves all table rows"
         );
         assert_eq!(marker, "preserve-me");
@@ -6899,7 +7120,7 @@ mod schema_16_migration_tests {
         assert_eq!(&main_header[..16], b"SQLite format 3\0");
         assert_eq!(
             u32::from_be_bytes(main_header[60..64].try_into().unwrap()),
-            16
+            17
         );
         let backup = Connection::open_with_flags(
             database.with_extension("before-v16.sqlite"),
@@ -6970,6 +7191,245 @@ mod unknown_effect_tests {
             unknown.0.borrow_mut().insert(op_params(&binding), expired);
             assert!(!unknown.may_be_live(&earlier).unwrap());
             assert!(unknown.0.borrow().is_empty());
+        }
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod chat_level_tests {
+    use super::*;
+    /// The revocation records are process-wide; tests that drain them run one at a time.
+    static SHARED_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SHARED_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    use ipc::ChatLevel;
+    use lomi_remote_protocol::Capability;
+
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("lomi-chat-level-{}", Uuid::new_v4()));
+            fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(fs::canonicalize(path).unwrap())
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn open_at(dir: &Path) -> HostStore {
+        let database = dir.join("host.sqlite3");
+        HostStore::open(&database, Limits::default()).expect("open store")
+    }
+    fn shared_project(store: &mut HostStore, root: &Path) -> WorkspaceId {
+        let project = store
+            .add_project(root, "Chat".to_string().try_into().unwrap())
+            .expect("add project");
+        let id = project.state.context.workspace_id;
+        store.share(id, 0).expect("share");
+        id
+    }
+
+    #[test]
+    fn migration_adds_level_column_to_an_existing_database() {
+        let dir = Dir::new();
+        let root = Dir::new();
+        let mut store = open_at(dir.path());
+        let id = shared_project(&mut store, root.path());
+        drop(store);
+        // Rewind to the previous schema as the old binary left it.
+        let db = Connection::open(dir.path().join("host.sqlite3")).unwrap();
+        db.execute("ALTER TABLE projects DROP COLUMN chat_level", [])
+            .unwrap();
+        db.pragma_update(None, "user_version", CHAT_LEVEL_SCHEMA - 1)
+            .unwrap();
+        drop(db);
+        let store = open_at(dir.path());
+        let project = store.list_projects().unwrap().remove(0);
+        assert_eq!(project.state.context.workspace_id, id);
+        assert!(project.consent);
+        assert_eq!(project.chat_level, ChatLevel::Off);
+        drop(store);
+        let db = Connection::open(dir.path().join("host.sqlite3")).unwrap();
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, VERSION);
+        assert!(
+            db.execute("UPDATE projects SET chat_level='bogus'", [])
+                .is_err(),
+            "the column is CHECK constrained"
+        );
+    }
+
+    #[test]
+    fn level_bumps_fence_publishes_ceiling_and_resets_on_unshare() {
+        let dir = Dir::new();
+        let root = Dir::new();
+        let mut store = open_at(dir.path());
+        let id = shared_project(&mut store, root.path());
+        let fence = store.list_projects().unwrap()[0].fence;
+        let next = store.set_chat_level(id, ChatLevel::Edit).unwrap();
+        assert_eq!(next, fence + 1);
+        let project = store.list_projects().unwrap().remove(0);
+        assert_eq!(project.chat_level, ChatLevel::Edit);
+        let ceiling = project.chat_level.ceiling().unwrap();
+        assert!(ceiling.contains(Capability::ChatPermissionsEdit));
+        assert!(!ceiling.contains(Capability::ChatPermissionsFull));
+        assert!(ceiling.contains(Capability::TerminalControl));
+        assert!(!ceiling.contains(Capability::GitExecute));
+        assert!(
+            store
+                .pending_publications()
+                .unwrap()
+                .iter()
+                .any(|p| p.fence == next && p.enabled)
+        );
+        store.unshare(id).unwrap();
+        assert_eq!(
+            store.list_projects().unwrap()[0].chat_level,
+            ChatLevel::Off,
+            "chat never outlives sharing"
+        );
+    }
+
+    #[test]
+    fn ceilings_by_level() {
+        assert_eq!(ChatLevel::Off.ceiling(), None);
+        let set = |level: ChatLevel| level.ceiling().unwrap();
+        let chat = |level: ChatLevel| {
+            Capability::ALL
+                .into_iter()
+                .filter(|c| c.is_chat() && set(level).contains(*c))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            chat(ChatLevel::Send),
+            vec![Capability::ChatRead, Capability::ChatSend]
+        );
+        assert_eq!(chat(ChatLevel::Edit).len(), 3);
+        assert_eq!(chat(ChatLevel::Full).len(), 4);
+        for level in [ChatLevel::Send, ChatLevel::Edit, ChatLevel::Full] {
+            assert!(set(level).contains(Capability::FilesWrite));
+        }
+    }
+
+    #[test]
+    fn level_lowering_and_unshare_note_chat_revocations_centrally() {
+        let _serial = serial();
+        let dir = Dir::new();
+        let root = Dir::new();
+        let mut store = open_at(dir.path());
+        let id = shared_project(&mut store, root.path());
+        store.set_chat_level(id, ChatLevel::Full).unwrap();
+        let _ = take_chat_revocations();
+        let fence = store.set_chat_level(id, ChatLevel::Send).unwrap();
+        assert!(
+            take_chat_revocations()
+                .workspaces
+                .contains(&(id, ChatLevel::Send, fence))
+        );
+        // Raising notes nothing for this workspace.
+        store.set_chat_level(id, ChatLevel::Full).unwrap();
+        assert!(
+            !take_chat_revocations()
+                .workspaces
+                .iter()
+                .any(|(w, _, _)| *w == id)
+        );
+        // Every consent-clearing path commits through save_project.
+        store.unshare(id).unwrap();
+        assert!(
+            take_chat_revocations()
+                .workspaces
+                .iter()
+                .any(|(w, l, _)| *w == id && *l == ChatLevel::Off)
+        );
+    }
+
+    #[test]
+    fn a_rolled_back_change_never_notes_a_revocation() {
+        let _serial = serial();
+        let dir = Dir::new();
+        let root = Dir::new();
+        let mut store = open_at(dir.path());
+        let id = shared_project(&mut store, root.path());
+        store.set_chat_level(id, ChatLevel::Full).unwrap();
+        let _ = take_chat_revocations();
+        {
+            let tx = store.db.transaction().unwrap();
+            let mut p = project(&tx, id).unwrap();
+            p.chat_level = ChatLevel::Off;
+            p.fence += 1;
+            save_project(&tx, &p).unwrap();
+            drop(tx); // rollback
+        }
+        assert!(
+            !take_chat_revocations()
+                .workspaces
+                .iter()
+                .any(|(w, _, _)| *w == id)
+        );
+        assert_eq!(
+            store.list_projects().unwrap()[0].chat_level,
+            ChatLevel::Full
+        );
+        // The same change, committed, is noted once with its fence.
+        let next = store.set_chat_level(id, ChatLevel::Off).unwrap();
+        assert!(
+            take_chat_revocations()
+                .workspaces
+                .contains(&(id, ChatLevel::Off, next))
+        );
+    }
+
+    #[test]
+    fn authorization_lock_is_published_only_on_commit() {
+        let _serial = serial();
+        let dir = Dir::new();
+        let mut store = open_at(dir.path());
+        let _ = take_chat_revocations();
+        let state = store.authorization_state().unwrap();
+        let unlocked = AuthorizationState {
+            locked: false,
+            pending_cloud_revoke: false,
+            ..state
+        };
+        let locked = AuthorizationState {
+            locked: true,
+            ..unlocked
+        };
+        {
+            let tx = store.db.transaction().unwrap();
+            save_authorization_state(&tx, locked).unwrap();
+            drop(tx); // rollback
+        }
+        assert!(
+            STAGED.with(|s| !s.borrow().revocations.all && s.borrow().locked.is_none()),
+            "a rolled-back lock stages nothing"
+        );
+        {
+            let tx = store.db.transaction().unwrap();
+            save_authorization_state(&tx, locked).unwrap();
+            tx.commit().unwrap();
+        }
+        // `authorization_locked()` is process-wide and other store tests lock and
+        // unlock concurrently, so only the drained record is asserted here.
+        assert!(take_chat_revocations().all);
+        {
+            let tx = store.db.transaction().unwrap();
+            save_authorization_state(&tx, unlocked).unwrap();
+            tx.commit().unwrap();
         }
     }
 }

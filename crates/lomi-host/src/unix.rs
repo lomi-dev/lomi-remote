@@ -73,6 +73,7 @@ mod native_git;
 mod native_git;
 #[cfg(any(unix, windows))]
 mod public_configuration;
+mod remote_chat;
 mod remote_file_namespace;
 mod remote_files;
 mod remote_files_watch;
@@ -187,6 +188,25 @@ fn summary(project: &ProjectRecord) -> Result<LocalWorkspaceSummary, LocalError>
         },
     })
 }
+fn local_chat_thread(
+    workspace_id: WorkspaceId,
+    t: &lomi_chat::store::ThreadSummary,
+) -> Option<LocalChatThread> {
+    use lomi_remote_protocol::*;
+    Some(LocalChatThread {
+        workspace_id,
+        thread_id: ChatThreadId::try_from(t.thread_id.clone()).ok()?,
+        title: ChatTitle::try_from(t.title.clone()).ok()?,
+        provider_id: ChatProviderId::try_from(t.instance_id.clone()).ok()?,
+        permissions: match t.permissions {
+            lomi_chat::settings::Permissions::ReadOnly => ChatPermissions::ReadOnly,
+            lomi_chat::settings::Permissions::Edit => ChatPermissions::Edit,
+            lomi_chat::settings::Permissions::Full => ChatPermissions::Full,
+        },
+        streaming: t.streaming,
+        updated_ms: DecimalU64(t.updated_ms),
+    })
+}
 struct Coordinator {
     profile: Option<PathBuf>,
     started: Instant,
@@ -202,6 +222,7 @@ struct Coordinator {
     workspace_locks:
         Arc<Mutex<std::collections::BTreeMap<WorkspaceId, std::sync::Weak<Mutex<()>>>>>,
     files: remote_files::Roots,
+    chat: remote_chat::Chat,
     git_reads: remote_git::Reads,
     git_mutations: remote_git_mutations::Mutations,
     native_editor: Mutex<Option<Arc<native_editor::NativeEditorHost>>>,
@@ -231,6 +252,7 @@ impl Coordinator {
             stopping,
             workspace_locks: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             files: remote_files::Roots::default(),
+            chat: remote_chat::Chat::default(),
             git_reads,
             git_mutations,
             native_editor: Mutex::new(None),
@@ -330,7 +352,13 @@ impl Coordinator {
                 .map_err(|_| LocalError::Unavailable)?
                 .clone()
                 .ok_or(LocalError::Unavailable)?;
-            return auth.dispatch(operation, call);
+            let logout = matches!(&call, LocalCall::Logout(_));
+            let result = auth.dispatch(operation, call);
+            // Host logout revokes all remote access: nothing may keep generating.
+            if logout && result.is_ok() {
+                self.chat.kill_all();
+            }
+            return result;
         }
         if matches!(
             &call,
@@ -342,6 +370,7 @@ impl Coordinator {
             LocalCall::Share(target)
             | LocalCall::Unshare(target)
             | LocalCall::WorkspaceRemove(target) => Some(self.workspace_lock(target.workspace_id)?),
+            LocalCall::ChatLevelSet(target) => Some(self.workspace_lock(target.workspace_id)?),
             LocalCall::ShareAuthorized(target) | LocalCall::UnshareAuthorized(target) => {
                 Some(self.workspace_lock(target.workspace_id)?)
             }
@@ -359,6 +388,10 @@ impl Coordinator {
         | LocalCall::Unshare(target)
         | LocalCall::WorkspaceRemove(target) = &call
         {
+            rpc::ensure_workspace_settled(self, target.workspace_id)
+                .map_err(|_| LocalError::Unavailable)?;
+        }
+        if let LocalCall::ChatLevelSet(target) = &call {
             rpc::ensure_workspace_settled(self, target.workspace_id)
                 .map_err(|_| LocalError::Unavailable)?;
         }
@@ -679,6 +712,10 @@ impl Coordinator {
                 Ok(LocalResult::ShellProfileRegistered { profile_id })
             }
             LocalCall::WorkspaceRemove(target) => {
+                // Removal ends the workspace's chat access like an unshare.
+                // The fence is unknown before removal commits: u64::MAX never goes stale.
+                self.chat
+                    .enforce_level(target.workspace_id, ChatLevel::Off, u64::MAX);
                 match workspace_removal::remove_workspace(self, operation, target.workspace_id) {
                     Ok(outcome) => {
                         let status = removal_status(target.workspace_id, Some(outcome));
@@ -761,7 +798,10 @@ impl Coordinator {
                         .begin_unshare_if_authorized(operation, target.clone())
                 })
                 .map_err(owner_error)?;
-                rpc::owner_call(operation, || turn.try_commit()).map_err(owner_error)?;
+                let fence =
+                    rpc::owner_call(operation, || turn.try_commit()).map_err(owner_error)?;
+                self.chat
+                    .enforce_level(target.workspace_id, ChatLevel::Off, fence);
                 let project = rpc::owner_call(operation, || {
                     self.owner.workspace(operation, target.workspace_id)
                 })
@@ -773,12 +813,79 @@ impl Coordinator {
                     self.owner.begin_unshare(operation, target.workspace_id)
                 })
                 .map_err(owner_error)?;
-                rpc::owner_call(operation, || turn.try_commit()).map_err(owner_error)?;
+                let fence =
+                    rpc::owner_call(operation, || turn.try_commit()).map_err(owner_error)?;
+                self.chat
+                    .enforce_level(target.workspace_id, ChatLevel::Off, fence);
                 let project = rpc::owner_call(operation, || {
                     self.owner.workspace(operation, target.workspace_id)
                 })
                 .map_err(owner_error)?;
                 Ok(LocalResult::Workspace(summary(&project)?))
+            }
+            LocalCall::ChatLevelSet(target) => {
+                let mut turn = rpc::owner_call(operation, || {
+                    self.owner
+                        .begin_chat_level(operation, target.workspace_id, target.level)
+                })
+                .map_err(owner_error)?;
+                let fence =
+                    rpc::owner_call(operation, || turn.try_commit()).map_err(owner_error)?;
+                // Lowering (or disabling) ends running generations above the new level.
+                self.chat
+                    .enforce_level(target.workspace_id, target.level, fence);
+                self.chat.audit_level(target.workspace_id, target.level);
+                Ok(LocalResult::ChatLevel(LocalChatLevelState {
+                    workspace_id: target.workspace_id,
+                    level: target.level,
+                }))
+            }
+            LocalCall::ChatThreads(target) => {
+                let project = rpc::owner_call(operation, || {
+                    self.owner.workspace(operation, target.workspace_id)
+                })
+                .map_err(owner_error)?;
+                let threads = self
+                    .chat
+                    .local_threads(project.state.context.workspace_id)
+                    .map_err(|_| LocalError::Unavailable)?;
+                let items = threads
+                    .iter()
+                    .filter_map(|t| local_chat_thread(target.workspace_id, t))
+                    .collect();
+                Ok(LocalResult::ChatThreads(BoundedList(items)))
+            }
+            LocalCall::ChatStop(target) => {
+                let thread = self
+                    .chat
+                    .local_stop(&String::from(target.thread_id))
+                    .map_err(|_| LocalError::InvalidArgument)?;
+                let workspace = thread
+                    .workspace_id
+                    .as_deref()
+                    .and_then(|w| WorkspaceId::try_from(w.to_owned()).ok())
+                    .ok_or(LocalError::Unavailable)?;
+                local_chat_thread(workspace, &thread)
+                    .map(LocalResult::ChatThread)
+                    .ok_or(LocalError::Unavailable)
+            }
+            LocalCall::ChatDelete(target) => {
+                self.chat
+                    .local_delete(&String::from(target.thread_id))
+                    .map_err(|_| LocalError::InvalidArgument)?;
+                Ok(LocalResult::ChatDeleted {})
+            }
+            LocalCall::ChatAudit(target) => {
+                let lines = self
+                    .chat
+                    .audit_tail(target.limit.0 as usize)
+                    .map_err(|_| LocalError::Unavailable)?;
+                Ok(LocalResult::ChatAudit(BoundedList(
+                    lines
+                        .into_iter()
+                        .filter_map(|l| LocalChatAuditLine::try_from(l).ok())
+                        .collect(),
+                )))
             }
             LocalCall::DaemonStop(_) => {
                 self.stopping.store(true, Ordering::Release);
@@ -2135,6 +2242,7 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
     )
     .map_err(|_| HostError::Storage)?;
     coordinator.profile = Some(profile.to_path_buf());
+    coordinator.chat = remote_chat::Chat::at(profile.join("chat"));
     let native_editor = Arc::new(native_editor::NativeEditorHost::new(
         profile.to_path_buf(),
         coordinator.owner.clone(),
@@ -2460,6 +2568,8 @@ fn run_with_managed_callbacks_using_auth_bound_mode(
     if let Ok(native_git) = coordinator.native_git() {
         native_git.shutdown_and_join();
     }
+    // No chat CLI may outlive the Host.
+    coordinator.chat.shutdown();
     if coordinator.terminals.shutdown().is_err() {
         failure = Some(HostError::Cleanup);
     } else {
@@ -3247,8 +3357,8 @@ mod initialization_receipt_tests {
         ));
         assert_eq!(
             schema(&lock, &identity),
-            16,
-            "schema 16 is committed before receipt v2"
+            17,
+            "the current schema is committed before receipt v2"
         );
         let receipt_before_old_access = lock
             .read_host_initialization_receipt()

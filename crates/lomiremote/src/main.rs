@@ -492,6 +492,41 @@ fn print_response(response: LocalResponse, json: bool) -> u8 {
                     );
                 }
             }
+            Ok(LocalResult::ChatLevel(state)) => println!(
+                "{}  chat {}",
+                String::from(state.workspace_id),
+                state.level.as_str()
+            ),
+            Ok(LocalResult::ChatThreads(threads)) => {
+                if threads.0.is_empty() {
+                    println!("No chat threads.");
+                }
+                for t in threads.0 {
+                    println!(
+                        "{}  {}  {}  {}{}",
+                        String::from(t.thread_id),
+                        t.provider_id.as_str(),
+                        match t.permissions {
+                            lomi_remote_protocol::ChatPermissions::ReadOnly => "read-only",
+                            lomi_remote_protocol::ChatPermissions::Edit => "edit",
+                            lomi_remote_protocol::ChatPermissions::Full => "full",
+                        },
+                        ui::safe_label(String::from(t.title).as_str()),
+                        if t.streaming { "  [running]" } else { "" }
+                    );
+                }
+            }
+            Ok(LocalResult::ChatThread(t)) => println!(
+                "{}  {}",
+                String::from(t.thread_id),
+                if t.streaming { "running" } else { "stopped" }
+            ),
+            Ok(LocalResult::ChatDeleted {}) => println!("Chat thread deleted."),
+            Ok(LocalResult::ChatAudit(lines)) => {
+                for line in lines.0 {
+                    println!("{}", line.as_str());
+                }
+            }
             Ok(LocalResult::AuthConfigured {}) => println!("Host authentication configured."),
             Ok(LocalResult::LoginAccepted(result)) => println!(
                 "Login started: {}\nUse `lomiremote login code` to display the user code.",
@@ -547,8 +582,74 @@ fn workspace_target(arguments: &ArgMatches) -> Result<LocalWorkspaceTarget, Fail
         operator_intent: Confirmed::Confirmed,
     })
 }
+fn chat_workspace(args: &ArgMatches) -> Result<WorkspaceId, Failure> {
+    args.get_one::<String>("workspace-id")
+        .and_then(|id| WorkspaceId::try_from(id.clone()).ok())
+        .ok_or_else(Failure::arguments)
+}
+fn chat_thread(args: &ArgMatches) -> Result<lomi_remote_protocol::ChatThreadId, Failure> {
+    args.get_one::<String>("thread-id")
+        .and_then(|id| lomi_remote_protocol::ChatThreadId::try_from(id.clone()).ok())
+        .ok_or_else(Failure::arguments)
+}
+fn chat_confirmed(args: &ArgMatches, warning: bool) -> Result<(), Failure> {
+    if args.get_flag("confirm") {
+        return Ok(());
+    }
+    if warning {
+        eprintln!("{}", cli::CHAT_ENABLE_WARNING);
+    }
+    Err(Failure {
+        code: "CONFIRMATION_REQUIRED",
+        exit: 2,
+    })
+}
+fn chat_call(arguments: &ArgMatches) -> Result<LocalCall, Failure> {
+    use lomi_remote_protocol::ipc::*;
+    let level_set = |args: &ArgMatches, level, warning| -> Result<LocalCall, Failure> {
+        chat_confirmed(args, warning)?;
+        Ok(LocalCall::ChatLevelSet(LocalChatLevelSet {
+            workspace_id: chat_workspace(args)?,
+            level,
+            operator_intent: Confirmed::Confirmed,
+        }))
+    };
+    match arguments.subcommand() {
+        Some(("enable", args)) => level_set(args, ChatLevel::Full, true),
+        Some(("disable", args)) => level_set(args, ChatLevel::Off, false),
+        Some(("ceiling", args)) => {
+            let level = args
+                .get_one::<String>("level")
+                .and_then(|l| ChatLevel::parse(l))
+                .filter(|l| *l != ChatLevel::Off)
+                .ok_or_else(Failure::arguments)?;
+            level_set(args, level, false)
+        }
+        Some(("threads", args)) => Ok(LocalCall::ChatThreads(LocalWorkspaceRead {
+            workspace_id: chat_workspace(args)?,
+        })),
+        Some(("stop", args)) => Ok(LocalCall::ChatStop(LocalChatThreadTarget {
+            thread_id: chat_thread(args)?,
+        })),
+        Some(("delete", args)) => {
+            chat_confirmed(args, false)?;
+            Ok(LocalCall::ChatDelete(LocalChatThreadDelete {
+                thread_id: chat_thread(args)?,
+                operator_intent: Confirmed::Confirmed,
+            }))
+        }
+        Some(("audit", args)) => Ok(LocalCall::ChatAudit(LocalChatAuditRead {
+            limit: args
+                .get_one::<u32>("limit")
+                .and_then(|l| lomi_remote_protocol::rpc::PageLimit::try_from(*l).ok())
+                .ok_or_else(Failure::arguments)?,
+        })),
+        _ => Err(Failure::arguments()),
+    }
+}
 fn call_for(arguments: &ArgMatches) -> Result<(LocalCall, bool), Failure> {
     match arguments.subcommand() {
+        Some(("chat", args)) => Ok((chat_call(args)?, false)),
         Some(("status", args)) => Ok((LocalCall::Status {}, args.get_flag("json"))),
         Some(("doctor", args)) => Ok((LocalCall::Doctor {}, args.get_flag("json"))),
         Some(("maintenance", args)) => match args.subcommand() {

@@ -418,6 +418,7 @@ impl HostStore {
                 workspace_epoch: project.state.context.workspace_epoch,
                 terminals: PublicationTerminals::try_from(terminals)
                     .map_err(|_| StoreError::Invalid)?,
+                capabilities: project.chat_level.ceiling(),
             });
         }
         let workspace_publications = {

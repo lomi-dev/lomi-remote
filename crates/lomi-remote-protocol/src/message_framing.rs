@@ -23,6 +23,7 @@ pub enum MessageKind {
     WorkspaceFrame = 3,
     TerminalFrame = 4,
     FileWatchFrame = 5,
+    ChatStreamFrame = 6,
 }
 
 impl MessageKind {
@@ -33,6 +34,7 @@ impl MessageKind {
             3 => Ok(Self::WorkspaceFrame),
             4 => Ok(Self::TerminalFrame),
             5 => Ok(Self::FileWatchFrame),
+            6 => Ok(Self::ChatStreamFrame),
             _ => Err(FramingError::Kind),
         }
     }

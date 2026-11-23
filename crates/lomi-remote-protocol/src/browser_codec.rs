@@ -40,6 +40,9 @@ pub fn protocol_validate_wire(kind: &str, json: &str) -> Result<(), JsValue> {
         "file-watch-frame" | "FileWatchFrame" => decode_watch_frame(json.as_bytes())
             .map(|_| ())
             .map_err(|_| invalid()),
+        "chat-stream-frame" | "ChatStreamFrame" => decode_chat_frame(json.as_bytes())
+            .map(|_| ())
+            .map_err(|_| invalid()),
         "local-request" | "LocalRequest" => decode_local_request(&local_frame(json))
             .map(|_| ())
             .map_err(|_| invalid()),

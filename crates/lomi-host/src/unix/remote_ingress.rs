@@ -658,6 +658,10 @@ struct Connection<'cancel> {
     next_stream_class: u8,
     stream: Option<PendingStream<'cancel>>,
     watch_call: Option<RpcRequest>,
+    /// The connection's single chat subscription and the request that authorized it.
+    /// Subscriptions are resources like `watch`, not retained operations.
+    chat_sub: Option<super::super::remote_chat::ChatSub>,
+    chat_call: Option<RpcRequest>,
     started_git_outputs: VecDeque<QueuedStartedOutput<'cancel>>,
     /// Reserved output bytes for a pending asynchronous Git response.
     git_output_reservation: usize,
@@ -1434,6 +1438,8 @@ impl<'cancel> Driver<'cancel> {
             next_stream_class: 0,
             stream: None,
             watch_call: None,
+            chat_sub: None,
+            chat_call: None,
             started_git_outputs: VecDeque::new(),
             git_output_reservation: 0,
             socket: ingress_socket(socket),
@@ -3794,7 +3800,13 @@ impl<'cancel> Connection<'cancel> {
                 stream.authorization_call.is_some(),
             ) {
                 (Some(_), MessageKind::TerminalFrame, false)
-                | (None, MessageKind::WorkspaceFrame | MessageKind::FileWatchFrame, true) => {}
+                | (
+                    None,
+                    MessageKind::WorkspaceFrame
+                    | MessageKind::FileWatchFrame
+                    | MessageKind::ChatStreamFrame,
+                    true,
+                ) => {}
                 _ => return Err(peer::PeerError::Invalid),
             }
             let stream_runtime = Runtime {
@@ -4256,8 +4268,8 @@ impl<'cancel> Connection<'cancel> {
             let mut outbound = None;
             // Rotate stream classes so a busy terminal or directory cannot
             // indefinitely delay workspace changes on the same connection.
-            for offset in 0..3 {
-                let class = (self.next_stream_class + offset) % 3;
+            for offset in 0..4 {
+                let class = (self.next_stream_class + offset) % 4;
                 outbound = match class {
                     0 => self
                         .terminal
@@ -4302,10 +4314,29 @@ impl<'cancel> Connection<'cancel> {
                         })
                         .transpose()
                         .map_err(invalid_at!())?,
+                    // The subscribe response (kind 2) is always flushed before this point:
+                    // a pending response or stream message is sent first (see
+                    // `prioritized_staged_remaining`), so snapshot/delta frames of a
+                    // new subscription can never overtake its response.
+                    3 if self.response.is_none() => {
+                        if self.chat_sub.as_ref().is_some_and(|sub| sub.is_dead()) {
+                            self.chat_sub = None;
+                            self.chat_call = None;
+                        }
+                        self.chat_sub
+                            .as_ref()
+                            .and_then(|sub| sub.poll())
+                            .map(|frame| {
+                                serde_json::to_vec(&frame)
+                                    .map(|bytes| (MessageKind::ChatStreamFrame, bytes, None))
+                            })
+                            .transpose()
+                            .map_err(invalid_at!())?
+                    }
                     _ => None,
                 };
                 if outbound.is_some() {
-                    self.next_stream_class = (class + 1) % 3;
+                    self.next_stream_class = (class + 1) % 4;
                     break;
                 }
             }
@@ -4315,6 +4346,7 @@ impl<'cancel> Connection<'cancel> {
                 let authorization_call = match kind {
                     MessageKind::WorkspaceFrame => self.workspace_stream_call.clone(),
                     MessageKind::FileWatchFrame => self.watch_call.clone(),
+                    MessageKind::ChatStreamFrame => self.chat_call.clone(),
                     MessageKind::TerminalFrame => None,
                     _ => return Err(peer::PeerError::Invalid),
                 };
@@ -4780,6 +4812,35 @@ impl<'cancel> Connection<'cancel> {
                             super::super::remote_files::execute_read(&files, &request.call)
                         })
                 }
+            } else if super::remote_connection::is_chat_call(&request.call) {
+                let (_, grant, scope) = {
+                    let turn = peer::owner_turn(request_runtime, || {
+                        request_runtime.owner.try_remote_workspace_turn(
+                            &evidence,
+                            &current,
+                            &self.workspace,
+                        )
+                    })?;
+                    turn.chat_after_wait(crypto, &queued)
+                        .map_err(invalid_at!())?
+                };
+                // Every owner turn is gone before chat work; the response still
+                // passes the ordinary live gate when it is sent.
+                let coordinator = self.coordinator.upgrade().ok_or(peer::PeerError::Invalid)?;
+                let mut new_sub = None;
+                let outcome = coordinator.chat.execute(
+                    &request.call,
+                    &grant,
+                    &scope,
+                    operation.deadline(),
+                    &mut new_sub,
+                );
+                if let Some(sub) = new_sub {
+                    // One slot: a new subscription replaces the previous one.
+                    self.chat_sub = Some(sub);
+                    self.chat_call = Some(request.clone());
+                }
+                outcome
             } else if matches!(
                 &request.call,
                 RpcCall::GitRepositories(_)
@@ -4920,12 +4981,15 @@ impl<'cancel> Connection<'cancel> {
                     result,
                 },
                 Err(error) => {
+                    // A chat denial happens after the queued ticket was consumed, so it is
+                    // an ordinary error response rather than a reason to drop the channel.
+                    let chat = super::remote_connection::is_chat_call(&request.call);
                     if error.effect() == lomi_remote_protocol::Effect::Unknown
                         || matches!(
                             error.code(),
-                            lomi_remote_protocol::ErrorCode::ScopeDenied
-                                | lomi_remote_protocol::ErrorCode::ServiceUnavailable
+                            lomi_remote_protocol::ErrorCode::ServiceUnavailable
                         )
+                        || (!chat && error.code() == lomi_remote_protocol::ErrorCode::ScopeDenied)
                     {
                         // Early actor/owner/coordinator failures can precede
                         // after_wait consumption. Dispose rather than retaining
@@ -4935,7 +4999,7 @@ impl<'cancel> Connection<'cancel> {
                     RpcResponse::Error {
                         v: request.v,
                         request_id: request.request_id.clone(),
-                        operation_id: None,
+                        operation_id: request.call.chat_operation_id(),
                         error,
                     }
                 }
@@ -6086,6 +6150,8 @@ mod terminal_renew_fast_path_tests {
             next_stream_class: 0,
             stream: None,
             watch_call: None,
+            chat_sub: None,
+            chat_call: None,
             started_git_outputs: VecDeque::new(),
             git_output_reservation: 0,
             socket: IngressSocket::memory([]),

@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute",
+        "chat.read",
+        "chat.send",
+        "chat.permissions.edit",
+        "chat.permissions.full"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
     "DecimalU64": {
       "maxLength": 20,
       "not": {
@@ -55,7 +80,18 @@
     },
     "PublishedWorkspace": {
       "additionalProperties": false,
+      "description": "`capabilities` is the published ceiling; omitted (not null) when the Host\npublishes none, so Hosts without it keep byte-identical JSON.",
       "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilitySet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "terminals": {
           "$ref": "#/$defs/PublicationTerminals"
         },

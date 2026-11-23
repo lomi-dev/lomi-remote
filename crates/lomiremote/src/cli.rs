@@ -18,6 +18,8 @@ fn confirm_flag() -> Arg {
         .help("Confirm the displayed destructive or access change")
         .action(ArgAction::SetTrue)
 }
+/// Shown by `chat enable --help` and whenever `--confirm` is missing.
+pub const CHAT_ENABLE_WARNING: &str = "Remote Chat AI lets signed-in remote devices send prompts to AI CLIs (Claude Code, Codex, Kimi, Antigravity) that run on THIS computer with your account. The agent may read any file this OS account can read - including other workspaces' chat history and Host data - and send it to the AI provider; with edit/full permissions it can change files and run code. Read-only mode is restricted where the CLI allows it but is not a sandbox. Enabling sets the highest level (full); lower it with `chat ceiling`.";
 pub fn command() -> Command {
     Command::new("lomiremote")
         .version(env!("CARGO_PKG_VERSION"))
@@ -67,6 +69,20 @@ pub fn command() -> Command {
             .subcommand(Command::new("share").about("Request workspace sharing").arg(workspace_id()).arg(confirm_flag())
                 .arg(Arg::new("policy").long("policy").value_parser(["owner-account"]).default_value("owner-account")))
             .subcommand(Command::new("unshare").about("Revoke workspace sharing, preserving local sessions").arg(workspace_id()).arg(confirm_flag())))
+        .subcommand(Command::new("chat").about("Manage remote Chat AI access and threads")
+            .subcommand_required(true)
+            .subcommand(Command::new("enable").about("Allow remote Chat AI on a shared workspace (level full)")
+                .long_about(CHAT_ENABLE_WARNING).arg(workspace_id()).arg(confirm_flag()))
+            .subcommand(Command::new("disable").about("Turn remote Chat AI off and stop its running generations").arg(workspace_id()).arg(confirm_flag()))
+            .subcommand(Command::new("ceiling").about("Set the highest thread permission remote clients may use")
+                .arg(workspace_id())
+                .arg(Arg::new("level").required(true).value_parser(["send", "edit", "full"]).help("send = read-only threads"))
+                .arg(confirm_flag()))
+            .subcommand(Command::new("threads").about("List a workspace's chat threads").arg(workspace_id()))
+            .subcommand(Command::new("stop").about("Stop a running generation").arg(Arg::new("thread-id").required(true)))
+            .subcommand(Command::new("delete").about("Delete a thread and its messages").arg(Arg::new("thread-id").required(true)).arg(confirm_flag()))
+            .subcommand(Command::new("audit").about("Show the chat audit log (metadata only)")
+                .arg(Arg::new("limit").long("limit").value_parser(value_parser!(u32).range(1..=200)).default_value("50"))))
         .subcommand(Command::new("auth").about("Configure host authentication explicitly")
             .subcommand_required(true)
             .subcommand(Command::new("configure")

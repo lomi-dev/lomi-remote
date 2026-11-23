@@ -45,14 +45,15 @@ const MARKER: &CStr = c"host-secrets.secret-service";
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_XDG_SCHEMA_BYTES: usize = 255;
 const APPLICATION_ATTRIBUTE: &str = "dev.lomi.remote.host-secrets.v1";
-const HOST_SCHEMA_VERSION: u32 = 16;
+// Schema 17 (projects.chat_level) is the current Linux Host profile schema.
+const HOST_SCHEMA_VERSION: u32 = 17;
 const MAX_UNMARKED_BTRFS_ITEMS: usize = 128;
 const MAX_UNMARKED_BTRFS_ITEM_ATTRIBUTES: usize = 5;
 const MAX_UNMARKED_BTRFS_ATTRIBUTE_KEY_BYTES: usize = 64;
 const MAX_UNMARKED_BTRFS_ATTRIBUTE_VALUE_BYTES: usize = 255;
 
 /// Checked identity of the Host profile that owns a Secret Service provider.
-/// Btrfs marker writes require its durable, checkpointed schema-16 main file.
+/// Btrfs marker writes require its durable, checkpointed current-schema main file.
 /// The root directory and database descriptors stay pinned for the provider's
 /// lifetime; callers cannot construct this type without opening a private Host
 /// profile.
@@ -1728,13 +1729,18 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_host_context_requires_exact_durable_main_header_schema_16() {
+    fn btrfs_host_context_requires_exact_durable_main_header_current_schema() {
         let (_directory, profile) = private_profile();
         write_host_header(&profile, HOST_SCHEMA_VERSION, true);
         let mut context = HostProfileContext::open(profile.path()).unwrap();
         assert_eq!(context.require_current_schema_for(&profile), Ok(()));
 
-        for version in [15, 17, u32::MAX] {
+        for version in [
+            15,
+            HOST_SCHEMA_VERSION - 1,
+            HOST_SCHEMA_VERSION + 1,
+            u32::MAX,
+        ] {
             let (_directory, profile) = private_profile();
             let original = write_host_header(&profile, version, true);
             let mut wal = fs::OpenOptions::new()
@@ -1743,7 +1749,7 @@ mod tests {
                 .mode(0o600)
                 .open(profile.path().join("host.sqlite3-wal"))
                 .unwrap();
-            wal.write_all(b"uncheckpointed wal version 16").unwrap();
+            wal.write_all(b"uncheckpointed wal version").unwrap();
             wal.sync_all().unwrap();
             let mut context = HostProfileContext::open(profile.path()).unwrap();
             assert_eq!(

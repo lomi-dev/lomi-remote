@@ -128,6 +128,26 @@ export type LocalResult =
       value: WorkspaceId;
     }
   | {
+      type: "chatLevel";
+      value: LocalChatLevelState;
+    }
+  | {
+      type: "chatThreads";
+      value: BoundedList7;
+    }
+  | {
+      type: "chatThread";
+      value: LocalChatThread;
+    }
+  | {
+      type: "chatDeleted";
+      value: {};
+    }
+  | {
+      type: "chatAudit";
+      value: BoundedList8;
+    }
+  | {
       type: "rpc";
       value: RpcResponse;
     }
@@ -325,6 +345,24 @@ export type TabId = string;
  * @maxItems 32
  */
 export type BoundedList6 = TerminalTab[];
+/**
+ * Owner-granted Chat AI level of one workspace. `Off` is the default: nothing
+ * chat-related enters the ceiling or the publication.
+ */
+export type ChatLevel = "off" | "send" | "edit" | "full";
+export type ChatPermissions = "read-only" | "edit" | "full";
+export type ChatProviderId = string;
+export type ChatThreadId = string;
+export type ChatTitle = string;
+/**
+ * @maxItems 200
+ */
+export type BoundedList7 = LocalChatThread[];
+export type LocalChatAuditLine = string;
+/**
+ * @maxItems 200
+ */
+export type BoundedList8 = LocalChatAuditLine[];
 export type RpcResponse =
   | {
       requestId: RequestId;
@@ -489,6 +527,42 @@ export type RpcResult =
       params: OperationReceipt;
     }
   | {
+      method: "chat.providers";
+      params: ChatProvidersResult;
+    }
+  | {
+      method: "chat.threads.list";
+      params: ChatThreadsListResult;
+    }
+  | {
+      method: "chat.thread.get";
+      params: ChatThreadGetResult;
+    }
+  | {
+      method: "chat.subscribe";
+      params: ChatSubscribeResult;
+    }
+  | {
+      method: "chat.thread.create";
+      params: ChatThreadResult;
+    }
+  | {
+      method: "chat.thread.update";
+      params: ChatThreadResult;
+    }
+  | {
+      method: "chat.thread.delete";
+      params: ChatThreadDeleteResult;
+    }
+  | {
+      method: "chat.send";
+      params: ChatSendResult;
+    }
+  | {
+      method: "chat.stop";
+      params: ChatThreadResult;
+    }
+  | {
       method: "operation.status";
       params: OperationReceipt;
     }
@@ -506,12 +580,16 @@ export type Capability =
   | "git.read"
   | "git.write"
   | "git.network"
-  | "git.execute";
+  | "git.execute"
+  | "chat.read"
+  | "chat.send"
+  | "chat.permissions.edit"
+  | "chat.permissions.full";
 export type CapabilitySet = Capability[];
 /**
  * @maxItems 32
  */
-export type BoundedList7 = HostProfile[];
+export type BoundedList9 = HostProfile[];
 export type ChunkCount = number;
 export type EventCursor = string;
 export type SubscriptionId = string;
@@ -555,6 +633,15 @@ export type Method =
   | "git.fetch"
   | "git.push"
   | "git.pull"
+  | "chat.providers"
+  | "chat.threads.list"
+  | "chat.thread.get"
+  | "chat.subscribe"
+  | "chat.thread.create"
+  | "chat.thread.update"
+  | "chat.thread.delete"
+  | "chat.send"
+  | "chat.stop"
   | "operation.status"
   | "operation.cancel";
 export type OperationParameterHash = string;
@@ -599,58 +686,90 @@ export type EncodedPathId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList8 = FileMetadata[];
+export type BoundedList10 = FileMetadata[];
 /**
  * @maxItems 1048576
  */
-export type BoundedList9 = number[];
+export type BoundedList11 = number[];
 export type FileEncoding = "utf8" | "utf16Le" | "utf16Be" | "binary" | "unknown";
 export type LineEndings = "lf" | "crLf" | "cr" | "mixed" | "none";
 export type RefId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList12 = RefId[];
+export type BoundedList14 = RefId[];
 export type RemoteId = string;
 export type GitRemoteSelectorKind = "head" | "fetch" | "push";
 /**
  * @maxItems 200
  */
-export type BoundedList13 = GitRemoteSelector[];
+export type BoundedList15 = GitRemoteSelector[];
 /**
  * @maxItems 32
  */
-export type BoundedList11 = GitRemote[];
+export type BoundedList13 = GitRemote[];
 export type RepositoryId = string;
 /**
  * @maxItems 32
  */
-export type BoundedList10 = GitRepository[];
+export type BoundedList12 = GitRepository[];
 export type GitChange =
   "unchanged" | "added" | "modified" | "deleted" | "renamed" | "copied" | "unmerged" | "untracked";
 /**
  * @maxItems 200
  */
-export type BoundedList14 = GitStatusEntry[];
+export type BoundedList16 = GitStatusEntry[];
 export type DiffLineKind = "context" | "added" | "removed";
 export type DiffLineText = string;
 /**
  * @maxItems 200
  */
-export type BoundedList17 = GitDiffLine[];
+export type BoundedList19 = GitDiffLine[];
 /**
  * @maxItems 200
  */
-export type BoundedList16 = GitDiffHunk[];
+export type BoundedList18 = GitDiffHunk[];
 /**
  * @maxItems 200
  */
-export type BoundedList15 = GitDiffFile[];
+export type BoundedList17 = GitDiffFile[];
 export type ObjectId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList18 = GitCommitSummary[];
+export type BoundedList20 = GitCommitSummary[];
+export type ChatName = string;
+export type ChatEffort = string;
+/**
+ * @maxItems 16
+ */
+export type BoundedList23 = ChatEffort[];
+export type ChatKind = "api" | "cli";
+export type ChatModelId = string;
+/**
+ * @maxItems 256
+ */
+export type BoundedList22 = ChatModel[];
+/**
+ * @maxItems 32
+ */
+export type BoundedList21 = ChatProvider[];
+export type ChatCursor = string;
+export type ChatWorkspaceMode = "project" | "private";
+/**
+ * @maxItems 200
+ */
+export type BoundedList24 = ChatThread[];
+export type ChatMessageContent = string;
+export type ChatMessageId = string;
+export type ChatRole = "user" | "assistant";
+export type ChatMessageState =
+  "committed" | "dispatching" | "streaming" | "completed" | "stopped" | "failed" | "interrupted";
+export type ChatStopReason = string;
+/**
+ * @maxItems 50
+ */
+export type BoundedList25 = ChatMessage[];
 export type ApplicationMajor = 2;
 export type ErrorCode =
   | "INVALID_ARGUMENT"
@@ -666,6 +785,7 @@ export type ErrorCode =
   | "FILE_CHANGED"
   | "IDEMPOTENCY_CONFLICT"
   | "HOST_BUSY"
+  | "CHAT_BUSY"
   | "CONTROL_REQUIRED"
   | "CONTROL_REVOKED"
   | "SESSION_EXITED"
@@ -853,9 +973,22 @@ export interface TerminalContext {
   sessionId: TerminalSessionId;
   workspace: WorkspaceContext;
 }
+export interface LocalChatLevelState {
+  level: ChatLevel;
+  workspaceId: WorkspaceId;
+}
+export interface LocalChatThread {
+  permissions: ChatPermissions;
+  providerId: ChatProviderId;
+  streaming: boolean;
+  threadId: ChatThreadId;
+  title: ChatTitle;
+  updatedMs: DecimalU64;
+  workspaceId: WorkspaceId;
+}
 export interface WorkspaceCapabilitiesResult {
   capabilities: CapabilitySet;
-  profiles: BoundedList7;
+  profiles: BoundedList9;
 }
 export interface HostProfile {
   name: DisplayText;
@@ -937,7 +1070,7 @@ export interface TerminalResizeResult {
   terminal: TerminalContext;
 }
 export interface FilesListResult {
-  entries: BoundedList8;
+  entries: BoundedList10;
   nextCursor?: EventCursor | null;
   truncated: boolean;
 }
@@ -950,7 +1083,7 @@ export interface FileMetadata {
   size: DecimalU64;
 }
 export interface FilesReadResult {
-  bytes: BoundedList9;
+  bytes: BoundedList11;
   encoding: FileEncoding;
   lineEndings: LineEndings;
   metadata: FileMetadata;
@@ -963,19 +1096,19 @@ export interface FilesWatchResult {
   throughSeq: DecimalU64;
 }
 export interface GitRepositoriesResult {
-  repositories: BoundedList10;
+  repositories: BoundedList12;
 }
 export interface GitRepository {
   displayName: DisplayText;
-  remotes: BoundedList11;
+  remotes: BoundedList13;
   repositoryId: RepositoryId;
 }
 export interface GitRemote {
   displayName: DisplayText;
-  refs: BoundedList12;
+  refs: BoundedList14;
   refsStateToken: RepoStateToken;
   remoteId: RemoteId;
-  selectors?: BoundedList13;
+  selectors?: BoundedList15;
 }
 export interface GitRemoteSelector {
   displayName: DisplayText;
@@ -986,7 +1119,7 @@ export interface GitRemoteSelector {
   refId: RefId;
 }
 export interface GitStatusResult {
-  entries: BoundedList14;
+  entries: BoundedList16;
   head: RepoStateToken;
   index: RepoStateToken;
   nextCursor?: EventCursor | null;
@@ -1002,7 +1135,7 @@ export interface GitStatusEntry {
   worktree: GitChange;
 }
 export interface GitDiffResult {
-  files: BoundedList15;
+  files: BoundedList17;
   nextCursor?: EventCursor | null;
   stateToken: RepoStateToken;
   truncated: boolean;
@@ -1011,11 +1144,11 @@ export interface GitDiffFile {
   binary: boolean;
   displayName: DisplayText;
   entryId: EntryId;
-  hunks: BoundedList16;
+  hunks: BoundedList18;
   truncated: boolean;
 }
 export interface GitDiffHunk {
-  lines: BoundedList17;
+  lines: BoundedList19;
   newStart: DecimalU64;
   oldStart: DecimalU64;
 }
@@ -1024,7 +1157,7 @@ export interface GitDiffLine {
   text: DiffLineText;
 }
 export interface GitLogResult {
-  commits: BoundedList18;
+  commits: BoundedList20;
   nextCursor?: EventCursor | null;
   stateToken: RepoStateToken;
   truncated: boolean;
@@ -1038,6 +1171,72 @@ export interface GitCommitSummary {
 export interface GitShowResult {
   commit: GitCommitSummary;
   diff: GitDiffResult;
+}
+export interface ChatProvidersResult {
+  providers: BoundedList21;
+}
+export interface ChatProvider {
+  cli?: ChatName | null;
+  efforts: BoundedList23;
+  kind: ChatKind;
+  loggedIn?: boolean | null;
+  models: BoundedList22;
+  name: ChatName;
+  providerId: ChatProviderId;
+  readOnlyEnforced: boolean;
+}
+export interface ChatModel {
+  modelId: ChatModelId;
+  name: ChatName;
+}
+export interface ChatThreadsListResult {
+  nextCursor?: ChatCursor | null;
+  threads: BoundedList24;
+}
+export interface ChatThread {
+  createdMs: DecimalU64;
+  effort?: ChatEffort | null;
+  kind: ChatKind;
+  model: ChatModelId;
+  permissions: ChatPermissions;
+  providerId: ChatProviderId;
+  revision: DecimalU64;
+  streaming: boolean;
+  threadId: ChatThreadId;
+  title: ChatTitle;
+  updatedMs: DecimalU64;
+  workspaceMode: ChatWorkspaceMode;
+}
+export interface ChatThreadGetResult {
+  hasMore: boolean;
+  messages: BoundedList25;
+  thread: ChatThread;
+}
+export interface ChatMessage {
+  content: ChatMessageContent;
+  createdMs: DecimalU64;
+  error?: DisplayText | null;
+  messageId: ChatMessageId;
+  model: ChatModelId;
+  providerId: ChatProviderId;
+  role: ChatRole;
+  seq: DecimalU64;
+  state: ChatMessageState;
+  stopReason?: ChatStopReason | null;
+  streamSeq: DecimalU64;
+  truncated: boolean;
+}
+export interface ChatSubscribeResult {
+  subscriptionId: SubscriptionId;
+}
+export interface ChatThreadResult {
+  thread: ChatThread;
+}
+export interface ChatThreadDeleteResult {}
+export interface ChatSendResult {
+  assistant: ChatMessage;
+  thread: ChatThread;
+  user: ChatMessage;
 }
 export interface RemoteError {
   code: ErrorCode;

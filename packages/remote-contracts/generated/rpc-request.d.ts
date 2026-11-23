@@ -150,6 +150,42 @@ export type RpcCall =
       params: GitPullParams;
     }
   | {
+      method: "chat.providers";
+      params: ChatProvidersParams;
+    }
+  | {
+      method: "chat.threads.list";
+      params: ChatThreadsListParams;
+    }
+  | {
+      method: "chat.thread.get";
+      params: ChatThreadGetParams;
+    }
+  | {
+      method: "chat.subscribe";
+      params: ChatSubscribeParams;
+    }
+  | {
+      method: "chat.thread.create";
+      params: ChatThreadCreateParams;
+    }
+  | {
+      method: "chat.thread.update";
+      params: ChatThreadUpdateParams;
+    }
+  | {
+      method: "chat.thread.delete";
+      params: ChatThreadDeleteParams;
+    }
+  | {
+      method: "chat.send";
+      params: ChatSendParams;
+    }
+  | {
+      method: "chat.stop";
+      params: ChatStopParams;
+    }
+  | {
       method: "operation.status";
       params: OperationStatusParams;
     }
@@ -208,6 +244,17 @@ export type CommitMessage = string;
 export type RefId = string;
 export type RemoteId = string;
 export type PullMode = "ff-only";
+export type ChatCursor = string;
+export type ChatMessagePageLimit = number;
+export type ChatThreadId = string;
+export type ChatMessageId = string;
+export type ChatEffort = string;
+export type ChatModelId = string;
+export type ChatPermissions = "read-only" | "edit" | "full";
+export type ChatProviderId = string;
+export type ChatTitle = string;
+export type ChatWorkspaceMode = "project" | "private";
+export type ChatText = string;
 export type RequestId = string;
 export type TimeoutMs = number;
 export type RequestKind = "request";
@@ -456,6 +503,58 @@ export interface GitPullParams {
   refId: RefId;
   remoteId: RemoteId;
   repositoryId: RepositoryId;
+}
+export interface ChatProvidersParams {}
+export interface ChatThreadsListParams {
+  cursor?: ChatCursor | null;
+  limit: PageLimit;
+}
+export interface ChatThreadGetParams {
+  beforeSeq?: DecimalU64 | null;
+  limit: ChatMessagePageLimit;
+  threadId: ChatThreadId;
+}
+export interface ChatSubscribeParams {
+  after?: ChatStreamCursor | null;
+  threadId?: ChatThreadId | null;
+}
+export interface ChatStreamCursor {
+  messageId: ChatMessageId;
+  streamSeq: DecimalU64;
+}
+export interface ChatThreadCreateParams {
+  effort?: ChatEffort | null;
+  model: ChatModelId;
+  operationId: OperationId;
+  permissions: ChatPermissions;
+  providerId: ChatProviderId;
+  title?: ChatTitle | null;
+  workspaceMode: ChatWorkspaceMode;
+}
+/**
+ * Omitted fields stay unchanged; `effort: null` clears it back to the provider default.
+ */
+export interface ChatThreadUpdateParams {
+  effort?: ChatEffort | null;
+  expectedRevision: DecimalU64;
+  model?: ChatModelId | null;
+  operationId: OperationId;
+  threadId: ChatThreadId;
+  title?: ChatTitle | null;
+}
+export interface ChatThreadDeleteParams {
+  expectedRevision: DecimalU64;
+  operationId: OperationId;
+  threadId: ChatThreadId;
+}
+export interface ChatSendParams {
+  expectedRevision: DecimalU64;
+  operationId: OperationId;
+  text: ChatText;
+  threadId: ChatThreadId;
+}
+export interface ChatStopParams {
+  threadId: ChatThreadId;
 }
 export interface OperationStatusParams {
   context: WorkspaceContext;

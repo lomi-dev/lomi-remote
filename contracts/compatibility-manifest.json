@@ -38,49 +38,50 @@
     "contracts/HostRevokeResult.schema.json": "a944b8e1007b2ce84bd41c2e0743b2587dd24094841d7a4e9834031a677d67c8",
     "contracts/HostRuntimeGetResult.schema.json": "ebc4cd67136e5bb360a22bdba5ee49eefb9102f646bb039f5f2c49ffc7feef7e",
     "contracts/HostSelfRetirementParams.schema.json": "68db8049b7f5c56eaeff898e19c919db0bc427f87de05ded545857f6db19ecd0",
-    "contracts/InventoryResult.schema.json": "fa3f4e6eecd488f4a5484bee40a36bd060855a6fd8fec79232b2298ee3af206c",
-    "contracts/PairingCreateParams.schema.json": "f62bf7d7a7a48f7f8cd272b556915fef64d6734d2e0fe2621b5104808663fe4d",
+    "contracts/InventoryResult.schema.json": "65ffc941978d35e6654eb508dc4d65c4135d4ec7672647c4c059e9441d47d42d",
+    "contracts/PairingCreateParams.schema.json": "4e449a810ff0fc3a6c4fe8a191a5993bfc3c3db3ee1120837d21bbb32a36559e",
     "contracts/PairingDecisionParams.schema.json": "17129e4d88384a29315fac545fe4d6e399638a24fdc7fa067b402d1ded26c7f1",
     "contracts/PairingPendingResult.schema.json": "d4dbe23df1afec2eb75ad99025155b2ebf74f1c8f99574eaa06f7558ca2f8d26",
     "contracts/PairingResult.schema.json": "e8c17581428e63a357eacf97526944862978b9e57562bd8962dfca798f6487ba",
-    "contracts/PublicationParams.schema.json": "39773a78de0df7d60637ff635801377899d5868f2415cc028a4092523831cc71",
+    "contracts/PublicationParams.schema.json": "fb8f44890641bff0d4ff41994c2dd077f262a0c2467e94dfa8ce12c71cdb8d2f",
     "contracts/PublicationResult.schema.json": "2c5f6f5af0839d81a9a3cf38a99067f06a79d09f77ab8addb278c6045eac4b32",
     "contracts/RuntimeClaimParams.schema.json": "5f3f4767aa534d62cab5969b827b2586a7e0b56ee9e42dc92d6cf721cde50235",
     "contracts/RuntimeClaimResult.schema.json": "fa57010d6953d70cb6fef1b0191ec2338c1cc26d2715ac0fcc59306411c84cd6",
-    "contracts/draft-contract.schema.json": "f186598878c4696b462983aac3e00c864ce04588bf672cadfbc86fe5ae03bc2b",
+    "contracts/chat-stream-frame.schema.json": "3a761e9aa3d439d638b0e314bf08dfafa9a3c30f215023133b0949a9f66145bf",
+    "contracts/draft-contract.schema.json": "62761f15cb1b918c18574aeb2ecb9578021b46b22276c2d959549541a9a7acc0",
     "contracts/file-watch-frame.schema.json": "957e4b0333b991941bb836d468b12a201181e1ce78e3075635491b5749b981e9",
-    "contracts/foundation-types.schema.json": "ba3c8a3819f83656a8c2109bcb28367674c9e256c1b9891c3b0e8ce954894fb7",
+    "contracts/foundation-types.schema.json": "ea86d96063b9858b62d295256b4ac58e6ee752aac5f20b9bb747369e811b94da",
     "contracts/input-receipt.schema.json": "3b43ddd223c8986b7b5f34c8141c5443811b4c84d005684ec9ed96b64b28d2ac",
     "contracts/local-client-hello.schema.json": "14a438ef2d79c55861cdae26e324e3665e149827f385a2e8dbd6014052c35b2e",
-    "contracts/local-request.schema.json": "52a40b6195038032e1a95a86d4d886c8f6eb36e519bcad0255e6f321f5c3a955",
-    "contracts/local-response.schema.json": "706b042f774a8b6305a82c6a13e84099be6ccbf45d266551a36cc36e78c85260",
+    "contracts/local-request.schema.json": "62c57e4f904adaeccc64337e2a9c33c49a36e62e7de2e151081e486dedd4db10",
+    "contracts/local-response.schema.json": "48d9227bd198d5c79b9571c1630e93a936430ebe07e912e73eb2eaf71e26b357",
     "contracts/local-server-hello.schema.json": "a3391d6586be23c90b13d8cc08298963c32242e118a7450b774a058c47a69f25",
-    "contracts/local-stream-event.schema.json": "65c681004c820cb1db291ab080cb5857228153f417326fc28aceaaea4d61d96e",
+    "contracts/local-stream-event.schema.json": "44a436d0df6ea57d1bc4544c7090a483abb787d0f0d4a88e1a08a6dafba03e31",
     "contracts/mutation-context.schema.json": "c10208ab34ddd17a406201494fbfb240c069a3a0e57d4d1c002b9d65ead50714",
     "contracts/native-intent-scope.schema.json": "66bcfc5544e90ef55619663ea8ed4b1172164afcfa211afb67f09f0fd366925d",
     "contracts/native-lease.schema.json": "e8dfb550e5d79d5c048758dc432fc05bb7803f2df87ad78f85e218ae2103320a",
-    "contracts/openapi.json": "acb5fe1fe7501c7cde6510004a319ee7761e951010784aee248164a8caa5108a",
-    "contracts/operation-receipt.schema.json": "0f0e216f1d83ec07c96bbadcc6da2a8ff5cd4b6300c24af87ab9ccaf0cc3e2ab",
-    "contracts/operation-tombstone.schema.json": "3e28bd84145891d5dd0433df988da8175ba45c2c1a2512467041b5e8dad33102",
-    "contracts/remote-error.schema.json": "0587568a581d24d68b0fd9665bd0d88bf6244b3a27eac4464574b81be02ce24d",
-    "contracts/rpc-request.schema.json": "8bfa299780547d894714f71669f21cf3faa2cac904f59bb3fac11e4ac433d5e3",
-    "contracts/rpc-response.schema.json": "05e447bca2f0dab115eecb274286960694b2f3ec94fdc5fea2a675fd5aaa7112",
+    "contracts/openapi.json": "d1a9f7ca540c02b6dc9123acadd31dfaf5456ab25bbb7951e3a7dcab21593212",
+    "contracts/operation-receipt.schema.json": "2094cebaa56c5e2fa4bcaf287422450281aa5811257a3a7f50aaf2bb88918c37",
+    "contracts/operation-tombstone.schema.json": "642c5f3cbc371c2c0c4fecf735373bdbeceaf8984e54f42d0d75626f252ae7f0",
+    "contracts/remote-error.schema.json": "fc9ada404de63c2646773c4f13b888c21a6d903eb8754692b4162720ff00cd21",
+    "contracts/rpc-request.schema.json": "4b19dc664c85be8eef1edb4fcb6938c37bb82ff46406902777d9ebfd9c5f2a08",
+    "contracts/rpc-response.schema.json": "c4261e64a43ca5ff5d3dab6069cf934ba8031280fdf11eb88006cc5953177537",
     "contracts/terminal-context.schema.json": "cc5bbaff041e14acf6bf6d5917e6d25e62a4175c1c74727fe54fb0f10d3aa48f",
     "contracts/terminal-profile-experimental.json": "3a0710396d202d51ba72b3880d818b81a8b2b42d92b7ea7f8ecc13d5e9702e0a",
     "contracts/terminal-stream-frame.schema.json": "129f912f14097ba4aba32b4a933f7b703a4710f070289cb32a4651fa5d2a9d88",
     "contracts/workspace-context.schema.json": "cb5da276c351decdd7639fa9c223ff108dbd37eac3cd491820de7a48d0394aa5",
-    "contracts/workspace-stream-frame.schema.json": "57de3da227ee985d43c54d6249182114e0396b46c45b325f0b0c40fbc1dba8cd",
+    "contracts/workspace-stream-frame.schema.json": "85885e8e28a3d9e5ca6d83dba4c6802770b1afae1040d8b913a91d933401df09",
     "contracts/wss-admission-frame.schema.json": "e86d727e74fa024fbf385d12b0527fa20b5ed0a47f3722ba77938b39e93a931f",
     "packages/authority-crypto-wasm/generated/authority_crypto.d.ts": "4f7e9f75b09f38b574c091c737512c889fa77093f1b2f85be6921344d59ef165",
     "packages/authority-crypto-wasm/generated/authority_crypto.js": "442c0b5c5c0b9d6d0045995b816ab3e4a857a75c6853a42baab1e71994c79819",
-    "packages/authority-crypto-wasm/generated/authority_crypto_bg.wasm": "eb7f2696d305ad163d062c0549f87e683170410ba67a067bc9687cf6d26599b1",
+    "packages/authority-crypto-wasm/generated/authority_crypto_bg.wasm": "58133799b35b3bab7b2501b2b2ff3c9c769dd27c56cc8c57ea43352ee49565ee",
     "packages/authority-crypto-wasm/generated/authority_crypto_bg.wasm.d.ts": "6cedcb4db7a56fdc4651a7b1d55d4a5be03c5f413b7d4ec94ea85948f31cbf1a",
-    "packages/authority-crypto-wasm/generated/provenance.json": "8bfd24ae61e5a02f21ac749fd78c910a182e99a51f47b19de0efb9f3726e5600",
+    "packages/authority-crypto-wasm/generated/provenance.json": "c23813b6e9913dce4934282bb779321ab9ec36fa9d795f8e848264ff64d939c3",
     "packages/protocol-codec-wasm/generated/protocol_codec.d.ts": "73b24bf673c4dccf91d016a431698af6fb6a44c2714dba3e5edc3ecabab5b3b7",
     "packages/protocol-codec-wasm/generated/protocol_codec.js": "7e466fbe6c40eb933cb86cecbc91e68c0c347360f45ce09bc4b4eb8a2e080474",
-    "packages/protocol-codec-wasm/generated/protocol_codec_bg.wasm": "0b4f27d196dd15e3906bef7f33ff748dbe3f40f4829321dd6e361719ebb4b8d7",
+    "packages/protocol-codec-wasm/generated/protocol_codec_bg.wasm": "de4eed8b5c43e22570a6fcdeb481fd02c8bcc837d1c25fdfac4d5f97cc631eb7",
     "packages/protocol-codec-wasm/generated/protocol_codec_bg.wasm.d.ts": "9e6944ae4cfd772a476245fb7e5d221e5a656f7ce5e0981eb5466ddd1247a9f7",
-    "packages/protocol-codec-wasm/generated/provenance.json": "2b61e82cc033e0affddd9eb16b394f59cc4d694688d031af3c5a6603c4443293",
+    "packages/protocol-codec-wasm/generated/provenance.json": "8fed58563ef7a2d9b806a05180be9dafa136b37e5e0f716b742d6ba70495e856",
     "packages/remote-contracts/generated/ChannelAdmissionParams.d.ts": "e57ef50a801b6a46eea09d7ab7360bb8502bd10414679fb5f170271879ae7e0f",
     "packages/remote-contracts/generated/ChannelCreateParams.d.ts": "02c8f5f6f6622b7e5efae323d69c6ef0e4b5786762b0e9c86dd8c931ee3ef613",
     "packages/remote-contracts/generated/ChannelCreateResult.d.ts": "787009bb74d34f636d82d06f0b536b8395013851f828e820a15d9f9f131e5aac",
@@ -118,40 +119,41 @@
     "packages/remote-contracts/generated/HostRevokeResult.d.ts": "cfaa56bbbcfff7a6d832c2b419b3771a364c89f94cbfabbd5803cef8030533ce",
     "packages/remote-contracts/generated/HostRuntimeGetResult.d.ts": "9afdc52981c3a42b6a0b6b484285fd9f82d050bbe0b86b21592441e45806a46d",
     "packages/remote-contracts/generated/HostSelfRetirementParams.d.ts": "bacf7942b73bb65c90e9fb2fccba520565d6652a5e31a920f527d4a09dcf8c0e",
-    "packages/remote-contracts/generated/InventoryResult.d.ts": "80f369696db7d1bbc85ce266592c5333595f873196211d5ce7867ee9fb223821",
-    "packages/remote-contracts/generated/PairingCreateParams.d.ts": "591f7ae213e6e9f84ea5af405587a0acaa632038711f5b7aae75af2161ab0f01",
+    "packages/remote-contracts/generated/InventoryResult.d.ts": "412cd209455d5d1f9bcde52fdaeb2987ad31ef7f2359ea8cd3efd8f5174b3624",
+    "packages/remote-contracts/generated/PairingCreateParams.d.ts": "f67995a4e9446f4dfe0abd69d61e4765569d9e3148dd9debf32db1d80a08d651",
     "packages/remote-contracts/generated/PairingDecisionParams.d.ts": "fb4f6136bec7bc28a745513c1f36cb9e81e3bcbf7184f8238247ac2c2c383126",
     "packages/remote-contracts/generated/PairingPendingResult.d.ts": "5989efab5c1f8b2654f2c66f2c43a9a31f96b3b5da9f32fa477b5df2979c902a",
     "packages/remote-contracts/generated/PairingResult.d.ts": "b60097f3626fb6f39ae8c9c5999dd986a40f0ef01b795615b215187372c5c9ad",
-    "packages/remote-contracts/generated/PublicationParams.d.ts": "6ef437e132b82844af12a705cba4e857ef396d789bb100e5e8cd8a8e2e6e394a",
+    "packages/remote-contracts/generated/PublicationParams.d.ts": "014cb875ea79adaf4df1e3d83df7ca6b3a39578ec5b5abe196e92f47cde306b7",
     "packages/remote-contracts/generated/PublicationResult.d.ts": "765a7db1dcc811c53cc1175fe42feaee9d3bbc3c97f091741470deb50c9ab356",
     "packages/remote-contracts/generated/RuntimeClaimParams.d.ts": "7da5045da3846acbf8291a8ef62d6cd53018974791b9793baba617233f3cd6da",
     "packages/remote-contracts/generated/RuntimeClaimResult.d.ts": "90fdcfd6571c9ca7b2fd00e7d6d9e87789c7ad6b1f5cea439a01cbd09d69378f",
-    "packages/remote-contracts/generated/draft-contract.d.ts": "14120fc28809be840b88fd29d5661ec5032b2b0b5b6a9a14dad8ff8c3e0fb84a",
+    "packages/remote-contracts/generated/chat-stream-frame.d.ts": "92d78553c857ee8c2a8495d2332a823b72fdf389d4c44d66e614f5250a52b6fd",
+    "packages/remote-contracts/generated/draft-contract.d.ts": "f21eaa139ed20d391109e11b20e27af31c15b9bb3cf261aac585d28c38f03d8e",
     "packages/remote-contracts/generated/file-watch-frame.d.ts": "f28bc4f601605883ac8c01127d24d56cbd4370a85e4415db74774f3bc9a39f85",
-    "packages/remote-contracts/generated/foundation-types.d.ts": "81686ac8e449c5f7a1e718cf7044b2e1e6a36ee87f49238909fc8eda1ea49f67",
-    "packages/remote-contracts/generated/index.d.ts": "511929d4a5cee1d40b84519899cf913f6300109e5e976e05c947a5a3e255f3e1",
+    "packages/remote-contracts/generated/foundation-types.d.ts": "5345c48d9ab55a30bd369c7dc250b6283bab62959acdbbd71630671fb7a9df05",
+    "packages/remote-contracts/generated/index.d.ts": "bd14b0a3b7ff909b71e61f10cba613394323619f7373b9a0c3616ad0b06e9328",
     "packages/remote-contracts/generated/input-receipt.d.ts": "692735da4a51b267f2d9a5f4e95bca7b7226942431d677609fc3c0df39856727",
     "packages/remote-contracts/generated/local-client-hello.d.ts": "444473d3ba2f2997fe6ad058b8ea81dad9cedc1d219dc029ce9ef9ba3dd4ddb6",
-    "packages/remote-contracts/generated/local-request.d.ts": "9143707d874441ccc63d8472c580a51541db766790b2550b6a0d348ae7ddfddf",
-    "packages/remote-contracts/generated/local-response.d.ts": "661f34914f8ed8ada6f63d4382102f3bd84ed579359872efb9c10020fb859d00",
+    "packages/remote-contracts/generated/local-request.d.ts": "2d7127c6e9b3e7689f13f8d310402679a9d7fab98e24aa2b9416ad7faf22c73f",
+    "packages/remote-contracts/generated/local-response.d.ts": "ec7f7759e1c7ea7494d9a34ef3de6f379dbfc6488b13a8e462e48886e990e8cd",
     "packages/remote-contracts/generated/local-server-hello.d.ts": "7d8bee28fa44e05a40667385cb479e0d0eb24915e4894522ea88ef9019b2c9fd",
-    "packages/remote-contracts/generated/local-stream-event.d.ts": "e3500b2694dd14f74d23721a1822717c7edb90ac0b1e0426aefed0d290a1f0b2",
-    "packages/remote-contracts/generated/manifest.json": "645928a1a50adfaf5688cc9aa683bec76ad1f5fc1d8b47e940a25b2b2e3b350b",
+    "packages/remote-contracts/generated/local-stream-event.d.ts": "c66e28e1b0599528494e969d3e855c91f2e71b546f0a6af3be33d347bbd6ee55",
+    "packages/remote-contracts/generated/manifest.json": "39fbb79b159a6dbf074cc43d4d7052b40757a1212ede425a38c2a58c5a099615",
     "packages/remote-contracts/generated/mutation-context.d.ts": "2400924c825c4f5f68d1ce5a623eac9ace81d56050ac5910dc1317e18085a0a1",
     "packages/remote-contracts/generated/native-intent-scope.d.ts": "b45c9100e866fb08c04a2037db2a614f5ecd47e47512937f69c984be6d99d6a3",
     "packages/remote-contracts/generated/native-lease.d.ts": "406160e2b8ae190b183930a6b1c2213f6dace7bb8e29ffc34cb196c81bf5fae6",
-    "packages/remote-contracts/generated/operation-receipt.d.ts": "c506ea78ba7f438bd52b5848a1356f2a6de47b89de34625512a285381842f3bb",
-    "packages/remote-contracts/generated/operation-tombstone.d.ts": "4819ad3065800b6bf04eab878a66bf9d77d91fb60f2902693e6548b8c83a16f7",
-    "packages/remote-contracts/generated/registry.mjs": "eb459e6e05b4d3216da942e618a1daa9e0c50bc77e4b228f685502af8bdf2201",
-    "packages/remote-contracts/generated/remote-error.d.ts": "281bfc6ccefc11f39739894522c1b803ed2b89b0dfe65e65df4f862bb50153cf",
-    "packages/remote-contracts/generated/rpc-request.d.ts": "f45521740bdec9b76f19b0bc6bc120b4446cd23b8ae3d5c380e3a455a9e2700c",
-    "packages/remote-contracts/generated/rpc-response.d.ts": "8bf8fc667620324e7094e81d5a3e0c7cbd086fc6d926a9bea5f3f42043cc6d48",
+    "packages/remote-contracts/generated/operation-receipt.d.ts": "96be326af41c69ed045da583583462f4e28c0e824c8bbb59af430b3d39e3c856",
+    "packages/remote-contracts/generated/operation-tombstone.d.ts": "61abdedb7bd289b71ebbef5a43ace8c8892adf160761f11cd7c91996a7d8d2fb",
+    "packages/remote-contracts/generated/registry.mjs": "7bc574ee15d682bd74734edff2ebb114f63c10c7b6b6c8edb1be06d6a72e0be1",
+    "packages/remote-contracts/generated/remote-error.d.ts": "e0229cf6e0facb6c8bfac711c4f55f40b1aabd70aa4fa11d63b38d9f86ff457c",
+    "packages/remote-contracts/generated/rpc-request.d.ts": "b54e44018cf07be882b27a341e679f3b6a12c822ab1041ff4bfb7d57f9540c36",
+    "packages/remote-contracts/generated/rpc-response.d.ts": "2b1273033e68ecde64b9f53a225f388db0e9e3300c559443c131b2baf14d38f7",
     "packages/remote-contracts/generated/terminal-context.d.ts": "599f44090b40f97bb884939f0d50a0bcb817157c5c9f6a340bd3228868c7555b",
     "packages/remote-contracts/generated/terminal-stream-frame.d.ts": "270b82176db68bec720e7a19a9d4669f4c8ce72a0233a26ba1c9421fb7d8d051",
-    "packages/remote-contracts/generated/validators.mjs": "3c157c3cc3c383528a367b99bc1f359207908d8e3eb29da22edd7dd201d8a0b4",
+    "packages/remote-contracts/generated/validators.mjs": "aba2354a60524377f32fd47061ecb0254a20f1e230fc0fdfac5fb3c14df7143d",
     "packages/remote-contracts/generated/workspace-context.d.ts": "a11d0a93d1df7d38791dc006c7066f8e84bcfe472b6ee1c142c6d16444a64ae0",
-    "packages/remote-contracts/generated/workspace-stream-frame.d.ts": "e282fb2e5eb66670637356f9a44a34d2146482bc1038a823c04df46427de9655",
+    "packages/remote-contracts/generated/workspace-stream-frame.d.ts": "6f3f4f214dfab98625f2138c5c31f450935ae04eb5c93a4295ff7f03ab3b41d2",
     "packages/remote-contracts/generated/wss-admission-frame.d.ts": "0e0e905e951578efc8019c404aa20daf482e30d710b6beea9ac5f33c28341db4"
   },
   "capabilities": [
@@ -237,6 +239,44 @@
       "requires": [
         "workspace.read",
         "git.read"
+      ]
+    },
+    {
+      "allowsShellExecution": false,
+      "defaultControlWithWorkspaceTools": false,
+      "name": "chat.read",
+      "requires": [
+        "workspace.read"
+      ]
+    },
+    {
+      "allowsShellExecution": false,
+      "defaultControlWithWorkspaceTools": false,
+      "name": "chat.send",
+      "requires": [
+        "workspace.read",
+        "chat.read"
+      ]
+    },
+    {
+      "allowsShellExecution": true,
+      "defaultControlWithWorkspaceTools": false,
+      "name": "chat.permissions.edit",
+      "requires": [
+        "workspace.read",
+        "chat.read",
+        "chat.send"
+      ]
+    },
+    {
+      "allowsShellExecution": true,
+      "defaultControlWithWorkspaceTools": false,
+      "name": "chat.permissions.full",
+      "requires": [
+        "workspace.read",
+        "chat.read",
+        "chat.send",
+        "chat.permissions.edit"
       ]
     }
   ],
@@ -683,6 +723,110 @@
       },
       "method": "git.pull",
       "requiresExecuteWhenRepositoryControlledCodeRuns": true
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read"
+        ],
+        "source": "static"
+      },
+      "method": "chat.providers",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read"
+        ],
+        "source": "static"
+      },
+      "method": "chat.threads.list",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read"
+        ],
+        "source": "static"
+      },
+      "method": "chat.thread.get",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read"
+        ],
+        "source": "static"
+      },
+      "method": "chat.subscribe",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read",
+          "chat.send"
+        ],
+        "source": "static"
+      },
+      "method": "chat.thread.create",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read",
+          "chat.send"
+        ],
+        "source": "static"
+      },
+      "method": "chat.thread.update",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read",
+          "chat.send"
+        ],
+        "source": "static"
+      },
+      "method": "chat.thread.delete",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read",
+          "chat.send"
+        ],
+        "source": "static"
+      },
+      "method": "chat.send",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
+    },
+    {
+      "authorization": {
+        "requires": [
+          "workspace.read",
+          "chat.read",
+          "chat.send"
+        ],
+        "source": "static"
+      },
+      "method": "chat.stop",
+      "requiresExecuteWhenRepositoryControlledCodeRuns": false
     },
     {
       "authorization": {

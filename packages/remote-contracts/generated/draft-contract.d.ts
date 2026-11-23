@@ -10,7 +10,11 @@ export type Capability =
   | "git.read"
   | "git.write"
   | "git.network"
-  | "git.execute";
+  | "git.execute"
+  | "chat.read"
+  | "chat.send"
+  | "chat.permissions.edit"
+  | "chat.permissions.full";
 export type CapabilitySet = Capability[];
 export type DraftCommand =
   | {

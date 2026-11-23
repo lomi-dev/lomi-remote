@@ -195,6 +195,7 @@ impl Fixture {
                 workspace_id: local.workspace_id,
                 workspace_epoch: local.workspace_epoch,
                 terminals: local.running_terminals.clone(),
+                capabilities: None,
             }])
             .unwrap(),
         };

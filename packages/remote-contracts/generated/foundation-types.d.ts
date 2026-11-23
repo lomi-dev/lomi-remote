@@ -50,6 +50,15 @@ export type Method =
   | "git.fetch"
   | "git.push"
   | "git.pull"
+  | "chat.providers"
+  | "chat.threads.list"
+  | "chat.thread.get"
+  | "chat.subscribe"
+  | "chat.thread.create"
+  | "chat.thread.update"
+  | "chat.thread.delete"
+  | "chat.send"
+  | "chat.stop"
   | "operation.status"
   | "operation.cancel";
 export type OperationId = string;

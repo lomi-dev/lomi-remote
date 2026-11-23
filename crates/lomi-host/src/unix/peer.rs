@@ -940,7 +940,7 @@ impl Worker {
                 consent: local.consent,
                 running_terminals: PublicationTerminals::try_from(terminals)
                     .map_err(|_| PeerError::Invalid)?,
-                capability_ceiling: None,
+                capability_ceiling: local.chat_level.ceiling(),
             },
             peer: PeerObservation {
                 account_id: host.account_id,

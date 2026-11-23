@@ -28,6 +28,344 @@
       "maxItems": 200,
       "type": "array"
     },
+    "ChatCursor": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 256
+    },
+    "ChatEffort": {
+      "maxLength": 16,
+      "minLength": 1,
+      "pattern": "^[a-z]{1,16}$",
+      "type": "string"
+    },
+    "ChatMessageId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatMessagePageLimit": {
+      "maximum": 50,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ChatModelId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "ChatPermissions": {
+      "enum": [
+        "read-only",
+        "edit",
+        "full"
+      ],
+      "type": "string"
+    },
+    "ChatProviderId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "ChatProvidersParams": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ChatSendParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "text": {
+          "$ref": "#/$defs/ChatText"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        }
+      },
+      "required": [
+        "operationId",
+        "threadId",
+        "expectedRevision",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ChatStopParams": {
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ChatStreamCursor": {
+      "additionalProperties": false,
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/ChatMessageId"
+        },
+        "streamSeq": {
+          "$ref": "#/$defs/DecimalU64"
+        }
+      },
+      "required": [
+        "messageId",
+        "streamSeq"
+      ],
+      "type": "object"
+    },
+    "ChatSubscribeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatStreamCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threadId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatThreadId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ChatText": {
+      "maxLength": 65536,
+      "minLength": 1,
+      "not": {
+        "pattern": "\\u0000"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 65536
+    },
+    "ChatThreadCreateParams": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/ChatModelId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "permissions": {
+          "$ref": "#/$defs/ChatPermissions"
+        },
+        "providerId": {
+          "$ref": "#/$defs/ChatProviderId"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatTitle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspaceMode": {
+          "$ref": "#/$defs/ChatWorkspaceMode"
+        }
+      },
+      "required": [
+        "operationId",
+        "providerId",
+        "model",
+        "permissions",
+        "workspaceMode"
+      ],
+      "type": "object"
+    },
+    "ChatThreadDeleteParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        }
+      },
+      "required": [
+        "operationId",
+        "threadId",
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "ChatThreadGetParams": {
+      "additionalProperties": false,
+      "properties": {
+        "beforeSeq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecimalU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "$ref": "#/$defs/ChatMessagePageLimit"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        }
+      },
+      "required": [
+        "threadId",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "ChatThreadId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatThreadUpdateParams": {
+      "additionalProperties": false,
+      "description": "Omitted fields stay unchanged; `effort: null` clears it back to the provider default.",
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedRevision": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatModelId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operationId": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatTitle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operationId",
+        "threadId",
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "ChatThreadsListParams": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "$ref": "#/$defs/PageLimit"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "type": "object"
+    },
+    "ChatTitle": {
+      "maxLength": 200,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "ChatWorkspaceMode": {
+      "enum": [
+        "project",
+        "private"
+      ],
+      "type": "string"
+    },
     "CommitMessage": {
       "maxLength": 16384,
       "minLength": 1,
@@ -1552,6 +1890,159 @@
             },
             "params": {
               "$ref": "#/$defs/GitPullParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.providers",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatProvidersParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.threads.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatThreadsListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.thread.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatThreadGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.subscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatSubscribeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.thread.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatThreadCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.thread.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatThreadUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.thread.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatThreadDeleteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.send",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatSendParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "chat.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ChatStopParams"
             }
           },
           "required": [

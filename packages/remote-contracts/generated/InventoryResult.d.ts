@@ -83,6 +83,22 @@ export type CommitmentSignature = [
   number
 ];
 export type InventoryStatus = "online" | "offline" | "publishing";
+export type Capability =
+  | "workspace.read"
+  | "terminal.observe"
+  | "terminal.control"
+  | "terminal.manage"
+  | "files.read"
+  | "files.write"
+  | "git.read"
+  | "git.write"
+  | "git.network"
+  | "git.execute"
+  | "chat.read"
+  | "chat.send"
+  | "chat.permissions.edit"
+  | "chat.permissions.full";
+export type CapabilitySet = Capability[];
 export type PaneId = string;
 export type SessionEpoch = string;
 export type TerminalSessionId = string;
@@ -277,7 +293,12 @@ export interface HostKeyCommitmentDescriptor {
   role: CommitmentHostRole;
   version: number;
 }
+/**
+ * `capabilities` is the published ceiling; omitted (not null) when the Host
+ * publishes none, so Hosts without it keep byte-identical JSON.
+ */
 export interface PublishedWorkspace {
+  capabilities?: CapabilitySet | null;
   terminals: PublicationTerminals;
   workspaceEpoch: WorkspaceEpoch;
   workspaceId: WorkspaceId;

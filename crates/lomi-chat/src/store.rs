@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 const APPLICATION_ID: i64 = 0x4C4D_4348;
 pub const MAX_TEXT: usize = 256 * 1024;
 pub const MAX_CONTEXT: usize = 2 * 1024 * 1024;
-const REUSED: &str = "Operation ID was reused.";
-const GONE: &str = "This thread was deleted.";
+pub const REUSED: &str = "Operation ID was reused.";
+pub const GONE: &str = "This thread was deleted.";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -102,10 +102,16 @@ pub struct ThreadCreate {
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Copied from the settings defaults by the command, never taken from the client.
-    #[serde(skip)]
+    /// Non-default values join the request hash so a reused operation id with a
+    /// different mode is a conflict; defaults hash exactly as before.
+    #[serde(skip_deserializing, skip_serializing_if = "is_default")]
     pub permissions: Permissions,
-    #[serde(skip)]
+    #[serde(skip_deserializing, skip_serializing_if = "is_default")]
     pub workspace: Workspace,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -578,11 +584,18 @@ impl Store {
                name TEXT NOT NULL, mime TEXT NOT NULL, kind TEXT NOT NULL,
                size INTEGER NOT NULL, created_ms INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
+             CREATE TABLE IF NOT EXISTS tombstones(operation_id TEXT PRIMARY KEY,
+               request_hash TEXT NOT NULL, created_ms INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS threads_workspace ON threads(project, workspace_id, updated_ms DESC);",
         )
         .map_err(db_err)?;
         prune_unsent(&db, dir, now_ms())?;
         prune_receipts(&db, now_ms(), RECEIPT_MAX_AGE_MS, RECEIPT_MAX_COUNT)?;
+        db.execute(
+            "DELETE FROM tombstones WHERE created_ms < ?1",
+            [now_ms().saturating_sub(RECEIPT_MAX_AGE_MS) as i64],
+        )
+        .map_err(db_err)?;
         db.execute(
             "UPDATE messages SET state='interrupted' WHERE state IN('dispatching','streaming')",
             [],
@@ -667,9 +680,137 @@ impl Store {
         rows.collect::<rusqlite::Result<_>>().map_err(db_err)
     }
 
-    #[cfg(test)]
     pub fn thread(&self, id: &str) -> Result<ThreadSummary, String> {
         get_thread(&self.db, id)
+    }
+
+    /// Threads owned by one workspace, newest first (legacy threads without an owner are not included).
+    pub fn list_workspace(&self, workspace_id: &str) -> Result<Vec<ThreadSummary>, String> {
+        let mut stmt = self
+            .db
+            .prepare(&format!(
+                "SELECT {THREAD_COLUMNS} FROM threads WHERE workspace_id=?1 ORDER BY updated_ms DESC, id"
+            ))
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([workspace_id], summary_row)
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(db_err)
+    }
+
+    /// Up to `limit` messages older than `before_seq` (newest page when `None`),
+    /// oldest first, plus whether more exist.
+    pub fn messages_page(
+        &self,
+        thread_id: &str,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<(Vec<ThreadMessage>, bool), String> {
+        get_thread(&self.db, thread_id)?;
+        let mut stmt = self
+            .db
+            .prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE thread_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"
+            ))
+            .map_err(db_err)?;
+        let before = before_seq.map_or(i64::MAX, |s| s.min(i64::MAX as u64) as i64);
+        let rows = stmt
+            .query_map(params![thread_id, before, limit as i64 + 1], message_row)
+            .map_err(db_err)?;
+        let mut out: Vec<ThreadMessage> = rows.collect::<rusqlite::Result<_>>().map_err(db_err)?;
+        let more = out.len() > limit;
+        out.truncate(limit);
+        out.reverse();
+        for m in out.iter_mut().filter(|m| m.role == Role::User) {
+            m.attachments = message_attachments(&self.db, &m.message_id)?;
+        }
+        Ok((out, more))
+    }
+
+    /// Every thread with a response in flight (any workspace).
+    pub fn streaming_threads(&self) -> Result<Vec<ThreadSummary>, String> {
+        let mut stmt = self
+            .db
+            .prepare(&format!(
+                "SELECT {THREAD_COLUMNS} FROM threads WHERE EXISTS(SELECT 1 FROM messages m WHERE m.thread_id=threads.id AND m.state IN('dispatching','streaming'))"
+            ))
+            .map_err(db_err)?;
+        let rows = stmt.query_map([], summary_row).map_err(db_err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(db_err)
+    }
+
+    /// The newest message of a thread, if any.
+    pub fn last_message(&self, thread_id: &str) -> Result<Option<ThreadMessage>, String> {
+        Ok(self.messages_page(thread_id, None, 1)?.0.pop())
+    }
+
+    /// Update with a durable receipt: a retry of the same operation returns the
+    /// current thread before any revision check; a different request is refused.
+    pub fn update_receipted(
+        &mut self,
+        operation_id: &str,
+        request: &str,
+        req: &ThreadUpdate,
+        check: impl FnOnce(&ThreadSummary) -> Result<(), String>,
+    ) -> Result<ThreadSummary, String> {
+        if let Some((thread, _)) = replay(&self.db, operation_id, request)? {
+            return get_thread(&self.db, &thread);
+        }
+        let thread = self.update(req, check)?;
+        insert_receipt(&self.db, operation_id, request, &thread.thread_id, &[])?;
+        Ok(thread)
+    }
+
+    /// Whether `operation_id` already deleted a thread with exactly this request;
+    /// never deletes. A different request under the same id is refused.
+    pub fn delete_replayed(&self, operation_id: &str, request: &str) -> Result<bool, String> {
+        let known: Option<String> = self
+            .db
+            .query_row(
+                "SELECT request_hash FROM tombstones WHERE operation_id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        match known {
+            None => Ok(false),
+            Some(stored) if stored == request_hash(request) => Ok(true),
+            Some(_) => Err(REUSED.into()),
+        }
+    }
+
+    /// Delete with a durable tombstone (receipts die with their thread): a retry
+    /// of the same operation succeeds again, a different request is refused.
+    pub fn delete_receipted(
+        &mut self,
+        operation_id: &str,
+        request: &str,
+        req: &ThreadDelete,
+    ) -> Result<(), String> {
+        let hash = request_hash(request);
+        let known: Option<String> = self
+            .db
+            .query_row(
+                "SELECT request_hash FROM tombstones WHERE operation_id=?1",
+                [operation_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        match known {
+            Some(stored) if stored == hash => return Ok(()),
+            Some(_) => return Err(REUSED.into()),
+            None => {}
+        }
+        self.delete(req)?;
+        self.db
+            .execute(
+                "INSERT INTO tombstones(operation_id,request_hash,created_ms) VALUES(?1,?2,?3)",
+                params![operation_id, hash, now_ms() as i64],
+            )
+            .map_err(db_err)?;
+        Ok(())
     }
 
     pub fn snapshot(&self, id: &str) -> Result<ThreadSnapshot, String> {
@@ -1532,6 +1673,68 @@ mod tests {
             sorted(vec![b.thread_id, legacy.thread_id])
         );
         assert!(ids(&s, "/other", "w1").is_empty());
+    }
+
+    #[test]
+    fn receipted_update_and_delete_replay_before_revision_checks() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
+        let update = ThreadUpdate {
+            thread_id: t.thread_id.clone(),
+            expected_revision: t.revision,
+            title: Some("New".into()),
+            instance_id: None,
+            model: None,
+            effort: None,
+        };
+        let a = s
+            .update_receipted("u1", "req", &update, |_| Ok(()))
+            .unwrap();
+        // The revision moved on, yet the same operation replays the result.
+        let b = s
+            .update_receipted("u1", "req", &update, |_| Ok(()))
+            .unwrap();
+        assert_eq!(a.revision, b.revision);
+        assert!(
+            s.update_receipted("u1", "other", &update, |_| Ok(()))
+                .is_err()
+        );
+        assert!(s.update(&update, |_| Ok(())).is_err());
+        let delete = ThreadDelete {
+            thread_id: t.thread_id.clone(),
+            expected_revision: a.revision,
+        };
+        s.delete_receipted("d1", "del", &delete).unwrap();
+        s.delete_receipted("d1", "del", &delete).unwrap();
+        assert_eq!(s.delete_receipted("d1", "x", &delete).unwrap_err(), REUSED);
+        assert_eq!(s.delete_receipted("d2", "del", &delete).unwrap_err(), GONE);
+    }
+
+    #[test]
+    fn workspace_listing_and_message_pages() {
+        {
+            let (_d, mut s) = open();
+            for i in 0..600 {
+                s.create(&create_req(&format!("many{i}")), "T", ThreadKind::Api)
+                    .unwrap();
+            }
+            assert_eq!(s.list_workspace("w1").unwrap().len(), 600, "no hidden cap");
+        }
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Api).unwrap();
+        let mut other = create_req("d");
+        other.workspace_id = Some("w2".into());
+        s.create(&other, "T", ThreadKind::Api).unwrap();
+        assert_eq!(s.list_workspace("w1").unwrap().len(), 1);
+        assert!(s.list_workspace("w3").unwrap().is_empty());
+        s.send_begin(&send_req("s1", &t, "hi"), 0, |_| Ok(()))
+            .unwrap();
+        let (page, more) = s.messages_page(&t.thread_id, None, 1).unwrap();
+        assert_eq!((page.len(), more), (1, true));
+        assert_eq!(page[0].seq, 2);
+        let (older, more) = s.messages_page(&t.thread_id, Some(2), 5).unwrap();
+        assert_eq!((older.len(), more), (1, false));
+        assert_eq!(s.streaming_threads().unwrap().len(), 1);
     }
 
     #[test]

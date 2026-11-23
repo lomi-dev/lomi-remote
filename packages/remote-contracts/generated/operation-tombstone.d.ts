@@ -11,7 +11,11 @@ export type Capability =
   | "git.read"
   | "git.write"
   | "git.network"
-  | "git.execute";
+  | "git.execute"
+  | "chat.read"
+  | "chat.send"
+  | "chat.permissions.edit"
+  | "chat.permissions.full";
 export type CapabilitySet = Capability[];
 export type OperationId = string;
 export type Method =
@@ -52,6 +56,15 @@ export type Method =
   | "git.fetch"
   | "git.push"
   | "git.pull"
+  | "chat.providers"
+  | "chat.threads.list"
+  | "chat.thread.get"
+  | "chat.subscribe"
+  | "chat.thread.create"
+  | "chat.thread.update"
+  | "chat.thread.delete"
+  | "chat.send"
+  | "chat.stop"
   | "operation.status"
   | "operation.cancel";
 export type WorkspaceId = string;

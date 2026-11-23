@@ -1,7 +1,7 @@
 //! Independent Local IPC 1.0 contract. E1 must supply real OS authentication,
 //! endpoint ownership/ACL checks, deadlines, durable admission and publication
 //! fencing before cloud share/unshare. No OS transport or liveness is implemented.
-use crate::rpc::{BoundedList, Confirmed, SubscriptionId, WorkspaceState};
+use crate::rpc::{BoundedList, Confirmed, SubscriptionId, WorkspaceState, text_type};
 use crate::streams::{
     FileWatchAck, FileWatchFrame, TerminalStreamFrame, WorkspaceStreamAck, WorkspaceStreamFrame,
 };
@@ -788,6 +788,94 @@ dto!(LocalWorkspaceTarget {
     workspace_id: WorkspaceId,
     operator_intent: Confirmed
 });
+/// Owner-granted Chat AI level of one workspace. `Off` is the default: nothing
+/// chat-related enters the ceiling or the publication.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatLevel {
+    #[default]
+    Off,
+    Send,
+    Edit,
+    Full,
+}
+impl ChatLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Send => "send",
+            Self::Edit => "edit",
+            Self::Full => "full",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Off, Self::Send, Self::Edit, Self::Full]
+            .into_iter()
+            .find(|level| level.as_str() == text)
+    }
+    /// Capabilities this level adds on top of `control_with_workspace_tools`.
+    pub fn chat_capabilities(self) -> Vec<Capability> {
+        let all = [
+            Capability::ChatRead,
+            Capability::ChatSend,
+            Capability::ChatPermissionsEdit,
+            Capability::ChatPermissionsFull,
+        ];
+        let count = match self {
+            Self::Off => 0,
+            Self::Send => 2,
+            Self::Edit => 3,
+            Self::Full => 4,
+        };
+        all[..count].to_vec()
+    }
+    /// Workspace capability ceiling; `None` (level off) keeps today's default.
+    pub fn ceiling(self) -> Option<CapabilitySet> {
+        (self != Self::Off).then(|| {
+            let chat = CapabilitySet::try_from(
+                [Capability::WorkspaceRead]
+                    .into_iter()
+                    .chain(self.chat_capabilities())
+                    .collect::<Vec<_>>(),
+            )
+            .expect("chat levels are dependency-closed");
+            CapabilitySet::control_with_workspace_tools().union(&chat)
+        })
+    }
+}
+dto!(LocalChatLevelSet {
+    workspace_id: WorkspaceId,
+    level: ChatLevel,
+    operator_intent: Confirmed
+});
+dto!(LocalChatLevelState {
+    workspace_id: WorkspaceId,
+    level: ChatLevel
+});
+dto!(LocalChatThreadTarget {
+    thread_id: ChatThreadId
+});
+dto!(LocalChatThreadDelete {
+    thread_id: ChatThreadId,
+    operator_intent: Confirmed
+});
+dto!(LocalChatAuditRead {
+    limit: crate::rpc::PageLimit
+});
+// Owner-local view of one thread; never carries message text or paths.
+dto!(LocalChatThread {
+    workspace_id: WorkspaceId,
+    thread_id: ChatThreadId,
+    title: ChatTitle,
+    provider_id: ChatProviderId,
+    permissions: ChatPermissions,
+    streaming: bool,
+    updated_ms: DecimalU64
+});
+// One audit JSON line (metadata and prompt hash only).
+text_type!(LocalChatAuditLine, 4096, false);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalWorkspaceRemovalPhase {
@@ -1263,6 +1351,16 @@ pub enum LocalCall {
     UnshareAuthorized(LocalWorkspaceConsentAuthorized),
     #[serde(rename = "unshare")]
     Unshare(LocalWorkspaceTarget),
+    #[serde(rename = "chat.level.set")]
+    ChatLevelSet(LocalChatLevelSet),
+    #[serde(rename = "chat.threads")]
+    ChatThreads(LocalWorkspaceRead),
+    #[serde(rename = "chat.stop")]
+    ChatStop(LocalChatThreadTarget),
+    #[serde(rename = "chat.delete")]
+    ChatDelete(LocalChatThreadDelete),
+    #[serde(rename = "chat.audit")]
+    ChatAudit(LocalChatAuditRead),
     #[serde(rename = "rpc")]
     Rpc(Box<RpcRequest>),
     #[serde(rename = "stream.ack")]
@@ -1328,6 +1426,11 @@ pub enum LocalResult {
     },
     WorkspaceState(Box<WorkspaceState>),
     Removed(WorkspaceId),
+    ChatLevel(LocalChatLevelState),
+    ChatThreads(BoundedList<LocalChatThread, 200>),
+    ChatThread(LocalChatThread),
+    ChatDeleted {},
+    ChatAudit(BoundedList<LocalChatAuditLine, 200>),
     Rpc(Box<RpcResponse>),
     StreamAcknowledged(SubscriptionId),
     NativeLease(NativeLease),

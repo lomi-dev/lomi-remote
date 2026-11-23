@@ -81,6 +81,7 @@ impl std::fmt::Debug for LeaseToken {
 text_type!(InputId, 128, true);
 text_type!(EncodedPathId, 4096, true);
 text_type!(ObjectId, 128, true);
+pub(crate) use text_type;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -197,6 +198,7 @@ macro_rules! bounded_number {
 
 bounded_number!(PageLimit, 1, 200);
 bounded_number!(PreviewLimit, 1, 1048576);
+pub(crate) use bounded_number;
 bounded_number!(TerminalDimension, 1, 1000);
 bounded_number!(ChunkCount, 1, 1024);
 bounded_number!(ChunkIndex, 0, 1023);
@@ -778,6 +780,24 @@ pub enum RpcCall {
     GitPush(GitNetworkParams),
     #[serde(rename = "git.pull")]
     GitPull(GitPullParams),
+    #[serde(rename = "chat.providers")]
+    ChatProviders(ChatProvidersParams),
+    #[serde(rename = "chat.threads.list")]
+    ChatThreadsList(ChatThreadsListParams),
+    #[serde(rename = "chat.thread.get")]
+    ChatThreadGet(ChatThreadGetParams),
+    #[serde(rename = "chat.subscribe")]
+    ChatSubscribe(ChatSubscribeParams),
+    #[serde(rename = "chat.thread.create")]
+    ChatThreadCreate(ChatThreadCreateParams),
+    #[serde(rename = "chat.thread.update")]
+    ChatThreadUpdate(ChatThreadUpdateParams),
+    #[serde(rename = "chat.thread.delete")]
+    ChatThreadDelete(ChatThreadDeleteParams),
+    #[serde(rename = "chat.send")]
+    ChatSend(ChatSendParams),
+    #[serde(rename = "chat.stop")]
+    ChatStop(ChatStopParams),
     #[serde(rename = "operation.status")]
     OperationStatus(OperationStatusParams),
     #[serde(rename = "operation.cancel")]
@@ -860,6 +880,24 @@ pub enum RpcResult {
     GitPush(OperationReceipt),
     #[serde(rename = "git.pull")]
     GitPull(OperationReceipt),
+    #[serde(rename = "chat.providers")]
+    ChatProviders(ChatProvidersResult),
+    #[serde(rename = "chat.threads.list")]
+    ChatThreadsList(ChatThreadsListResult),
+    #[serde(rename = "chat.thread.get")]
+    ChatThreadGet(ChatThreadGetResult),
+    #[serde(rename = "chat.subscribe")]
+    ChatSubscribe(ChatSubscribeResult),
+    #[serde(rename = "chat.thread.create")]
+    ChatThreadCreate(ChatThreadResult),
+    #[serde(rename = "chat.thread.update")]
+    ChatThreadUpdate(ChatThreadResult),
+    #[serde(rename = "chat.thread.delete")]
+    ChatThreadDelete(ChatThreadDeleteResult),
+    #[serde(rename = "chat.send")]
+    ChatSend(ChatSendResult),
+    #[serde(rename = "chat.stop")]
+    ChatStop(ChatThreadResult),
     #[serde(rename = "operation.status")]
     OperationStatus(OperationReceipt),
     #[serde(rename = "operation.cancel")]
@@ -937,6 +975,15 @@ impl RpcCall {
             Self::GitFetch(_) => Method::GitFetch,
             Self::GitPush(_) => Method::GitPush,
             Self::GitPull(_) => Method::GitPull,
+            Self::ChatProviders(_) => Method::ChatProviders,
+            Self::ChatThreadsList(_) => Method::ChatThreadsList,
+            Self::ChatThreadGet(_) => Method::ChatThreadGet,
+            Self::ChatSubscribe(_) => Method::ChatSubscribe,
+            Self::ChatThreadCreate(_) => Method::ChatThreadCreate,
+            Self::ChatThreadUpdate(_) => Method::ChatThreadUpdate,
+            Self::ChatThreadDelete(_) => Method::ChatThreadDelete,
+            Self::ChatSend(_) => Method::ChatSend,
+            Self::ChatStop(_) => Method::ChatStop,
             Self::OperationStatus(_) => Method::OperationStatus,
             Self::OperationCancel(_) => Method::OperationCancel,
         }
@@ -1042,6 +1089,15 @@ impl RpcResult {
             Self::GitFetch(_) => Method::GitFetch,
             Self::GitPush(_) => Method::GitPush,
             Self::GitPull(_) => Method::GitPull,
+            Self::ChatProviders(_) => Method::ChatProviders,
+            Self::ChatThreadsList(_) => Method::ChatThreadsList,
+            Self::ChatThreadGet(_) => Method::ChatThreadGet,
+            Self::ChatSubscribe(_) => Method::ChatSubscribe,
+            Self::ChatThreadCreate(_) => Method::ChatThreadCreate,
+            Self::ChatThreadUpdate(_) => Method::ChatThreadUpdate,
+            Self::ChatThreadDelete(_) => Method::ChatThreadDelete,
+            Self::ChatSend(_) => Method::ChatSend,
+            Self::ChatStop(_) => Method::ChatStop,
             Self::OperationStatus(_) => Method::OperationStatus,
             Self::OperationCancel(_) => Method::OperationCancel,
         }
@@ -1071,6 +1127,16 @@ impl RpcResult {
     }
 }
 impl RpcCall {
+    /// Idempotency key of a chat mutation; chat has no workspace-bound status lookup.
+    pub fn chat_operation_id(&self) -> Option<OperationId> {
+        match self {
+            Self::ChatThreadCreate(p) => Some(p.operation_id),
+            Self::ChatThreadUpdate(p) => Some(p.operation_id),
+            Self::ChatThreadDelete(p) => Some(p.operation_id),
+            Self::ChatSend(p) => Some(p.operation_id),
+            _ => None,
+        }
+    }
     pub fn operation_binding(&self) -> Option<OperationLookup> {
         match self {
             Self::TerminalCreate(p) => Some(OperationLookup {
@@ -1171,9 +1237,11 @@ impl RpcResponse {
                 }
                 error.validate_for_method(request.call.method())?;
                 let binding = request.call.operation_binding();
-                if operation_id.is_some()
-                    && operation_id.as_ref() != binding.as_ref().map(|b| &b.operation_id)
-                {
+                let bound_id = binding
+                    .as_ref()
+                    .map(|b| b.operation_id)
+                    .or_else(|| request.call.chat_operation_id());
+                if operation_id.is_some() && *operation_id != bound_id {
                     return Err("error operation binding mismatch");
                 }
                 if error
@@ -1319,6 +1387,34 @@ impl RpcResponse {
                             || r.diff.files.0.len() > p.limit.0 as usize =>
                     {
                         return Err("git show state/object/page mismatch");
+                    }
+                    (RpcCall::ChatThreadsList(p), RpcResult::ChatThreadsList(r))
+                        if r.threads.0.len() > p.limit.0 as usize =>
+                    {
+                        return Err("chat list exceeds requested page");
+                    }
+                    (RpcCall::ChatThreadGet(p), RpcResult::ChatThreadGet(r))
+                        if p.thread_id != r.thread.thread_id
+                            || r.messages.0.len() > p.limit.0 as usize =>
+                    {
+                        return Err("chat thread/page mismatch");
+                    }
+                    (RpcCall::ChatThreadUpdate(p), RpcResult::ChatThreadUpdate(r))
+                        if p.thread_id != r.thread.thread_id =>
+                    {
+                        return Err("chat thread mismatch");
+                    }
+                    (RpcCall::ChatStop(p), RpcResult::ChatStop(r))
+                        if p.thread_id != r.thread.thread_id =>
+                    {
+                        return Err("chat thread mismatch");
+                    }
+                    (RpcCall::ChatSend(p), RpcResult::ChatSend(r))
+                        if p.thread_id != r.thread.thread_id
+                            || r.user.role != ChatRole::User
+                            || r.assistant.role != ChatRole::Assistant =>
+                    {
+                        return Err("chat send result mismatch");
                     }
                     _ => {}
                 }

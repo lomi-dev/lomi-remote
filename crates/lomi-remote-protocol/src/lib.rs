@@ -7,6 +7,7 @@ pub mod admission;
 mod browser_codec;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser_framing;
+mod chat;
 mod errors;
 pub mod http;
 pub mod ipc;
@@ -18,6 +19,7 @@ mod primitives;
 pub mod rpc;
 pub mod streams;
 pub use admission::*;
+pub use chat::*;
 pub use errors::*;
 pub use http::*;
 pub use limits::*;
@@ -128,9 +130,17 @@ pub enum Capability {
     GitNetwork,
     #[serde(rename = "git.execute")]
     GitExecute,
+    #[serde(rename = "chat.read")]
+    ChatRead,
+    #[serde(rename = "chat.send")]
+    ChatSend,
+    #[serde(rename = "chat.permissions.edit")]
+    ChatPermissionsEdit,
+    #[serde(rename = "chat.permissions.full")]
+    ChatPermissionsFull,
 }
 impl Capability {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::WorkspaceRead,
         Self::TerminalObserve,
         Self::TerminalControl,
@@ -141,6 +151,10 @@ impl Capability {
         Self::GitWrite,
         Self::GitNetwork,
         Self::GitExecute,
+        Self::ChatRead,
+        Self::ChatSend,
+        Self::ChatPermissionsEdit,
+        Self::ChatPermissionsFull,
     ];
     pub fn dependencies(self) -> &'static [Self] {
         use Capability::*;
@@ -149,13 +163,27 @@ impl Capability {
             TerminalControl | TerminalManage => &[WorkspaceRead, TerminalObserve],
             FilesWrite => &[WorkspaceRead, FilesRead],
             GitWrite | GitNetwork | GitExecute => &[WorkspaceRead, GitRead],
+            ChatSend => &[WorkspaceRead, ChatRead],
+            ChatPermissionsEdit => &[WorkspaceRead, ChatRead, ChatSend],
+            ChatPermissionsFull => &[WorkspaceRead, ChatRead, ChatSend, ChatPermissionsEdit],
             _ => &[WorkspaceRead],
         }
+    }
+    /// Chat grants are opt-in per workspace and never part of the default control set.
+    pub fn is_chat(self) -> bool {
+        matches!(
+            self,
+            Self::ChatRead | Self::ChatSend | Self::ChatPermissionsEdit | Self::ChatPermissionsFull
+        )
     }
     pub fn allows_shell_execution(self) -> bool {
         matches!(
             self,
-            Self::TerminalControl | Self::TerminalManage | Self::GitExecute
+            Self::TerminalControl
+                | Self::TerminalManage
+                | Self::GitExecute
+                | Self::ChatPermissionsEdit
+                | Self::ChatPermissionsFull
         )
     }
 }
@@ -187,11 +215,15 @@ impl CapabilitySet {
     pub fn contains(&self, cap: Capability) -> bool {
         self.0.contains(&cap)
     }
+    /// Union of two closed sets is closed, so it needs no re-validation.
+    pub fn union(&self, other: &Self) -> Self {
+        Self(self.0.union(&other.0).copied().collect())
+    }
     pub fn control_with_workspace_tools() -> Self {
         Self::try_from(
             Capability::ALL
                 .into_iter()
-                .filter(|c| *c != Capability::GitExecute)
+                .filter(|c| *c != Capability::GitExecute && !c.is_chat())
                 .collect::<Vec<_>>(),
         )
         .unwrap()
@@ -271,6 +303,15 @@ methods! {
     GitFetch => "git.fetch",
     GitPush => "git.push",
     GitPull => "git.pull",
+    ChatProviders => "chat.providers",
+    ChatThreadsList => "chat.threads.list",
+    ChatThreadGet => "chat.thread.get",
+    ChatSubscribe => "chat.subscribe",
+    ChatThreadCreate => "chat.thread.create",
+    ChatThreadUpdate => "chat.thread.update",
+    ChatThreadDelete => "chat.thread.delete",
+    ChatSend => "chat.send",
+    ChatStop => "chat.stop",
     OperationStatus => "operation.status",
     OperationCancel => "operation.cancel",
 }
@@ -327,6 +368,16 @@ impl Method {
             }
             Method::GitFetch | Method::GitPush => &[WorkspaceRead, GitRead, GitNetwork],
             Method::GitPull => &[WorkspaceRead, GitRead, GitWrite, GitNetwork],
+            Method::ChatProviders
+            | Method::ChatThreadsList
+            | Method::ChatThreadGet
+            | Method::ChatSubscribe => &[WorkspaceRead, ChatRead],
+            // Mode-specific chat.permissions.* rights are checked by the Host at runtime.
+            Method::ChatThreadCreate
+            | Method::ChatThreadUpdate
+            | Method::ChatThreadDelete
+            | Method::ChatSend
+            | Method::ChatStop => &[WorkspaceRead, ChatRead, ChatSend],
             Method::OperationStatus | Method::OperationCancel => {
                 return MethodRights::StoredOperationRights;
             }

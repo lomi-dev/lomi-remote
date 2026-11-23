@@ -34,6 +34,7 @@ codes! {
     FileChanged => ("FILE_CHANGED", "File changed.", 409),
     IdempotencyConflict => ("IDEMPOTENCY_CONFLICT", "Operation parameters conflict.", 409),
     HostBusy => ("HOST_BUSY", "Host busy.", 409),
+    ChatBusy => ("CHAT_BUSY", "Chat thread is busy.", 409),
     ControlRequired => ("CONTROL_REQUIRED", "Terminal control required.", 409),
     ControlRevoked => ("CONTROL_REVOKED", "Terminal control revoked.", 409),
     SessionExited => ("SESSION_EXITED", "Terminal session exited.", 409),
@@ -168,6 +169,14 @@ impl RemoteError {
     pub fn validate_for_method(&self, method: Method) -> Result<(), &'static str> {
         if self.effect() == Effect::None {
             return Ok(());
+        }
+        // Chat mutations replay by operationId; there is no workspace status lookup.
+        if crate::is_chat_mutation(method) {
+            return if self.operation().is_none() {
+                Ok(())
+            } else {
+                Err("chat mutations have no operation status lookup")
+            };
         }
         if crate::is_durable_mutation(method) {
             if self.operation().is_none() {

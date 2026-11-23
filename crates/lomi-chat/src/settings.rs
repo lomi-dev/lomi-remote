@@ -556,6 +556,47 @@ impl ChatSettings {
     }
 }
 
+/// Installed CLIs that have no provider yet and were never auto-added or dismissed.
+pub fn detect_plan(installed: &[String], existing: &[String], auto: &[String]) -> Vec<String> {
+    installed
+        .iter()
+        .filter(|id| !existing.contains(id) && !auto.contains(id))
+        .cloned()
+        .collect()
+}
+
+/// Adds a provider for every installed CLI that detection has not seen yet and
+/// returns their ids. The caller holds the storage lock, so scans cannot double-add.
+pub fn detect_cli_providers(
+    settings: &mut ChatSettings,
+    dir: &Path,
+    installed: &[String],
+) -> Result<Vec<String>, String> {
+    let existing: Vec<String> = settings
+        .cli_providers
+        .iter()
+        .map(|c| c.instance_id.clone())
+        .collect();
+    let added = detect_plan(installed, &existing, &settings.auto_detected);
+    if added.is_empty() {
+        return Ok(added);
+    }
+    settings.mutate(dir, None, |s| {
+        for id in &added {
+            s.cli_providers.push(CliProvider {
+                instance_id: id.clone(),
+                cli: id.clone(),
+                label: crate::cli::display_name(id).into(),
+                enabled: true,
+                models: vec![],
+            });
+            s.auto_detected.push(id.clone());
+        }
+        Ok(())
+    })?;
+    Ok(added)
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum Loaded {
     Valid(ChatSettings),
@@ -629,6 +670,16 @@ pub fn valid_key(key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detect_plan_skips_existing_and_remembered() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::detect_plan(&v(&["claude", "codex", "pi"]), &v(&["codex"]), &v(&["pi"])),
+            v(&["claude"])
+        );
+        assert!(super::detect_plan(&[], &v(&["codex"]), &[]).is_empty());
+    }
+
     use super::*;
 
     fn api(id: &str) -> ApiProvider {

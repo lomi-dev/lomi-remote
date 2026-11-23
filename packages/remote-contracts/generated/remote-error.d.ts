@@ -14,6 +14,7 @@ export type ErrorCode =
   | "FILE_CHANGED"
   | "IDEMPOTENCY_CONFLICT"
   | "HOST_BUSY"
+  | "CHAT_BUSY"
   | "CONTROL_REQUIRED"
   | "CONTROL_REVOKED"
   | "SESSION_EXITED"
