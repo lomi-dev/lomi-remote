@@ -931,7 +931,7 @@ impl Operations {
                             index,
                             format!(
                                 "{} {} / pane {} — {:?}{}",
-                                if index == self.selected { ">" } else { " " },
+                                if index == self.selected { "›" } else { " " },
                                 safe_label(&row.tab_name),
                                 safe_label(&String::from(row.pane_id)),
                                 row.state,
@@ -953,7 +953,7 @@ impl Operations {
                             index,
                             format!(
                                 "{} {} [{}]",
-                                if index == self.selected { ">" } else { " " },
+                                if index == self.selected { "›" } else { " " },
                                 safe_label(profile.name.as_str()),
                                 safe_label(profile.profile_id.as_str())
                             ),
@@ -1818,7 +1818,7 @@ impl Operations {
                     .unwrap_or_default();
                 output.push_str(&format!(
                     "{} {} / pane {} — {:?}{}\n",
-                    if index == self.selected { ">" } else { " " },
+                    if index == self.selected { "›" } else { " " },
                     safe_label(&row.tab_name),
                     safe_label(&String::from(row.pane_id)),
                     row.state,
@@ -1856,7 +1856,7 @@ impl Operations {
             {
                 output.push_str(&format!(
                     "{} {} [{}]\n",
-                    if index == self.selected { ">" } else { " " },
+                    if index == self.selected { "›" } else { " " },
                     safe_label(profile.name.as_str()),
                     safe_label(profile.profile_id.as_str())
                 ));

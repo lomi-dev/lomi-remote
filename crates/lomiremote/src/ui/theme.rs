@@ -1,5 +1,6 @@
-//! Always-dark terminal colors from Lomi's built-in desktop theme.
-//! Source: lomi/themes/lomi.json, common primary token and dark token block.
+//! Always-dark terminal colors from the Lomi 4.0 brand (Night, Agent Violet,
+//! Signal Lime). Source: lomi/themes/lomi.json dark token block, which
+//! follows brandbook/tokens/lomi-tokens.json.
 
 use super::interaction::{Action, Target, hint_key};
 
@@ -12,24 +13,30 @@ use ratatui::{
 };
 use std::sync::OnceLock;
 
-pub(crate) const CANVAS: Color = Color::Rgb(0x10, 0x11, 0x14);
-pub(crate) const SURFACE: Color = Color::Rgb(0x18, 0x1a, 0x1f);
-pub(crate) const KEYCAP: Color = Color::Rgb(0x20, 0x23, 0x29);
+pub(crate) const CANVAS: Color = Color::Rgb(0x0e, 0x0e, 0x11);
+pub(crate) const SURFACE: Color = Color::Rgb(0x1a, 0x1a, 0x1e);
+pub(crate) const KEYCAP: Color = Color::Rgb(0x27, 0x27, 0x2d);
 pub(crate) const SIDEBAR: Color = SURFACE;
-pub(crate) const TEXT: Color = Color::Rgb(0xf3, 0xf4, 0xf6);
-pub(crate) const SECONDARY: Color = Color::Rgb(0xbe, 0xc3, 0xcc);
-pub(crate) const MUTED: Color = Color::Rgb(0x98, 0x9f, 0xac);
-pub(crate) const BORDER: Color = Color::Rgb(0x34, 0x39, 0x43);
-pub(crate) const ACCENT: Color = Color::Rgb(0xc8, 0xff, 0x3d);
-pub(crate) const SELECTION: Color = Color::Rgb(0x29, 0x35, 0x1c);
-pub(crate) const SUCCESS: Color = Color::Rgb(0xa8, 0xd8, 0xb9);
-pub(crate) const WARNING: Color = Color::Rgb(0xf1, 0xd2, 0x8a);
-pub(crate) const ERROR: Color = Color::Rgb(0xf1, 0xab, 0xa8);
+pub(crate) const TEXT: Color = Color::Rgb(0xf7, 0xf7, 0xf9);
+pub(crate) const SECONDARY: Color = Color::Rgb(0xbd, 0xbd, 0xc6);
+pub(crate) const MUTED: Color = Color::Rgb(0x96, 0x96, 0xa2);
+pub(crate) const BORDER: Color = Color::Rgb(0x34, 0x34, 0x3c);
+/// Signal Lime: the live light and primary actions. Never as text on Violet.
+pub(crate) const ACCENT: Color = Color::Rgb(0xb9, 0xf5, 0x00);
+/// Night text on a Signal surface.
+pub(crate) const ON_ACCENT: Color = CANVAS;
+/// Agent Violet: focus and selection.
+pub(crate) const VIOLET: Color = Color::Rgb(0xae, 0x8d, 0xff);
+pub(crate) const SELECTION: Color = Color::Rgb(0x3a, 0x15, 0x94);
+pub(crate) const SELECTION_TEXT: Color = Color::Rgb(0xf3, 0xee, 0xff);
+pub(crate) const SUCCESS: Color = Color::Rgb(0x3d, 0xd6, 0x8c);
+pub(crate) const WARNING: Color = Color::Rgb(0xff, 0xb2, 0x24);
+pub(crate) const ERROR: Color = Color::Rgb(0xff, 0x5c, 0x5c);
 
 /// Keep the current choice visible after keyboard focus moves elsewhere.
 pub(crate) fn selection_style(focused: bool) -> Style {
     Style::default()
-        .fg(if focused { ACCENT } else { TEXT })
+        .fg(if focused { SELECTION_TEXT } else { TEXT })
         .bg(if focused { SELECTION } else { KEYCAP })
         .add_modifier(Modifier::BOLD)
 }
@@ -259,6 +266,29 @@ pub(crate) fn content(text: &str) -> Text<'static> {
     )
 }
 
+/// Terminal stand-in for the wordmark: lowercase "lomi" and the Signal dot.
+pub(crate) fn wordmark() -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            "lomi",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("●", Style::default().fg(ACCENT)),
+        Span::styled(" remote", Style::default().fg(VIOLET)),
+    ]
+}
+
+/// A borderless panel carrying the wordmark in its top edge.
+pub(crate) fn brand_panel(surface: Color) -> Block<'static> {
+    let mut title = vec![Span::raw(" ")];
+    title.extend(wordmark());
+    title.push(Span::raw(" "));
+    Block::bordered()
+        .style(Style::default().bg(surface).fg(SECONDARY))
+        .border_style(Style::default().fg(surface))
+        .title(Line::from(title))
+}
+
 pub(crate) fn header(text: &str) -> Text<'static> {
     let mut styled = content(text);
     if let Some(first) = styled.lines.first_mut() {
@@ -267,13 +297,9 @@ pub(crate) fn header(text: &str) -> Text<'static> {
             .next()
             .and_then(|line| line.strip_prefix("Lomi Remote"))
         {
-            *first = Line::from(vec![
-                Span::styled(
-                    "Lomi Remote",
-                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(rest.to_owned(), Style::default().fg(MUTED)),
-            ]);
+            let mut spans = wordmark();
+            spans.push(Span::styled(rest.to_owned(), Style::default().fg(MUTED)));
+            *first = Line::from(spans);
         }
     }
     styled

@@ -622,7 +622,7 @@ fn draw_button(frame: &mut Frame, area: Rect, label: &str, selected: bool) {
         return;
     }
     let (background, foreground) = if selected {
-        (theme::SELECTION, theme::ACCENT)
+        (theme::ACCENT, theme::ON_ACCENT)
     } else {
         (theme::KEYCAP, theme::SECONDARY)
     };

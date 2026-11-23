@@ -1404,8 +1404,8 @@ fn draw_button(frame: &mut Frame, area: Rect, label: &str, focused: bool) {
     }
     let style = if focused {
         Style::default()
-            .fg(theme::ACCENT)
-            .bg(theme::SELECTION)
+            .fg(theme::ON_ACCENT)
+            .bg(theme::ACCENT)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::SECONDARY).bg(theme::KEYCAP)
