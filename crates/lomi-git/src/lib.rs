@@ -2699,13 +2699,23 @@ fn path_identity(path: &Path) -> Result<FileIdentity, GitServiceError> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let volume = metadata
-            .volume_serial_number()
-            .ok_or(GitServiceError::RepositoryChanged)?;
-        let index = metadata
-            .file_index()
-            .ok_or(GitServiceError::RepositoryChanged)?;
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+        };
+        // std's by-handle metadata (volume_serial_number/file_index) is unstable;
+        // directories open only with backup semantics.
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .map_err(|_| GitServiceError::RepositoryChanged)?;
+        let mut info = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        if unsafe { GetFileInformationByHandle(directory.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(GitServiceError::RepositoryChanged);
+        }
+        let volume = info.dwVolumeSerialNumber;
+        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&volume.to_le_bytes());
         bytes.extend_from_slice(&index.to_le_bytes());

@@ -1986,6 +1986,7 @@ dependencies = [
  "url",
  "wasmtime",
  "wasmtime-wasi",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
