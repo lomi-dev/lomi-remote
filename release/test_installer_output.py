@@ -584,7 +584,7 @@ else:
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_installer(self, *, recovery_state: str = "clear") -> tuple[int, bytes, bytes]:
+    def run_installer(self, *, recovery_state: str = "clear", extra_env: dict[str, str] | None = None) -> tuple[int, bytes, bytes]:
         environment = os.environ.copy()
         environment.update({
             "HOME": str(self.directory),
@@ -596,6 +596,7 @@ else:
             "FIXTURE_RECOVERY_SCHEMA": "14",
             "FIXTURE_MAINTENANCE_RESPONSE": json.dumps(MAINTENANCE_RESPONSE),
             "TERM": "dumb",
+            **(extra_env or {}),
         })
         result = subprocess.run(
             ["/bin/sh", str(self.installer_path)],
@@ -630,6 +631,19 @@ else:
         self.assertEqual(install[7], "-")
         self.assertEqual(install[8], "1.2.3")
         self.assertFalse(self.cli_log.exists(), "offline install must not invoke a missing CLI")
+
+    def assert_setup_not_opened(self, extra_env: dict[str, str] | None) -> None:
+        returncode, stdout, stderr = self.run_installer(extra_env=extra_env)
+        self.assertEqual(returncode, 0, stderr.decode(errors="replace"))
+        self.assertIn(b"Open Lomi Remote to sign in and create a workspace", stdout)
+        self.assertNotIn(b"Opening Lomi Remote...", stderr)
+        self.assertFalse(self.cli_log.exists())
+
+    def test_setup_is_not_opened_without_a_terminal(self) -> None:
+        self.assert_setup_not_opened(None)
+
+    def test_setup_is_not_opened_when_skipped(self) -> None:
+        self.assert_setup_not_opened({"LOMI_REMOTE_SKIP_SETUP": "1"})
 
     def test_authenticated_schema_hint_remains_numeric(self) -> None:
         self.install_dir.mkdir(mode=0o700)
