@@ -136,6 +136,22 @@ pub fn native_provider() -> NativeProvider {
     }
 }
 
+/// Default storage when nobody is asked: the protected file on macOS (no
+/// Keychain path needed) and on Linux without a desktop session bus, the OS
+/// keyring otherwise. Used for a fresh Host and by quick setup, whose review
+/// screen states the choice.
+pub fn quick_auth_configuration() -> Result<LocalAuthConfiguration, BootstrapError> {
+    let protected_file = match native_provider() {
+        NativeProvider::MacOsKeychainPathRequired => true,
+        NativeProvider::LinuxStorageChoiceRequired => {
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+        }
+        NativeProvider::WindowsDpapi => false,
+        NativeProvider::Unsupported => return Err(BootstrapError::UnsupportedProvider),
+    };
+    default_auth_configuration(None, protected_file)
+}
+
 /// Construct the native provider selection and the embedded public pins.
 ///
 /// `protected_file_acknowledged` must only be true after the UI has shown that

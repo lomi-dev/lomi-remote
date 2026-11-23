@@ -63,6 +63,10 @@ pub struct SetupView {
     login_reveal_handled: bool,
     login_reveal_authorized: bool,
     host_name_override: Option<LocalHostName>,
+    /// None until asked. Quick setup picks safe defaults for every technical
+    /// choice and keeps only the folder, a short summary and sign-in.
+    quick: Option<bool>,
+    browser_disabled: bool,
 }
 
 impl SetupView {
@@ -72,6 +76,32 @@ impl SetupView {
 
     pub fn set_host_name_override(&mut self, name: Option<LocalHostName>) {
         self.host_name_override = name;
+    }
+
+    /// For appearance-only previews: never open the system browser.
+    pub fn disable_browser(&mut self) {
+        self.browser_disabled = true;
+    }
+
+    /// Asked once, on the first setup screen.
+    fn quick(&mut self) -> Result<bool, setup::SetupError> {
+        if let Some(quick) = self.quick {
+            return Ok(quick);
+        }
+        let Some(choice) = choose_index(
+            "Welcome to Lomi Remote",
+            "Lomi Remote lets you open folders and terminals on this computer from the Lomi app, wherever you are.\n\nQuick setup takes about a minute: pick a folder, sign in with your Lomi account in the browser, done. After that, Lomi Remote runs in the background by itself.",
+            &[
+                "Quick setup (recommended)",
+                "Custom setup — choose every option yourself",
+            ],
+            0,
+        )?
+        else {
+            return Err(setup::SetupError::InteractionUnavailable);
+        };
+        self.quick = Some(choice == 0);
+        Ok(choice == 0)
     }
 
     fn collect_host_name(
@@ -111,6 +141,9 @@ impl SetupView {
         &mut self,
         current_preference: LocalStartMode,
     ) -> Result<LocalStartMode, setup::SetupError> {
+        if self.quick()? {
+            return Ok(LocalStartMode::Login);
+        }
         #[cfg(target_os = "linux")]
         let mechanism = "Manual has no autostart. Login uses systemd --user and can stop at logout. Boot uses the same user manager and requires an administrator to enable lingering first; setup does not enable it.";
         #[cfg(target_os = "macos")]
@@ -666,6 +699,54 @@ impl SetupView {
 }
 
 impl SetupView {
+    fn collect_quick_choices(
+        &mut self,
+        preflight: &setup::HostPreflight,
+        progress: Option<&setup::SetupProgress>,
+        shells: &[setup::ShellCandidate],
+    ) -> Result<setup::SetupChoices, setup::SetupError> {
+        let host_name = self
+            .host_name_override
+            .take()
+            .or_else(|| {
+                progress
+                    .and_then(|progress| progress.host_name.clone())
+                    .and_then(|name| LocalHostName::try_from(name).ok())
+            })
+            .unwrap_or_else(|| preflight.suggested_host_name.clone());
+        let auth_configuration = quick_auth_configuration(progress)?;
+        let (workspace_root, create_missing_workspace) = quick_workspace(preflight, progress)?;
+        let workspace_name = progress
+            .map(|progress| progress.workspace_name.clone())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                workspace_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+            })
+            .and_then(|name| LocalProjectName::try_from(name).ok())
+            .or_else(|| LocalProjectName::try_from("workspace".to_owned()).ok())
+            .ok_or(setup::SetupError::InvalidOptions)?;
+        let login_shell = std::env::var_os("SHELL").map(PathBuf::from);
+        let shell = match quick_shell(shells, login_shell.as_deref()) {
+            Some(shell) => shell,
+            // No standard shell found: fall back to asking for one.
+            None => self.collect_shell(&workspace_root, shells)?,
+        };
+        Ok(setup::SetupChoices {
+            host_name: Some(host_name),
+            auth_configuration,
+            workspace_name,
+            workspace_root,
+            create_missing_workspace,
+            shell,
+            share_remote: true,
+            renew_share_consent: false,
+            disable_existing_share: false,
+        })
+    }
+
     fn take_waiting(&mut self) -> Result<TerminalSession, setup::SetupError> {
         match self.waiting.take() {
             Some(terminal) => Ok(terminal),
@@ -678,7 +759,17 @@ impl setup::SetupInteraction for SetupView {
     fn wait_for_login_update(&mut self) -> Result<bool, setup::SetupError> {
         let mut terminal = self.take_waiting()?;
         let controls = Controls::default();
-        let body = "The Host is waiting for approval in the device login flow. Complete verification in your browser or on a phone. Press v to request a one-time display of the verification URL and code, r or Enter to check status now, or Esc to stop waiting.";
+        let (title, body) = if self.quick == Some(true) {
+            (
+                "Waiting for sign-in",
+                "Approve this computer in your browser or on your phone. This screen moves on by itself. Press v to show the code again, or Esc to finish later with `lomiremote setup`.",
+            )
+        } else {
+            (
+                "Waiting for device login",
+                "The Host is waiting for approval in the device login flow. Complete verification in your browser or on a phone. Press v to request a one-time display of the verification URL and code, r or Enter to check status now, or Esc to stop waiting.",
+            )
+        };
         let primary = [
             ("v", "Reveal once"),
             ("enter", "Check now"),
@@ -688,15 +779,7 @@ impl setup::SetupInteraction for SetupView {
         let deadline = Instant::now() + Duration::from_millis(750);
         loop {
             let ready = terminal
-                .draw_interactive(
-                    "Waiting for device login",
-                    body,
-                    0,
-                    &controls,
-                    &primary,
-                    &trailing,
-                    None,
-                )
+                .draw_interactive(title, body, 0, &controls, &primary, &trailing, None)
                 .map_err(|_| setup::SetupError::InteractionUnavailable)?;
             let Some(event) = terminal
                 .read_event_until(&controls, deadline)
@@ -812,6 +895,9 @@ impl setup::SetupInteraction for SetupView {
         shells: &[setup::ShellCandidate],
     ) -> Result<setup::SetupChoices, setup::SetupError> {
         self.waiting = None;
+        if self.quick()? {
+            return self.collect_quick_choices(preflight, progress, shells);
+        }
         let host_name = self.collect_host_name(preflight, progress)?;
         let auth_configuration = self.collect_auth_configuration(progress)?;
         let (workspace_name, workspace_root, create_missing_workspace) =
@@ -856,6 +942,10 @@ impl setup::SetupInteraction for SetupView {
 
     fn confirm_review(&mut self, review: &setup::SetupReview) -> Result<bool, setup::SetupError> {
         self.waiting = None;
+        if self.quick == Some(true) {
+            return confirm_scrolled("Ready to connect", &quick_review_text(review), true)
+                .map(|answer| answer.unwrap_or(false));
+        }
         let mode = start_mode_label(review.mode);
         let account = match &review.account {
             setup::SetupAccount::Unix { uid, gid } => format!(
@@ -937,6 +1027,9 @@ impl setup::SetupInteraction for SetupView {
             return false;
         }
         self.login_reveal_handled = true;
+        if self.quick == Some(true) {
+            return true;
+        }
         confirm(
             "Reveal device login details?",
             "The verification URL and one-time user code will be visible in this terminal until you dismiss the next screen. They are not written to setup progress or logs. You can also request a one-time reveal later by pressing v on the login wait screen.",
@@ -954,6 +1047,22 @@ impl setup::SetupInteraction for SetupView {
         self.waiting = None;
         self.login_reveal_authorized = false;
         self.login_reveal_handled = true;
+        if self.quick == Some(true) {
+            // Best effort: the code stays on screen if no browser can open.
+            if !self.browser_disabled {
+                let _ = crate::browser::open(presentation.verification_url.as_str());
+            }
+            if let Ok(mut terminal) = TerminalSession::enter() {
+                let body = format!(
+                    "Your browser should open now. If it does not, go to:\n{}\n\nThen enter this code:\n{}\n\nYou can also do this on your phone. The code works for about {} more minutes.\n\nPress Enter after you approve this computer.",
+                    display(presentation.verification_url.as_str(), PATH_LIMIT),
+                    display(presentation.user_code.expose_wire(), 64),
+                    minutes_until(presentation.expires_at.0),
+                );
+                let _ = wait_for_dismiss(&mut terminal, "Sign in to Lomi", &body);
+            }
+            return;
+        }
         if let Ok(mut terminal) = TerminalSession::enter() {
             let body = format!(
                 "Verification URL:\n{}\n\nOne-time user code:\n{}\n\nExpires at: {}\n\nYou may enter the URL on this device or on a phone. The code stays visible only until you dismiss this screen.",
@@ -1053,7 +1162,7 @@ impl TerminalSession {
             .areas(frame.area());
             frame.render_widget(
                 Paragraph::new(theme::header(&display(title, 160)))
-                    .block(theme::panel("", theme::SURFACE)),
+                    .block(theme::brand_panel(theme::SURFACE)),
                 header,
             );
             let content_block = theme::panel("", theme::SURFACE);
@@ -1150,7 +1259,7 @@ impl TerminalSession {
             .areas(frame.area());
             frame.render_widget(
                 Paragraph::new(theme::header(&display(title, 160)))
-                    .block(theme::panel("", theme::SURFACE)),
+                    .block(theme::brand_panel(theme::SURFACE)),
                 header,
             );
 
@@ -1164,7 +1273,7 @@ impl TerminalSession {
                 (
                     format!(
                         "{} {}",
-                        if index == selected { ">" } else { " " },
+                        if index == selected { "›" } else { " " },
                         display(choices[index], 1024)
                     ),
                     Some(index),
@@ -1955,6 +2064,153 @@ fn is_filesystem_root(path: &Path) -> bool {
         .all(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
 }
 
+/// Quick setup stores sign-in credentials where no unlocked keyring is
+/// needed, unless a desktop keyring session is clearly present on Linux.
+/// The quick review screen states the choice before anything is saved.
+fn quick_auth_configuration(
+    progress: Option<&setup::SetupProgress>,
+) -> Result<Option<LocalAuthConfiguration>, setup::SetupError> {
+    if progress.is_some_and(|progress| progress.auth_generation.is_some()) {
+        return Ok(None);
+    }
+    if bootstrap::public_release_pins().is_none() {
+        notice(
+            "This build of Lomi Remote cannot sign in to Lomi. Install the official release from lomi.dev and run setup again.",
+        )?;
+        return Err(setup::SetupError::InteractionUnavailable);
+    }
+    match bootstrap::quick_auth_configuration() {
+        Ok(configuration) => Ok(Some(configuration)),
+        Err(bootstrap::BootstrapError::UnsupportedProvider) => {
+            notice("Lomi Remote cannot store a sign-in on this operating system.")?;
+            Err(setup::SetupError::InteractionUnavailable)
+        }
+        Err(_) => Err(setup::SetupError::InvalidOptions),
+    }
+}
+
+fn quick_workspace(
+    preflight: &setup::HostPreflight,
+    progress: Option<&setup::SetupProgress>,
+) -> Result<(PathBuf, bool), setup::SetupError> {
+    let initial = progress
+        .map(|progress| progress.workspace_root.clone())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| {
+            if is_filesystem_root(&preflight.current_directory) {
+                String::new()
+            } else {
+                preflight.current_directory.to_string_lossy().into_owned()
+            }
+        });
+    loop {
+        let Some(value) = input_line(
+            "Which folder do you want to open from Lomi?",
+            "Lomi will be able to open files and terminals in this folder. Nothing is moved or copied. Press Enter to use the folder shown below, or type another one.",
+            &initial,
+            PATH_LIMIT,
+            false,
+        )?
+        else {
+            return Err(setup::SetupError::InteractionUnavailable);
+        };
+        let value = value.trim();
+        let path = match value.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                match std::env::var_os("HOME") {
+                    Some(home) => PathBuf::from(home).join(rest.trim_start_matches('/')),
+                    None => PathBuf::from(value),
+                }
+            }
+            _ => PathBuf::from(value),
+        };
+        if value.len() > PATH_LIMIT
+            || !path.is_absolute()
+            || is_filesystem_root(&path)
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+            || has_terminal_controls(value)
+        {
+            notice("Type the full folder path, for example ~/Projects or /home/me/code.")?;
+            continue;
+        }
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => return Ok((path, false)),
+            Ok(_) => notice("That is a file, not a folder. Choose a folder.")?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(create) = confirm(
+                    "Create this folder?",
+                    &format!(
+                        "{} does not exist yet. Create it?",
+                        display(&path.to_string_lossy(), PATH_LIMIT)
+                    ),
+                    true,
+                )?
+                else {
+                    return Err(setup::SetupError::InteractionUnavailable);
+                };
+                if create {
+                    return Ok((path, true));
+                }
+            }
+            Err(_) => notice("Lomi Remote cannot open that folder. Check that you can access it.")?,
+        }
+    }
+}
+
+fn minutes_until(unix_seconds: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    unix_seconds.saturating_sub(now).div_ceil(60)
+}
+
+/// Prefer the account's login shell, else the first standard shell.
+fn quick_shell(
+    shells: &[setup::ShellCandidate],
+    login_shell: Option<&Path>,
+) -> Option<setup::SetupShellChoice> {
+    let candidate = shells
+        .iter()
+        .find(|candidate| Some(candidate.executable.as_path()) == login_shell)
+        .or_else(|| shells.first())?;
+    let executable = candidate
+        .executable
+        .to_str()
+        .filter(|text| text.len() <= PATH_LIMIT && !has_terminal_controls(text))?;
+    Some(setup::SetupShellChoice {
+        name: LocalProjectName::try_from(candidate.label.clone()).ok()?,
+        executable: LocalRootPath::try_from(executable.to_owned()).ok()?,
+        args: BoundedList(Vec::new()),
+        environment: BoundedList(Vec::new()),
+    })
+}
+
+fn quick_review_text(review: &setup::SetupReview) -> String {
+    let storage = match review.storage_provider {
+        Some("protectedFile") => {
+            "\nYour sign-in is saved in a file that only your account (and administrators) can read."
+        }
+        _ => "",
+    };
+    format!(
+        "Folder: {}{}\nComputer name: {}\nStarts automatically: {}\n\nNext, you sign in with your Lomi account in the browser. Then this folder is shared with your Lomi account, so you can open its files and terminals from the Lomi app on your other devices. You can stop sharing at any time with s in the dashboard.{storage}\n\nPress Enter to continue.",
+        display(&review.workspace_root.to_string_lossy(), PATH_LIMIT),
+        if review.create_missing_workspace {
+            " (will be created)"
+        } else {
+            ""
+        },
+        display(review.host_name.as_str(), NAME_LIMIT),
+        match review.mode {
+            LocalStartMode::Manual => "no, start it with `lomiremote daemon start`",
+            LocalStartMode::Login => "yes, when you log in",
+            LocalStartMode::Boot => "yes, when this computer starts",
+        },
+    )
+}
+
 fn start_mode_label(mode: LocalStartMode) -> &'static str {
     match mode {
         LocalStartMode::Manual => "Manual",
@@ -1966,6 +2222,29 @@ fn start_mode_label(mode: LocalStartMode) -> &'static str {
 #[cfg(test)]
 mod focused_interaction_tests {
     use super::*;
+
+    #[test]
+    fn quick_shell_uses_a_standard_shell_without_arguments() {
+        let candidate = |path: &str| setup::ShellCandidate {
+            label: Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            executable: PathBuf::from(path),
+        };
+        assert!(quick_shell(&[], None).is_none());
+        let shells = [
+            candidate("/lomi-test/first-sh"),
+            candidate("/bin/zsh"),
+            candidate("/bin/bash"),
+        ];
+        let first = quick_shell(&shells, Some(Path::new("/opt/unknown"))).unwrap();
+        assert_eq!(first.executable.as_str(), "/lomi-test/first-sh");
+        let choice = quick_shell(&shells, Some(Path::new("/bin/bash"))).unwrap();
+        assert_eq!(choice.executable.as_str(), "/bin/bash");
+        assert!(choice.args.0.is_empty() && choice.environment.0.is_empty());
+    }
 
     #[test]
     fn clicking_a_choice_selects_it_without_accepting_it() {
