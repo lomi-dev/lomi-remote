@@ -1036,7 +1036,7 @@ impl Worker {
         let prepared = policy(snapshot.prepare_grant(
             &hex_bytes(work.proposal.maximum_grant.expose_wire())?,
             GrantNarrowing {
-                capabilities: CapabilitySet::control_with_workspace_tools(),
+                capabilities: grant_narrowing(),
                 expires_at: maximum.expires_at,
             },
             self.clock.as_mut().expect("initialized policy clock"),
@@ -2603,5 +2603,34 @@ mod owner_turn_retry_tests {
         ));
         assert_eq!(attempts.get(), 1);
         assert_eq!(waits.get(), 0);
+    }
+}
+
+/// Host-wide grant narrowing: everything but git.execute. Chat is then bounded by
+/// the workspace's own ceiling in prepare_grant.
+fn grant_narrowing() -> CapabilitySet {
+    CapabilitySet::control_with_workspace_tools().union(
+        &CapabilitySet::try_from(vec![
+            Capability::WorkspaceRead,
+            Capability::ChatRead,
+            Capability::ChatSend,
+            Capability::ChatPermissionsEdit,
+            Capability::ChatPermissionsFull,
+        ])
+        .expect("chat capabilities are dependency-closed"),
+    )
+}
+
+#[cfg(test)]
+mod grant_narrowing_tests {
+    use super::*;
+    #[test]
+    fn narrowing_keeps_chat_and_excludes_git_execute() {
+        let set = grant_narrowing();
+        assert!(
+            set.contains(Capability::ChatRead) && set.contains(Capability::ChatPermissionsFull)
+        );
+        assert!(set.contains(Capability::TerminalControl));
+        assert!(!set.contains(Capability::GitExecute));
     }
 }
