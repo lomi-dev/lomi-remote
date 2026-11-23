@@ -735,8 +735,6 @@ async fn stream_api(
 
 /// How long the pipes may stay open after the CLI exits or reports its final event.
 const DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
-/// No stdout for this long means the CLI is hung.
-const INACTIVITY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Runs the CLI, then settles the stored session id. A session id is kept only
 /// once the turn produced text or exited successfully (it may not exist
@@ -795,10 +793,10 @@ async fn run_cli(
     let mut fallback: Option<String> = None;
     let (mut failure, mut oversized) = (None::<String>, false);
     let mut buf = [0u8; 8192];
-    let (mut exited, mut hung) = (false, false);
+    // No inactivity limit: a generation runs until it ends or is stopped explicitly.
+    let mut exited = false;
     // Set once the CLI exited or sent its final event; the pipes then get `DRAIN` to close.
     let mut drain_until: Option<tokio::time::Instant> = None;
-    let mut last_byte = tokio::time::Instant::now();
 
     'read: loop {
         let read = tokio::select! {
@@ -809,19 +807,12 @@ async fn run_cli(
                 drain_until.get_or_insert(tokio::time::Instant::now() + DRAIN);
                 continue;
             }
-            _ = tokio::time::sleep_until(drain_until.unwrap_or(last_byte)), if drain_until.is_some() => {
+            _ = tokio::time::sleep_until(drain_until.unwrap_or_else(tokio::time::Instant::now)), if drain_until.is_some() => {
                 proc.kill();
-                break;
-            }
-            _ = tokio::time::sleep_until(last_byte + INACTIVITY) => {
-                hung = true;
                 break;
             }
         };
         let n = read.unwrap_or(0);
-        if n > 0 {
-            last_byte = tokio::time::Instant::now();
-        }
         let lines = if n == 0 {
             splitter.finish()
         } else {
@@ -858,10 +849,6 @@ async fn run_cli(
         acc.flush_due(chat, job).await;
     }
 
-    if hung {
-        proc.kill();
-        return Outcome::failed("The CLI stopped responding.".into(), acc.content, acc.seq);
-    }
     if let Some(message) = failure {
         return Outcome::failed(message, acc.content, acc.seq);
     }
