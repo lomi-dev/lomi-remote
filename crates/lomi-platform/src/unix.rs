@@ -1498,6 +1498,15 @@ impl LocalClient {
             | (LocalCall::Workspaces {}, R::Workspaces(_))
             | (LocalCall::Profiles {}, R::Profiles(_))
             | (LocalCall::Rpc(_), R::Rpc(_)) => true,
+            (LocalCall::ChatLevelSet(p), R::ChatLevel(s)) => {
+                p.workspace_id == s.workspace_id && p.level == s.level
+            }
+            (LocalCall::ChatThreads(p), R::ChatThreads(threads)) => {
+                threads.0.iter().all(|t| t.workspace_id == p.workspace_id)
+            }
+            (LocalCall::ChatStop(p), R::ChatThread(t)) => p.thread_id == t.thread_id,
+            (LocalCall::ChatDelete(_), R::ChatDeleted {})
+            | (LocalCall::ChatAudit(_), R::ChatAudit(_)) => true,
             (LocalCall::WorkspaceAdd(p), R::Workspace(w)) => p.name == w.name,
             (LocalCall::WorkspaceImport(p), R::WorkspaceImported(receipt)) => {
                 p.workspace_id == receipt.import_id
