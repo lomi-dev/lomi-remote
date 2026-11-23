@@ -195,52 +195,124 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
     Ok(EntryOutcome { binding, outcome })
 }
 
-/// Register autostart for a non-manual binding that has none yet, using the
-/// same install-then-start order as setup. Returns true when the Host may have
-/// been restarted, so the caller must start and re-check it again.
-pub fn ensure_autostart(binding: &setup::ServiceBinding) -> bool {
-    use setup::SetupServiceControl;
-    if binding.mode == LocalStartMode::Manual {
-        return false;
-    }
-    let mut service = setup_runtime::NativeSetupService;
-    let Ok(observation) = service.inspect(binding) else {
-        return false;
-    };
-    if !observation.binding_matches || observation.registration_present {
-        return false;
-    }
-    if service.install(binding).is_ok() {
-        let _ = service.start(binding);
-    }
-    true
+/// What the dashboard must do about sign-in storage after first-run setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultAuth {
+    /// An existing installation: nothing was changed.
+    NotFresh,
+    /// The OS secure store was configured.
+    Configured,
+    /// No usable secure store: ask for the protected-file consent first.
+    FileConsentRequired,
+    /// Configuration failed; the dashboard shows how to retry.
+    Failed(&'static str),
 }
 
-/// Configure the default sign-in storage on a fresh Host (never signed in, no
-/// workspaces), so the dashboard can go straight to "Sign in". An existing
-/// installation keeps its owner's choice. Failures leave the dashboard's
-/// storage screens in charge.
-pub fn configure_default_auth(binding: &setup::ServiceBinding) {
+/// First run of a fresh profile only: register autostart and configure the
+/// default sign-in storage. Anything that looks used is left untouched, so a
+/// removed autostart or a chosen storage is never silently redone.
+pub fn first_run(binding: &setup::ServiceBinding) -> DefaultAuth {
     use setup::SetupHost;
     let mut host = setup_runtime::LocalSetupHost::new(binding.clone());
-    let unconfigured = matches!(
-        host.request(LocalCall::LoginStatus {}),
-        Ok(LocalResult::LoginStatus(status)) if status.phase == LocalAuthPhase::Unconfigured
-    );
-    let fresh = matches!(
-        host.request(LocalCall::Workspaces {}),
-        Ok(LocalResult::Workspaces(workspaces)) if workspaces.0.is_empty()
-    );
-    if !unconfigured || !fresh {
-        return;
+    let login = host.request(LocalCall::LoginStatus {});
+    let workspaces = host.request(LocalCall::Workspaces {});
+    let has_journal = SetupJournalStore::read_existing(&binding.profile_path)
+        .map(|journal| journal.is_some())
+        .unwrap_or(true);
+    let (Ok(LocalResult::LoginStatus(login)), Ok(LocalResult::Workspaces(workspaces))) =
+        (login, workspaces)
+    else {
+        return DefaultAuth::NotFresh;
+    };
+    if !is_fresh_host(&login, workspaces.0.len(), has_journal) {
+        return DefaultAuth::NotFresh;
     }
-    if let Ok(configuration) = bootstrap::quick_auth_configuration() {
-        let _ = host.request(LocalCall::AuthConfigure(
-            lomi_remote_protocol::ipc::LocalAuthConfigure {
-                configuration,
-                operator_intent: lomi_remote_protocol::rpc::Confirmed::Confirmed,
-            },
-        ));
+    ensure_autostart(binding);
+    match bootstrap::quick_auth_configuration(binding.mode != LocalStartMode::Boot) {
+        Ok(bootstrap::QuickAuth::SecureStore(configuration)) => {
+            match configure_auth(&mut host, configuration) {
+                Ok(()) => DefaultAuth::Configured,
+                Err(code) => DefaultAuth::Failed(code),
+            }
+        }
+        Ok(bootstrap::QuickAuth::FileConsentRequired) => DefaultAuth::FileConsentRequired,
+        Err(_) => DefaultAuth::Failed("AUTH_CONFIGURATION_UNAVAILABLE"),
+    }
+}
+
+/// Strongest available "never used" signal: authentication never configured
+/// (no generation, no pending cloud revoke), no workspaces, and no setup
+/// journal. A reset, purged or interrupted Host fails this and gets the
+/// explicit storage choice instead.
+fn is_fresh_host(
+    login: &lomi_remote_protocol::ipc::LocalLoginStatus,
+    workspaces: usize,
+    has_journal: bool,
+) -> bool {
+    login.phase == LocalAuthPhase::Unconfigured
+        && login.generation.0 == 0
+        && !login.pending_cloud_revoke
+        && workspaces == 0
+        && !has_journal
+}
+
+fn configure_auth(
+    host: &mut setup_runtime::LocalSetupHost,
+    configuration: LocalAuthConfiguration,
+) -> Result<(), &'static str> {
+    use setup::SetupHost;
+    host.request(LocalCall::AuthConfigure(
+        lomi_remote_protocol::ipc::LocalAuthConfigure {
+            configuration,
+            operator_intent: lomi_remote_protocol::rpc::Confirmed::Confirmed,
+        },
+    ))
+    .map_err(|error| match error {
+        setup::SetupCallError::Rejected => "AUTH_CONFIGURATION_REJECTED",
+        setup::SetupCallError::OutcomeUnknown => "AUTH_CONFIGURATION_OUTCOME_UNKNOWN",
+        setup::SetupCallError::Unavailable => "HOST_UNAVAILABLE",
+    })
+    .and_then(|result| match result {
+        LocalResult::AuthConfigured {} => Ok(()),
+        _ => Err("AUTH_CONFIGURATION_REJECTED"),
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AutostartAction {
+    None,
+    Register { start: bool },
+}
+
+fn autostart_action(
+    mode: LocalStartMode,
+    observation: &setup::ServiceObservation,
+) -> AutostartAction {
+    if mode == LocalStartMode::Manual
+        || !observation.binding_matches
+        || observation.registration_present
+    {
+        AutostartAction::None
+    } else {
+        // The Host the dashboard just started must not be started twice.
+        AutostartAction::Register {
+            start: !(observation.active || observation.ipc_ready),
+        }
+    }
+}
+
+/// Register autostart for a non-manual binding that has none yet. Failure is
+/// not fatal: the Host keeps running now.
+fn ensure_autostart(binding: &setup::ServiceBinding) {
+    use setup::SetupServiceControl;
+    let mut service = setup_runtime::NativeSetupService;
+    let Ok(observation) = service.inspect(binding) else {
+        return;
+    };
+    if let AutostartAction::Register { start } = autostart_action(binding.mode, &observation) {
+        if service.install(binding).is_ok() && start {
+            let _ = service.start(binding);
+        }
     }
 }
 
@@ -788,5 +860,88 @@ fn auth_configuration_exists(
         | lomi_host::SetupInspection::InvalidIdentity
         | lomi_host::SetupInspection::InvalidConfiguration
         | lomi_host::SetupInspection::Unavailable => Err(setup::SetupError::ProfileRejected),
+    }
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+    use lomi_remote_protocol::{
+        DecimalU64,
+        ipc::{LocalAuthNetwork, LocalAuthStorage, LocalLoginStatus},
+    };
+
+    fn login(phase: LocalAuthPhase, generation: u64, revoke: bool) -> LocalLoginStatus {
+        LocalLoginStatus {
+            phase,
+            storage: LocalAuthStorage::Unconfigured,
+            network: LocalAuthNetwork::Available,
+            generation: DecimalU64(generation),
+            locked: false,
+            pending_cloud_revoke: revoke,
+            operation_id: None,
+            access_expires_at: None,
+            refresh_at: None,
+        }
+    }
+
+    #[test]
+    fn fresh_host_requires_every_never_used_signal() {
+        let fresh = login(LocalAuthPhase::Unconfigured, 0, false);
+        assert!(is_fresh_host(&fresh, 0, false));
+        assert!(!is_fresh_host(&fresh, 1, false));
+        assert!(!is_fresh_host(&fresh, 0, true));
+        assert!(!is_fresh_host(
+            &login(LocalAuthPhase::Unconfigured, 3, false),
+            0,
+            false
+        ));
+        assert!(!is_fresh_host(
+            &login(LocalAuthPhase::Unconfigured, 0, true),
+            0,
+            false
+        ));
+        assert!(!is_fresh_host(
+            &login(LocalAuthPhase::Idle, 0, false),
+            0,
+            false
+        ));
+    }
+
+    fn observation(registered: bool, running: bool) -> setup::ServiceObservation {
+        setup::ServiceObservation {
+            binding_matches: true,
+            registration_present: registered,
+            autostart_enabled: registered,
+            active: running,
+            ipc_ready: running,
+        }
+    }
+
+    #[test]
+    fn autostart_is_registered_once_and_never_restarts_a_running_host() {
+        let login = LocalStartMode::Login;
+        assert_eq!(
+            autostart_action(login, &observation(false, true)),
+            AutostartAction::Register { start: false }
+        );
+        assert_eq!(
+            autostart_action(login, &observation(false, false)),
+            AutostartAction::Register { start: true }
+        );
+        assert_eq!(
+            autostart_action(login, &observation(true, true)),
+            AutostartAction::None
+        );
+        assert_eq!(
+            autostart_action(LocalStartMode::Manual, &observation(false, true)),
+            AutostartAction::None
+        );
+        let mut other_binding = observation(false, true);
+        other_binding.binding_matches = false;
+        assert_eq!(
+            autostart_action(login, &other_binding),
+            AutostartAction::None
+        );
     }
 }

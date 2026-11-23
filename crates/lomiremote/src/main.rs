@@ -243,14 +243,8 @@ fn run_setup_flow(profile: &Path, args: Option<&ArgMatches>) -> u8 {
                 Err(failure) => return print_failure(failure, false),
             };
             if interactive {
-                // Autostart failure is not fatal: the Host keeps running now.
-                if lomiremote::setup_entry::ensure_autostart(&binding) {
-                    if let Err(failure) = prepare_dashboard_host(&binding, Some(host_id)) {
-                        return print_failure(failure, false);
-                    }
-                }
-                lomiremote::setup_entry::configure_default_auth(&binding);
-                ui::run(&mut IpcBackend(profile, host_id)).map_or(4, |_| 0)
+                let auth = lomiremote::setup_entry::first_run(&binding);
+                ui::run_with_auth(&mut IpcBackend(profile, host_id), auth).map_or(4, |_| 0)
             } else {
                 0
             }
