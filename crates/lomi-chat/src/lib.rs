@@ -2,6 +2,7 @@
 pub mod attachments;
 pub mod cli;
 pub mod cli_bin;
+pub mod engine;
 pub mod http;
 pub mod settings;
 pub mod storage;
