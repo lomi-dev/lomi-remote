@@ -52,6 +52,21 @@ pub fn valid_arg_id(id: &str, max: usize) -> bool {
         && !id.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
+/// Fallback model id meaning "omit the model flag"; real model ids are never this bare word.
+pub const DEFAULT_MODEL: &str = "default";
+
+/// Codex, Kimi and agy may list nothing yet (e.g. right after login); offer the CLI default.
+fn with_default_model(mut list: Vec<CliModel>) -> Vec<CliModel> {
+    if list.is_empty() {
+        list.push(CliModel {
+            id: DEFAULT_MODEL.into(),
+            label: "CLI default".into(),
+            efforts: vec![],
+        });
+    }
+    list
+}
+
 pub fn valid_model(id: &str) -> Result<(), String> {
     if valid_arg_id(id, 256) {
         Ok(())
@@ -179,7 +194,10 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 // Skips the user's config.toml (MCP servers, hooks) and exec-policy rules.
                 add(&["--ignore-user-config", "--ignore-rules"]);
             }
-            add(&["-m", i.model, "-"]);
+            if i.model != DEFAULT_MODEL {
+                add(&["-m", i.model]);
+            }
+            add(&["-"]);
             Some(i.prompt.to_string())
         }
         "kimi" => {
@@ -187,7 +205,10 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
             // approves tools automatically and rejects `--plan`, so a new session binds a
             // read-only agent; resumed sessions restore that agent themselves.
             add(&[&format!("--prompt={}", i.prompt)]);
-            add(&["--output-format", "stream-json", "-m", i.model]);
+            add(&["--output-format", "stream-json"]);
+            if i.model != DEFAULT_MODEL {
+                add(&["-m", i.model]);
+            }
             if let Some(d) = i.attach_dir {
                 add(&[&format!("--add-dir={d}")]);
             }
@@ -209,7 +230,9 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 i.prompt.to_string()
             };
             add(&["-p", &prompt, "--output-format", "stream-json"]);
-            add(&["--model", i.model]);
+            if i.model != DEFAULT_MODEL {
+                add(&["--model", i.model]);
+            }
             if let Some(d) = i.attach_dir {
                 add(&[&format!("--add-dir={d}")]);
             }
@@ -873,7 +896,7 @@ pub async fn models(cli: &str, access_token: AccessToken) -> Vec<CliModel> {
 }
 
 async fn listed_models(cli: &str, access_token: AccessToken) -> Vec<CliModel> {
-    match cli {
+    let list = match cli {
         "claude" => {
             let listed = claude_account_models(access_token).await;
             if listed.is_empty() {
@@ -918,6 +941,11 @@ async fn listed_models(cli: &str, access_token: AccessToken) -> Vec<CliModel> {
             },
             None => vec![],
         },
+    };
+    if cli == "claude" {
+        list
+    } else {
+        with_default_model(list)
     }
 }
 
@@ -1384,6 +1412,24 @@ not json"#,
             let e = Proc::spawn(&spec).err().unwrap();
             assert!(e.starts_with("Cannot start the CLI: "), "{e}");
         });
+    }
+
+    #[test]
+    fn default_model_omits_flag_and_fills_empty_lists() {
+        for cli in ["codex", "kimi", "agy"] {
+            let mut i = inv(cli, None, "s");
+            i.model = DEFAULT_MODEL;
+            let (a, _) = argv(&i);
+            assert!(
+                !a.iter().any(|x| x == "-m" || x == "--model"),
+                "{cli}: {a:?}"
+            );
+            assert!(!a.iter().any(|x| x == DEFAULT_MODEL), "{cli}: {a:?}");
+        }
+        assert!(valid_model(DEFAULT_MODEL).is_ok());
+        let l = with_default_model(vec![]);
+        assert_eq!((l.len(), l[0].id.as_str()), (1, "default"));
+        assert_eq!(with_default_model(parse_agy_models("")).len(), 1);
     }
 
     #[test]
