@@ -66,6 +66,10 @@ mod namespace_runtime;
 mod native_editor;
 #[cfg(target_os = "macos")]
 mod native_evidence;
+#[cfg(unix)]
+mod native_git;
+#[cfg(windows)]
+#[path = "unix/native_git_unsupported.rs"]
 mod native_git;
 #[cfg(any(unix, windows))]
 mod public_configuration;
