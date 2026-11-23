@@ -18,6 +18,12 @@ Install the latest published release on Linux or macOS:
 curl -fsSL https://lomi.dev/remote/install.sh | sh
 ```
 
+In a terminal, the installer opens Lomi Remote right away. Sign in with your
+Lomi account in the browser, then choose **Create new workspace** to pick a
+folder to open from the Lomi app. Later, run `lomiremote` to open it again.
+To only install, set `LOMI_REMOTE_SKIP_SETUP=1`. The step-by-step wizard
+(`lomiremote setup`) remains available for autostart and advanced options.
+
 Check and apply updates to an existing installation:
 
 ```sh

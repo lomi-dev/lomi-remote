@@ -98,7 +98,13 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
             }
         }
     } else {
-        let selected = select_mode(requested_mode, non_interactive, &mut view)?;
+        // Plain `lomiremote` never opens the wizard: it starts the Host with
+        // login autostart and goes to the dashboard to create workspaces.
+        let selected = if dashboard_entry && requested_mode.is_none() {
+            LocalStartMode::Login
+        } else {
+            select_mode(requested_mode, non_interactive, &mut view)?
+        };
         (selected, None)
     };
 
@@ -189,6 +195,55 @@ pub fn run(profile: &Path, args: Option<&ArgMatches>) -> Result<EntryOutcome, se
     Ok(EntryOutcome { binding, outcome })
 }
 
+/// Register autostart for a non-manual binding that has none yet, using the
+/// same install-then-start order as setup. Returns true when the Host may have
+/// been restarted, so the caller must start and re-check it again.
+pub fn ensure_autostart(binding: &setup::ServiceBinding) -> bool {
+    use setup::SetupServiceControl;
+    if binding.mode == LocalStartMode::Manual {
+        return false;
+    }
+    let mut service = setup_runtime::NativeSetupService;
+    let Ok(observation) = service.inspect(binding) else {
+        return false;
+    };
+    if !observation.binding_matches || observation.registration_present {
+        return false;
+    }
+    if service.install(binding).is_ok() {
+        let _ = service.start(binding);
+    }
+    true
+}
+
+/// Configure the default sign-in storage on a fresh Host (never signed in, no
+/// workspaces), so the dashboard can go straight to "Sign in". An existing
+/// installation keeps its owner's choice. Failures leave the dashboard's
+/// storage screens in charge.
+pub fn configure_default_auth(binding: &setup::ServiceBinding) {
+    use setup::SetupHost;
+    let mut host = setup_runtime::LocalSetupHost::new(binding.clone());
+    let unconfigured = matches!(
+        host.request(LocalCall::LoginStatus {}),
+        Ok(LocalResult::LoginStatus(status)) if status.phase == LocalAuthPhase::Unconfigured
+    );
+    let fresh = matches!(
+        host.request(LocalCall::Workspaces {}),
+        Ok(LocalResult::Workspaces(workspaces)) if workspaces.0.is_empty()
+    );
+    if !unconfigured || !fresh {
+        return;
+    }
+    if let Ok(configuration) = bootstrap::quick_auth_configuration() {
+        let _ = host.request(LocalCall::AuthConfigure(
+            lomi_remote_protocol::ipc::LocalAuthConfigure {
+                configuration,
+                operator_intent: lomi_remote_protocol::rpc::Confirmed::Confirmed,
+            },
+        ));
+    }
+}
+
 fn route_existing_dashboard(
     binding: setup::ServiceBinding,
     requested_mode: Option<LocalStartMode>,
@@ -222,9 +277,7 @@ fn route_existing_dashboard(
     // An installed/initialized Host can present the authentication landing
     // screen even if first-run setup has a pending login. Explicit `setup`
     // keeps its resumable coordinator and all consent ordering unchanged.
-    if (dashboard_entry && preflight.existing_host_id.is_some())
-        || (!has_journal && preflight.existing_configuration)
-    {
+    if dashboard_entry || (!has_journal && preflight.existing_configuration) {
         if requested_mode_mismatch {
             return Err(setup::SetupError::BindingMismatch);
         }

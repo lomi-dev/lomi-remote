@@ -107,7 +107,7 @@ impl WorkspaceForm {
 
         if show_description && y < form.bottom() {
             frame.render_widget(
-                Paragraph::new("Add a local workspace to Lomi Remote.")
+                Paragraph::new("Pick a folder on this computer to open from the Lomi app.")
                     .style(Style::default().fg(theme::SECONDARY)),
                 Rect::new(form.x, y, form.width, 1),
             );
@@ -333,6 +333,15 @@ impl WorkspaceForm {
     }
 
     pub(super) fn directory_selected(&mut self, path: PathBuf) {
+        // Name an unnamed workspace after its folder; a typed name wins.
+        if self.name.trim().is_empty()
+            && let Some(folder) = path.file_name().and_then(|name| name.to_str())
+            && folder.len() <= NAME_MAX_BYTES
+            && !folder.chars().any(char::is_control)
+        {
+            self.name = folder.to_owned();
+            self.name_cursor = self.name.len();
+        }
         self.directory = Some(path);
         self.focus = Focus::Create;
         self.error = None;
@@ -340,7 +349,7 @@ impl WorkspaceForm {
 
     fn draw_heading(&self, frame: &mut Frame, area: Rect) {
         frame.render_widget(
-            Paragraph::new("Add workspace")
+            Paragraph::new("Create new workspace")
                 .style(
                     Style::default()
                         .fg(theme::TEXT)
@@ -741,6 +750,19 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn selecting_a_folder_names_an_unnamed_workspace_only() {
+        let mut form = WorkspaceForm::new();
+        form.directory_selected(PathBuf::from("/home/me/My Project"));
+        assert_eq!(form.name, "My Project");
+        assert_eq!(form.handle_key(key(KeyCode::Enter)), FormAction::Submit);
+
+        let mut typed = WorkspaceForm::new();
+        typed.name = "Website".to_owned();
+        typed.directory_selected(PathBuf::from("/home/me/site"));
+        assert_eq!(typed.name, "Website");
     }
 
     #[test]

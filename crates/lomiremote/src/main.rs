@@ -243,6 +243,13 @@ fn run_setup_flow(profile: &Path, args: Option<&ArgMatches>) -> u8 {
                 Err(failure) => return print_failure(failure, false),
             };
             if interactive {
+                // Autostart failure is not fatal: the Host keeps running now.
+                if lomiremote::setup_entry::ensure_autostart(&binding) {
+                    if let Err(failure) = prepare_dashboard_host(&binding, Some(host_id)) {
+                        return print_failure(failure, false);
+                    }
+                }
+                lomiremote::setup_entry::configure_default_auth(&binding);
                 ui::run(&mut IpcBackend(profile, host_id)).map_or(4, |_| 0)
             } else {
                 0
@@ -299,6 +306,21 @@ fn run_setup_flow(profile: &Path, args: Option<&ArgMatches>) -> u8 {
         }
         Err(error) => {
             eprintln!("{error}");
+            // Keep the stable code first for scripts; add a plain next step.
+            if io::stderr().is_terminal() {
+                eprintln!(
+                    "{}",
+                    match error {
+                        SetupError::InteractionUnavailable => {
+                            "Setup stopped. Run `lomiremote` to continue."
+                        }
+                        SetupError::HostUnavailable | SetupError::ServiceUnavailable => {
+                            "Lomi Remote could not start. Run `lomiremote doctor` to see why."
+                        }
+                        _ => "Run `lomiremote doctor` to see what needs attention.",
+                    }
+                );
+            }
             match error {
                 SetupError::InvalidOptions | SetupError::ChoicesRequired => 2,
                 SetupError::BindingMismatch
@@ -364,6 +386,10 @@ fn print_failure(failure: Failure, json: bool) -> u8 {
         ),
         "NONROOT_HOST_ACCOUNT_REQUIRED" => eprintln!(
             "{}: select a dedicated non-root operating-system account and run setup as that account; project directories and ownership are preserved",
+            failure.code
+        ),
+        "DAEMON_UNAVAILABLE" if io::stderr().is_terminal() => eprintln!(
+            "{}: Lomi Remote could not start. Run `lomiremote doctor` to see why.",
             failure.code
         ),
         _ => eprintln!("{}", failure.code),
