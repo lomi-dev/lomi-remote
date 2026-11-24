@@ -1,16 +1,18 @@
 //! Chat through system CLIs: argv, JSONL stream parsers, status and model
 //! probes, and the child process wrapper. Never starts a login flow.
 use crate::settings::Permissions;
+use crate::store::{Activity, ActivityDiff, ActivityKind, ActivityStatus, DETAIL_CAP, Usage};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
 };
 
@@ -140,10 +142,14 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 add(&["--resume", sid]);
             }
             match i.permissions {
-                Permissions::ReadOnly if i.restricted => {
-                    add(&["--restricted", "--strict-mcp-config"])
+                Permissions::ReadOnly => {
+                    // Plan mode keeps Claude from changing the project; the deny rule wins over any allow rule in the user's settings.
+                    add(&["--permission-mode", "plan"]);
+                    add(&["--disallowedTools", "Bash,Edit,Write,NotebookEdit"]);
+                    if i.restricted {
+                        add(&["--restricted", "--strict-mcp-config"]);
+                    }
                 }
-                Permissions::ReadOnly => {}
                 Permissions::Edit => add(&["--permission-mode", "acceptEdits"]),
                 Permissions::Full => add(&["--permission-mode", "bypassPermissions"]),
             }
@@ -217,9 +223,7 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
                 (None, Some(file)) => add(&[&format!("--agent-file={file}")]),
                 (None, None) => {}
             }
-            if i.permissions == Permissions::Full {
-                add(&["--auto"]);
-            }
+            // Prompt mode already approves tools and rejects `--auto` (Kimi Code 2.7).
             None
         }
         _ => {
@@ -256,9 +260,12 @@ pub fn argv(i: &Invocation) -> (Vec<String>, Option<String>) {
 
 // ---- stream parsing --------------------------------------------------
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Ev {
     Text(String),
+    /// Full current state of a tool call or reasoning block; `at` is set by the engine.
+    Activity(Activity),
+    Usage(Usage),
     Session(String),
     /// Complete answer; used only when no text streamed.
     Final(String),
@@ -268,10 +275,146 @@ pub enum Ev {
 pub struct Parser {
     cli: String,
     had_text: bool,
+    /// Claude: id of the assistant message being streamed.
+    message: String,
+    /// Claude: last state of each activity, to complete it on a later event.
+    acts: HashMap<String, Activity>,
+    /// Claude: open thinking blocks by content index.
+    thinking: HashMap<u64, String>,
 }
 
-fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
+pub(crate) fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     path.iter().try_fold(v, |v, k| v.get(k))?.as_str()
+}
+
+fn u64_at(v: &Value, key: &str) -> u64 {
+    v[key].as_u64().unwrap_or(0)
+}
+
+pub(crate) fn activity(
+    id: &str,
+    kind: ActivityKind,
+    title: &str,
+    status: ActivityStatus,
+) -> Activity {
+    Activity {
+        id: id.into(),
+        kind,
+        title: title.into(),
+        status,
+        at: 0,
+        detail: None,
+        diff: None,
+        approval: None,
+    }
+}
+
+fn claude_kind(tool: &str) -> ActivityKind {
+    match tool {
+        "Read" => ActivityKind::Read,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => ActivityKind::Edit,
+        "Bash" => ActivityKind::Execute,
+        "Grep" | "Glob" | "LS" => ActivityKind::Search,
+        "WebFetch" | "WebSearch" => ActivityKind::Fetch,
+        "Task" | "Agent" => ActivityKind::Agent,
+        _ => ActivityKind::Other,
+    }
+}
+
+fn claude_title(tool: &str, input: &Value) -> String {
+    let key = match tool {
+        "Bash" => "command",
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_path",
+        "Grep" | "Glob" => "pattern",
+        "WebFetch" => "url",
+        "WebSearch" => "query",
+        "Task" | "Agent" => "description",
+        _ => "",
+    };
+    str_at(input, &[key]).unwrap_or(tool).into()
+}
+
+fn claude_diff(tool: &str, input: &Value) -> Option<ActivityDiff> {
+    let path = str_at(input, &["file_path"])?.to_string();
+    match tool {
+        "Edit" => Some(ActivityDiff {
+            path,
+            before: str_at(input, &["old_string"]).map(Into::into),
+            after: str_at(input, &["new_string"])?.into(),
+        }),
+        "Write" => Some(ActivityDiff {
+            path,
+            before: None,
+            after: str_at(input, &["content"])?.into(),
+        }),
+        _ => None,
+    }
+}
+
+/// Activity of a Claude tool call that is not yet known from the stream (permission prompts).
+pub fn claude_activity(id: &str, tool: &str, input: &Value) -> Activity {
+    let mut a = activity(id, claude_kind(tool), tool, ActivityStatus::Running);
+    a.title = claude_title(tool, input);
+    a.diff = claude_diff(tool, input);
+    a
+}
+
+/// Argv of a persistent Claude process: today's argv (without `--resume`, so the
+/// result identifies the process) plus bidirectional stream-json and stdio permission prompts.
+pub fn claude_session_argv(i: &Invocation) -> Vec<String> {
+    let (mut args, _) = argv(&Invocation {
+        session: None,
+        ..*i
+    });
+    let extra = [
+        "--input-format",
+        "stream-json",
+        "--permission-prompt-tool",
+        "stdio",
+    ];
+    args.splice(1..1, extra.map(String::from));
+    args
+}
+
+/// Text of a tool_result `content`: a string or an array of text blocks.
+fn result_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(t) => t.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Drops a `/bin/zsh -lc ` or `/bin/bash -lc ` wrapper and its single quotes.
+pub(crate) fn codex_command(command: &str) -> &str {
+    let c = ["/bin/zsh -lc ", "/bin/bash -lc "]
+        .iter()
+        .find_map(|p| command.strip_prefix(p))
+        .unwrap_or(command);
+    c.strip_prefix('\'')
+        .and_then(|c| c.strip_suffix('\''))
+        .unwrap_or(c)
+}
+
+fn agy_kind(tool: &str) -> ActivityKind {
+    match tool {
+        "read_file" | "view_file" => ActivityKind::Read,
+        "write_file" | "edit_file" | "replace_file_content" | "create_file" => ActivityKind::Edit,
+        "run_command" => ActivityKind::Execute,
+        t if ["search", "grep", "find", "list_dir"]
+            .iter()
+            .any(|k| t.contains(k)) =>
+        {
+            ActivityKind::Search
+        }
+        t if t.starts_with("browser_") || t.starts_with("read_url") => ActivityKind::Fetch,
+        _ => ActivityKind::Other,
+    }
 }
 
 impl Parser {
@@ -279,7 +422,205 @@ impl Parser {
         Self {
             cli: cli.into(),
             had_text: false,
+            message: String::new(),
+            acts: HashMap::new(),
+            thinking: HashMap::new(),
         }
+    }
+
+    /// Remembers and emits the full state of an activity.
+    fn emit(&mut self, mut a: Activity, out: &mut Vec<Ev>) {
+        a.clamp();
+        self.acts.insert(a.id.clone(), a.clone());
+        out.push(Ev::Activity(a));
+    }
+
+    fn claude_stream_event(&mut self, e: &Value, out: &mut Vec<Ev>) {
+        let index = e["index"].as_u64().unwrap_or(0);
+        match (str_at(e, &["type"]), str_at(e, &["delta", "type"])) {
+            (Some("message_start"), _) => {
+                self.message = str_at(e, &["message", "id"]).unwrap_or("").into();
+            }
+            (Some("content_block_start"), _) => {
+                let b = &e["content_block"];
+                match str_at(b, &["type"]) {
+                    Some("text") if self.had_text => {
+                        out.push(Ev::Text("\n\n".into()));
+                        self.had_text = false; // one separator per block
+                    }
+                    Some("tool_use") => {
+                        let (id, name) = (
+                            str_at(b, &["id"]).unwrap_or(""),
+                            str_at(b, &["name"]).unwrap_or("tool"),
+                        );
+                        if !id.is_empty() {
+                            let a = activity(id, claude_kind(name), name, ActivityStatus::Running);
+                            self.emit(a, out);
+                        }
+                    }
+                    Some("thinking") => {
+                        let id = format!("{}:{index}", self.message);
+                        let a = activity(
+                            &id,
+                            ActivityKind::Reasoning,
+                            "Thinking",
+                            ActivityStatus::Running,
+                        );
+                        self.thinking.insert(index, id);
+                        self.emit(a, out);
+                    }
+                    _ => {}
+                }
+            }
+            (Some("content_block_delta"), Some("text_delta")) => {
+                let t = str_at(e, &["delta", "text"]).unwrap_or("");
+                self.text(t, false, out);
+            }
+            (Some("content_block_delta"), Some("thinking_delta")) => {
+                let t = str_at(e, &["delta", "thinking"]).unwrap_or("");
+                let open = self.thinking.get(&index).and_then(|id| self.acts.get(id));
+                if let (false, Some(mut a)) = (t.is_empty(), open.cloned()) {
+                    let d = a.detail.get_or_insert_with(String::new);
+                    if d.len() < DETAIL_CAP {
+                        d.push_str(t);
+                        self.emit(a, out);
+                    }
+                }
+            }
+            (Some("content_block_stop"), _) => {
+                if let Some(mut a) = self
+                    .thinking
+                    .remove(&index)
+                    .and_then(|id| self.acts.get(&id).cloned())
+                {
+                    a.status = ActivityStatus::Completed;
+                    self.emit(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Complete assistant message: tool inputs are known now.
+    fn claude_assistant(&mut self, blocks: &Value, out: &mut Vec<Ev>) {
+        for b in blocks.as_array().into_iter().flatten() {
+            let (Some("tool_use"), Some(id)) = (str_at(b, &["type"]), str_at(b, &["id"])) else {
+                continue;
+            };
+            let name = str_at(b, &["name"]).unwrap_or("tool");
+            let mut a =
+                self.acts.get(id).cloned().unwrap_or_else(|| {
+                    activity(id, claude_kind(name), name, ActivityStatus::Running)
+                });
+            a.title = claude_title(name, &b["input"]);
+            a.diff = claude_diff(name, &b["input"]);
+            self.emit(a, out);
+        }
+    }
+
+    fn claude_results(&mut self, blocks: &Value, out: &mut Vec<Ev>) {
+        for b in blocks.as_array().into_iter().flatten() {
+            if str_at(b, &["type"]) != Some("tool_result") {
+                continue;
+            }
+            let Some(mut a) = str_at(b, &["tool_use_id"]).and_then(|id| self.acts.get(id).cloned())
+            else {
+                continue;
+            };
+            a.status = if b["is_error"] == true {
+                ActivityStatus::Failed
+            } else {
+                ActivityStatus::Completed
+            };
+            a.detail = result_text(&b["content"]);
+            self.emit(a, out);
+        }
+    }
+
+    fn codex_item(&mut self, started: bool, item: &Value, out: &mut Vec<Ev>) {
+        let Some(id) = str_at(item, &["id"]) else {
+            return;
+        };
+        let (kind, title, detail) = match str_at(item, &["type"]) {
+            Some("command_execution") => {
+                let Some(command) = str_at(item, &["command"]) else {
+                    return;
+                };
+                let output = str_at(item, &["aggregated_output"]).filter(|o| !o.is_empty());
+                (
+                    ActivityKind::Execute,
+                    codex_command(command).to_string(),
+                    output,
+                )
+            }
+            Some("file_change") => {
+                let paths: Vec<&str> = item["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["path"].as_str())
+                    .collect();
+                (ActivityKind::Edit, paths.join(", "), None)
+            }
+            Some("reasoning") => (
+                ActivityKind::Reasoning,
+                "Reasoning".into(),
+                str_at(item, &["text"]),
+            ),
+            Some("mcp_tool_call") => {
+                let name = |k| str_at(item, &[k]).unwrap_or("");
+                (
+                    ActivityKind::Other,
+                    format!("{}.{}", name("server"), name("tool")),
+                    None,
+                )
+            }
+            Some("web_search") => (
+                ActivityKind::Fetch,
+                str_at(item, &["query"]).unwrap_or("").into(),
+                None,
+            ),
+            _ => return,
+        };
+        let ok = if str_at(item, &["type"]) == Some("command_execution") {
+            item["exit_code"] == 0
+        } else {
+            str_at(item, &["status"]) != Some("failed")
+        };
+        let status = match (started, ok) {
+            (true, _) => ActivityStatus::Running,
+            (false, true) => ActivityStatus::Completed,
+            (false, false) => ActivityStatus::Failed,
+        };
+        let mut a = activity(id, kind, &title, status);
+        a.detail = detail.map(Into::into);
+        self.emit(a, out);
+    }
+
+    fn agy_tool(&mut self, u: &Value, out: &mut Vec<Ev>) {
+        let tool = str_at(u, &["tool_name"]).unwrap_or("tool");
+        let info = &u["tool_info"];
+        let title = ["Path", "CommandLine", "Query", "Url"]
+            .iter()
+            .find_map(|k| str_at(info, &["parameters", k]))
+            .unwrap_or(tool);
+        let status = match str_at(u, &["state"]) {
+            Some("DONE") => ActivityStatus::Completed,
+            Some("ERROR") => ActivityStatus::Failed,
+            _ => ActivityStatus::Running,
+        };
+        let mut a = activity(
+            &format!("s{}", u64_at(u, "step_index")),
+            agy_kind(tool),
+            title,
+            status,
+        );
+        a.detail = match status {
+            ActivityStatus::Failed => str_at(info, &["error", "message"]),
+            _ => str_at(info, &["output"]),
+        }
+        .map(Into::into);
+        self.emit(a, out);
     }
 
     /// Text separated from earlier text (new message or content block) starts a paragraph.
@@ -308,28 +649,27 @@ impl Parser {
                 }
                 // Sub-agent output is not part of the answer.
                 "stream_event" if v["parent_tool_use_id"].is_null() => {
-                    let e = &v["event"];
-                    match str_at(e, &["type"]) {
-                        Some("content_block_start")
-                            if str_at(e, &["content_block", "type"]) == Some("text") =>
-                        {
-                            if self.had_text {
-                                out.push(Ev::Text("\n\n".into()));
-                                self.had_text = false; // one separator per block
-                            }
-                        }
-                        Some("content_block_delta")
-                            if str_at(e, &["delta", "type"]) == Some("text_delta") =>
-                        {
-                            let t = str_at(e, &["delta", "text"]).unwrap_or("");
-                            self.text(t, false, &mut out);
-                        }
-                        _ => {}
-                    }
+                    self.claude_stream_event(&v["event"], &mut out);
+                }
+                "assistant" if v["parent_tool_use_id"].is_null() => {
+                    self.claude_assistant(&v["message"]["content"], &mut out);
+                }
+                "user" if v["parent_tool_use_id"].is_null() => {
+                    self.claude_results(&v["message"]["content"], &mut out);
                 }
                 "result" => {
                     out.extend(str_at(&v, &["session_id"]).map(|s| Ev::Session(s.into())));
                     let text = str_at(&v, &["result"]).unwrap_or("");
+                    let u = &v["usage"];
+                    if u.is_object() {
+                        out.push(Ev::Usage(Usage {
+                            input_tokens: u64_at(u, "input_tokens")
+                                + u64_at(u, "cache_creation_input_tokens"),
+                            output_tokens: u64_at(u, "output_tokens"),
+                            cached_input_tokens: u64_at(u, "cache_read_input_tokens"),
+                            cost_usd: v["total_cost_usd"].as_f64(),
+                        }));
+                    }
                     if v["is_error"] == true {
                         let detail = if text.is_empty() {
                             str_at(&v, &["subtype"]).unwrap_or("error")
@@ -351,8 +691,22 @@ impl Parser {
                     let t = str_at(&v, &["item", "text"]).unwrap_or("");
                     self.text(t, true, &mut out);
                 }
+                "item.started" | "item.completed" => {
+                    self.codex_item(kind == "item.started", &v["item"], &mut out);
+                }
                 // Terminal event: the caller stops waiting for pipe EOF.
-                "turn.completed" => out.push(Ev::Final(String::new())),
+                "turn.completed" => {
+                    let u = &v["usage"];
+                    if u.as_object().is_some_and(|o| !o.is_empty()) {
+                        out.push(Ev::Usage(Usage {
+                            input_tokens: u64_at(u, "input_tokens"),
+                            output_tokens: u64_at(u, "output_tokens"),
+                            cached_input_tokens: u64_at(u, "cached_input_tokens"),
+                            cost_usd: None,
+                        }));
+                    }
+                    out.push(Ev::Final(String::new()));
+                }
                 "turn.failed" => out.push(Ev::Error(
                     str_at(&v, &["error", "message"])
                         .unwrap_or("The turn failed.")
@@ -383,9 +737,23 @@ impl Parser {
                     let t = str_at(&v, &["step_update", "text_delta"]).unwrap_or("");
                     self.text(t, false, &mut out);
                 }
+                Some("step_update")
+                    if str_at(&v, &["step_update", "step_type"]) == Some("tool") =>
+                {
+                    self.agy_tool(&v["step_update"], &mut out);
+                }
                 Some("result") => {
                     let r = &v["result"];
                     out.extend(str_at(r, &["conversation_id"]).map(|s| Ev::Session(s.into())));
+                    let u = &r["usage"];
+                    if u.is_object() {
+                        out.push(Ev::Usage(Usage {
+                            input_tokens: u64_at(u, "input_tokens"),
+                            output_tokens: u64_at(u, "output_tokens"),
+                            cached_input_tokens: u64_at(u, "cache_read_tokens"),
+                            cost_usd: None,
+                        }));
+                    }
                     match str_at(r, &["status"]) {
                         Some("SUCCESS") => {
                             out.push(Ev::Final(str_at(r, &["response"]).unwrap_or("").into()));
@@ -454,6 +822,8 @@ pub struct Spec {
     pub bin: PathBuf,
     pub args: Vec<String>,
     pub stdin: Option<String>,
+    /// Keep stdin open for the caller (see [`Proc::stdin`]) when there is no payload.
+    pub interactive: bool,
     pub cwd: PathBuf,
 }
 
@@ -461,6 +831,8 @@ pub struct Spec {
 pub struct Proc {
     pub child: Child,
     pub stdout: ChildStdout,
+    /// Open stdin of an interactive spec; the caller owns closing it.
+    pub stdin: Option<ChildStdin>,
     stderr: JoinHandle<Vec<u8>>,
     /// Group id; kept after reaping because grandchildren can outlive the CLI.
     pgid: Option<u32>,
@@ -490,7 +862,7 @@ impl Proc {
         let mut cmd = Command::new(&spec.bin);
         cmd.args(&spec.args)
             .current_dir(&spec.cwd)
-            .stdin(if spec.stdin.is_some() {
+            .stdin(if spec.stdin.is_some() || spec.interactive {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -513,10 +885,13 @@ impl Proc {
             }
         })?;
         let pgid = child.id();
-        if let (Some(mut stdin), Some(text)) = (child.stdin.take(), spec.stdin.clone()) {
+        let mut stdin = child.stdin.take();
+        if let (Some(mut w), Some(text)) =
+            (stdin.take_if(|_| spec.stdin.is_some()), spec.stdin.clone())
+        {
             // Written concurrently so a CLI that answers before reading everything cannot deadlock us.
             tokio::spawn(async move {
-                let _ = stdin.write_all(text.as_bytes()).await;
+                let _ = w.write_all(text.as_bytes()).await;
             });
         }
         let stdout = child.stdout.take().ok_or("Cannot read the CLI output.")?;
@@ -537,6 +912,7 @@ impl Proc {
         Ok(Self {
             child,
             stdout,
+            stdin,
             stderr,
             pgid,
             reaped: false,
@@ -964,8 +1340,6 @@ mod tests {
             .block_on(future)
     }
 
-    const SAMPLES: &str = "/private/tmp/claude-501/-Users-woro-Documents-Lomi/85242d7a-f6a3-4109-819b-55ebfbaafb03/scratchpad/cli-samples";
-
     fn run(cli: &str, jsonl: &str) -> Vec<Ev> {
         let mut p = Parser::new(cli);
         jsonl.lines().flat_map(|l| p.line(l)).collect()
@@ -1078,21 +1452,187 @@ not json"#,
         assert!(matches!(bad.last(), Some(Ev::Error(_))));
     }
 
-    #[test]
-    fn real_samples_parse_when_present() {
-        for (cli, file, want) in [
-            ("claude", "claude.jsonl", "OK"),
-            ("codex", "codex.jsonl", "OK"),
-            ("kimi", "kimi.jsonl", "OK"),
-            ("agy", "agy.jsonl", "OK\n"),
-        ] {
-            let Ok(data) = std::fs::read_to_string(Path::new(SAMPLES).join(file)) else {
-                continue;
-            };
-            let evs = run(cli, &data);
-            assert_eq!(text(&evs), want, "{cli}");
-            assert!(evs.iter().any(|e| matches!(e, Ev::Session(_))), "{cli}");
+    /// Last state of every activity, in order of first appearance.
+    fn acts(evs: &[Ev]) -> Vec<Activity> {
+        let mut out: Vec<Activity> = Vec::new();
+        for e in evs {
+            if let Ev::Activity(a) = e {
+                match out.iter_mut().find(|o| o.id == a.id) {
+                    Some(o) => *o = a.clone(),
+                    None => out.push(a.clone()),
+                }
+            }
         }
+        out
+    }
+
+    fn usage(evs: &[Ev]) -> Option<&Usage> {
+        evs.iter().find_map(|e| match e {
+            Ev::Usage(u) => Some(u),
+            _ => None,
+        })
+    }
+
+    fn summary(a: &[Activity]) -> Vec<(ActivityKind, &str, ActivityStatus)> {
+        a.iter()
+            .map(|a| (a.kind, a.title.as_str(), a.status))
+            .collect()
+    }
+
+    #[test]
+    fn claude_fixture_has_tools_and_usage() {
+        let evs = run("claude", include_str!("fixtures/claude-tools.jsonl"));
+        assert_eq!(text(&evs), "DONE");
+        assert_eq!(evs.last(), Some(&Ev::Final("DONE".into())));
+        let all = acts(&evs);
+        let tools: Vec<_> = all
+            .iter()
+            .filter(|a| a.kind != ActivityKind::Reasoning)
+            .cloned()
+            .collect();
+        use {ActivityKind::*, ActivityStatus::Completed};
+        assert_eq!(
+            summary(&tools),
+            [
+                (Read, "/work/a.txt", Completed),
+                (Edit, "/work/a.txt", Completed),
+                (Execute, "ls", Completed)
+            ]
+        );
+        assert_eq!(tools[0].detail.as_deref(), Some("1\thello\n2\t"));
+        let diff = tools[1].diff.as_ref().unwrap();
+        assert_eq!((diff.before.as_deref(), diff.after.as_str()), (None, "bye"));
+        assert_eq!(tools[2].detail.as_deref(), Some("a.txt"));
+        // Thinking blocks are keyed by message id and block index and end completed.
+        assert!(all.len() > tools.len());
+        assert!(all.iter().filter(|a| a.kind == Reasoning).all(|a| {
+            a.status == Completed && a.id.starts_with("msg_") && a.id.ends_with(":0")
+        }));
+        assert_eq!(
+            usage(&evs),
+            Some(&Usage {
+                input_tokens: 6 + 26166,
+                output_tokens: 643,
+                cached_input_tokens: 75955,
+                cost_usd: Some(0.00631485)
+            })
+        );
+    }
+
+    #[test]
+    fn claude_edit_failure_and_thinking_text() {
+        let evs = run(
+            "claude",
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"a"}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"b"}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/f","old_string":"x","new_string":"y"}}]},"parent_tool_use_id":null}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"sub","name":"Bash","input":{"command":"rm"}}]},"parent_tool_use_id":"t0"}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"no"},{"type":"text","text":"match"}]}]},"parent_tool_use_id":null}"#,
+        );
+        let a = acts(&evs);
+        assert_eq!(a.len(), 2, "sub-agent tools are ignored");
+        assert_eq!(a[0].id, "m1:0");
+        assert_eq!(a[0].detail.as_deref(), Some("ab"));
+        assert_eq!(a[0].status, ActivityStatus::Completed);
+        assert_eq!(a[1].status, ActivityStatus::Failed);
+        assert_eq!(a[1].detail.as_deref(), Some("no\nmatch"));
+        let d = a[1].diff.as_ref().unwrap();
+        assert_eq!((d.before.as_deref(), d.after.as_str()), (Some("x"), "y"));
+    }
+
+    #[test]
+    fn codex_fixture_has_commands_and_usage() {
+        let evs = run("codex", include_str!("fixtures/codex-tools.jsonl"));
+        assert_eq!(
+            text(&evs),
+            "I\u{2019}ll read `a.txt`, replace its contents with `bye`, then run `ls`.\n\nDONE"
+        );
+        let a = acts(&evs);
+        use {ActivityKind::Execute, ActivityStatus::Completed};
+        assert_eq!(
+            summary(&a),
+            [
+                (Execute, "cat a.txt", Completed),
+                (Execute, "printf %s bye > a.txt", Completed),
+                (Execute, "ls", Completed)
+            ]
+        );
+        assert_eq!(a[0].detail.as_deref(), Some("hello\n"));
+        assert_eq!(
+            usage(&evs),
+            Some(&Usage {
+                input_tokens: 90941,
+                output_tokens: 102,
+                cached_input_tokens: 67968,
+                cost_usd: None
+            })
+        );
+        assert_eq!(evs.last(), Some(&Ev::Final(String::new())));
+    }
+
+    #[test]
+    fn codex_other_items() {
+        let a = acts(&run(
+            "codex",
+            r#"{"type":"item.started","item":{"id":"1","type":"file_change","changes":[{"path":"a"},{"path":"b"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"2","type":"command_execution","command":"/bin/bash -lc 'false'","aggregated_output":"","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"3","type":"reasoning","text":"hm"}}
+{"type":"item.completed","item":{"id":"4","type":"mcp_tool_call","server":"s","tool":"t","status":"completed"}}
+{"type":"item.completed","item":{"id":"5","type":"web_search","query":"q"}}"#,
+        ));
+        use {ActivityKind::*, ActivityStatus::*};
+        assert_eq!(
+            summary(&a),
+            [
+                (Edit, "a, b", Running),
+                (Execute, "false", Failed),
+                (Reasoning, "Reasoning", Completed),
+                (Other, "s.t", Completed),
+                (Fetch, "q", Completed)
+            ]
+        );
+        assert_eq!(a[2].detail.as_deref(), Some("hm"));
+    }
+
+    #[test]
+    fn agy_fixture_has_tools_and_usage() {
+        let evs = run("agy", include_str!("fixtures/agy-tools.jsonl"));
+        // The recorded turn ends with an empty response and no error.
+        assert_eq!(text(&evs), "");
+        assert_eq!(evs.last(), Some(&Ev::Final(String::new())));
+        assert!(!evs.iter().any(|e| matches!(e, Ev::Error(_))));
+        let a = acts(&evs);
+        use {ActivityKind::*, ActivityStatus::*};
+        assert_eq!(
+            summary(&a),
+            [
+                (Read, "/work/a.txt", Completed),
+                (Edit, "/work/a.txt", Completed),
+                (Execute, "ls", Failed)
+            ]
+        );
+        assert_eq!(a[0].detail.as_deref(), Some("1 lines, 6 bytes"));
+        assert!(
+            a[2].detail
+                .as_deref()
+                .unwrap()
+                .contains("permission check failed")
+        );
+        assert_eq!(
+            usage(&evs),
+            Some(&Usage {
+                input_tokens: 14568,
+                output_tokens: 1924,
+                cached_input_tokens: 17222,
+                cost_usd: None
+            })
+        );
+        assert_eq!(agy_kind("grep_search"), ActivityKind::Search);
+        assert_eq!(agy_kind("browser_click"), ActivityKind::Fetch);
+        assert_eq!(agy_kind("other"), ActivityKind::Other);
     }
 
     #[test]
@@ -1186,14 +1726,27 @@ not json"#,
                 "--verbose",
                 "--include-partial-messages",
                 "--model",
-                "m1"
+                "m1",
+                "--permission-mode",
+                "plan",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit"
             ])
         );
         assert_eq!(stdin.as_deref(), Some("hi"));
         let (a, _) = argv(&inv("claude", Some("s1"), "be brief"));
         assert_eq!(
             a[7..],
-            strs(&["--resume", "s1", "--append-system-prompt", "be brief"])
+            strs(&[
+                "--resume",
+                "s1",
+                "--permission-mode",
+                "plan",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit",
+                "--append-system-prompt",
+                "be brief"
+            ])
         );
 
         let (a, stdin) = argv(&inv("codex", None, "ignored"));
@@ -1343,10 +1896,10 @@ not json"#,
             &with("claude", Some("s"), Full, None),
             &["--permission-mode", "bypassPermissions"]
         ));
+        let a = with("claude", None, ReadOnly, None);
         assert!(
-            !with("claude", None, ReadOnly, None)
-                .iter()
-                .any(|v| v.contains("permission"))
+            has(&a, &["--permission-mode", "plan"])
+                && has(&a, &["--disallowedTools", "Bash,Edit,Write,NotebookEdit"])
         );
         // codex, fresh and resume
         let a = with("codex", None, Edit, Some("max"));
@@ -1377,12 +1930,14 @@ not json"#,
                 && has(&a, &["--effort", "xhigh"])
         );
         assert!(has(&with("agy", None, ReadOnly, None), &["--mode", "plan"]));
-        // kimi ignores effort and uses --auto only for full access
-        assert!(with("kimi", Some("k"), Full, Some("high")).contains(&"--auto".into()));
-        let a = with("kimi", Some("k"), Edit, Some("high"));
-        assert!(
-            !a.contains(&"--auto".into()) && !a.iter().any(|v| v.contains("effort") || v == "high")
-        );
+        // kimi ignores effort and never passes --auto, which prompt mode rejects
+        for p in [Edit, Full] {
+            let a = with("kimi", Some("k"), p, Some("high"));
+            assert!(
+                !a.contains(&"--auto".into())
+                    && !a.iter().any(|v| v.contains("effort") || v == "high")
+            );
+        }
     }
 
     #[test]
@@ -1404,6 +1959,7 @@ not json"#,
                 bin: "/nonexistent/lomi-cli".into(),
                 args: vec![],
                 stdin: None,
+                interactive: false,
                 cwd: std::env::temp_dir(),
             };
             let e = Proc::spawn(&spec).err().unwrap();
@@ -1529,6 +2085,7 @@ not json"#,
             bin: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
             stdin: stdin.map(Into::into),
+            interactive: false,
             cwd: std::env::temp_dir(),
         }
     }

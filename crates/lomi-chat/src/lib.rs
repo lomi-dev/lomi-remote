@@ -1,9 +1,13 @@
 //! Tauri-independent Chat AI backend: thread storage, settings, HTTP and CLI providers.
+pub mod acp;
 pub mod attachments;
+pub mod checkpoint;
 pub mod cli;
 pub mod cli_bin;
+pub mod codex_server;
 pub mod engine;
 pub mod http;
+pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod store;

@@ -603,6 +603,8 @@ impl EventSink for HostSink {
             ThreadStreamEvent::Final { thread, message } => {
                 self.router.finished(&self.workspace, &thread, &message)
             }
+            // The remote chat protocol carries text only; the final message keeps the activity.
+            ThreadStreamEvent::Activity { .. } => {}
         }
     }
 }
@@ -1685,6 +1687,7 @@ async fn run_call(
                     .effort
                     .as_ref()
                     .map(|e| e.as_ref().map(|e| e.as_str().to_owned())),
+                permissions: None,
             };
             let e = ctx.engine.clone();
             let updated = blk(move || {

@@ -1,0 +1,11 @@
+{"type": "thread.started", "thread_id": "01a20db3-159f-7de0-8eb2-a9ed095e1165"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "I’ll read `a.txt`, replace its contents with `bye`, then run `ls`."}}
+{"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": "/bin/zsh -lc 'cat a.txt'", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "/bin/zsh -lc 'cat a.txt'", "aggregated_output": "hello\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.started", "item": {"id": "item_2", "type": "command_execution", "command": "/bin/zsh -lc 'printf %s bye > a.txt'", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_2", "type": "command_execution", "command": "/bin/zsh -lc 'printf %s bye > a.txt'", "aggregated_output": "", "exit_code": 0, "status": "completed"}}
+{"type": "item.started", "item": {"id": "item_3", "type": "command_execution", "command": "/bin/zsh -lc ls", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "/bin/zsh -lc ls", "aggregated_output": "a.txt\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "DONE"}}
+{"type": "turn.completed", "usage": {"input_tokens": 90941, "cached_input_tokens": 67968, "cache_write_input_tokens": 0, "output_tokens": 102, "reasoning_output_tokens": 0}}

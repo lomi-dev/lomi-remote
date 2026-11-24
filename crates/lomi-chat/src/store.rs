@@ -1,5 +1,6 @@
 //! threads.sqlite: thread index, API messages and idempotency receipts.
 use crate::attachments::{self, Attachment};
+use crate::checkpoint::FileChange;
 use crate::settings::{Permissions, Workspace};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -60,7 +61,120 @@ pub struct ThreadSummary {
     pub streaming: bool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Reasoning,
+    Read,
+    Edit,
+    Search,
+    Execute,
+    Fetch,
+    Agent,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityDiff {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: String,
+}
+
+/// One tool call or reasoning block of a CLI turn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Activity {
+    pub id: String,
+    pub kind: ActivityKind,
+    pub title: String,
+    pub status: ActivityStatus,
+    /// UTF-16 code-unit offset into the message content where this activity happened (JS string index).
+    pub at: u64,
+    /// Tool output, error or reasoning text, truncated to `DETAIL_CAP`.
+    pub detail: Option<String>,
+    pub diff: Option<ActivityDiff>,
+    /// Tool-permission prompt of a persistent Claude session, if one was raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Pending,
+    Allowed,
+    Denied,
+    Expired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub request_id: String,
+    pub state: ApprovalState,
+    /// True when the CLI offered permission suggestions ("allow for session").
+    pub can_remember: bool,
+}
+
+/// The user's answer to a pending [`Approval`].
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Allow,
+    AllowSession,
+    Deny,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cost_usd: Option<f64>,
+}
+
+pub const MAX_ACTIVITIES: usize = 500;
+pub const DETAIL_CAP: usize = 4096;
+pub const DIFF_CAP: usize = 16 * 1024;
+
+/// Truncates to at most `max` bytes on a char boundary.
+pub fn truncate_utf8(s: &mut String, max: usize) {
+    if s.len() > max {
+        let mut n = max;
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        s.truncate(n);
+    }
+}
+
+impl Activity {
+    /// Applies the stored size limits to `detail` and the diff texts.
+    pub fn clamp(&mut self) {
+        if let Some(d) = &mut self.detail {
+            truncate_utf8(d, DETAIL_CAP);
+        }
+        if let Some(d) = &mut self.diff {
+            truncate_utf8(&mut d.after, DIFF_CAP);
+            if let Some(b) = &mut d.before {
+                truncate_utf8(b, DIFF_CAP);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadMessage {
     pub message_id: String,
@@ -77,6 +191,30 @@ pub struct ThreadMessage {
     /// Files of a user message; empty otherwise.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Tool calls and reasoning of a CLI turn, in order of first appearance.
+    #[serde(default)]
+    pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
+    /// Files a CLI turn changed, when a checkpoint recorded any.
+    #[serde(default)]
+    pub changes: Option<TurnChanges>,
+}
+
+/// Per-turn file changes shown on an assistant message.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnChanges {
+    pub files: Vec<FileChange>,
+    pub undone: bool,
+}
+
+/// Checkpoint commits of a turn plus its change list; the shas stay out of the wire message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Checkpoint {
+    pub before: String,
+    pub after: String,
+    pub changes: TurnChanges,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,6 +263,8 @@ pub struct ThreadUpdate {
     /// Omitted: unchanged; `null`: back to the CLI default; string: set.
     #[serde(default, deserialize_with = "set_or_clear")]
     pub effort: Option<Option<String>>,
+    /// Omitted: unchanged. CLI threads only, and never during a running reply.
+    pub permissions: Option<Permissions>,
 }
 
 fn set_or_clear<'de, D: serde::Deserializer<'de>>(
@@ -179,6 +319,11 @@ pub enum ThreadStreamEvent {
         seq: u64,
         text: String,
     },
+    /// Upsert by `activity.id`; always the full current state.
+    Activity {
+        message_id: String,
+        activity: Activity,
+    },
     Final {
         thread: ThreadSummary,
         message: ThreadMessage,
@@ -197,6 +342,9 @@ pub struct Finish<'a> {
     pub stream_seq: u64,
     pub stop_reason: Option<&'a str>,
     pub error: Option<&'a str>,
+    pub activity: &'a [Activity],
+    pub usage: Option<&'a Usage>,
+    pub checkpoint: Option<&'a Checkpoint>,
 }
 
 #[derive(Debug)]
@@ -220,6 +368,15 @@ fn json<T: Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(db_err)
 }
 
+/// NULL when empty; stored columns are optional so older rows read as empty.
+fn json_opt<T: Serialize>(value: &T, empty: bool) -> Result<Option<String>, String> {
+    if empty {
+        Ok(None)
+    } else {
+        json(value).map(Some)
+    }
+}
+
 fn unjson<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(db_err)
 }
@@ -240,8 +397,7 @@ fn enum_from<T: DeserializeOwned>(text: String) -> rusqlite::Result<T> {
 const THREAD_COLUMNS: &str = "id,project,kind,instance_id,model,title,cwd,revision,created_ms,updated_ms,\
     EXISTS(SELECT 1 FROM messages m WHERE m.thread_id=threads.id AND m.state IN('dispatching','streaming')),\
     effort,permissions,workspace,workspace_id";
-const MESSAGE_COLUMNS: &str =
-    "id,seq,role,content,state,instance_id,model,stream_seq,stop_reason,error,created_ms";
+const MESSAGE_COLUMNS: &str = "id,seq,role,content,state,instance_id,model,stream_seq,stop_reason,error,created_ms,activity,usage,changes";
 
 fn summary_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadSummary> {
     Ok(ThreadSummary {
@@ -277,6 +433,16 @@ fn message_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadMessage> {
         error: r.get(9)?,
         created_ms: r.get::<_, i64>(10)? as u64,
         attachments: Vec::new(),
+        activity: r
+            .get::<_, Option<String>>(11)?
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default(),
+        usage: r
+            .get::<_, Option<String>>(12)?
+            .and_then(|t| serde_json::from_str(&t).ok()),
+        changes: r
+            .get::<_, Option<String>>(13)?
+            .and_then(|t| serde_json::from_str(&t).ok()),
     })
 }
 
@@ -484,28 +650,36 @@ fn new_id() -> Result<String, String> {
     Ok(bytes.iter().map(|v| format!("{v:02x}")).collect())
 }
 
-/// Additive migration of databases created before CLI threads; the schema
-/// version stays 1 because older readers select explicit columns.
+/// Additive migration of databases created before CLI threads and activity;
+/// the schema version stays 1 because older readers select explicit columns.
 fn add_missing_columns(db: &Connection) -> Result<(), String> {
-    let mut stmt = db
-        .prepare("SELECT name FROM pragma_table_info('threads')")
-        .map_err(db_err)?;
-    let have: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
-        .map_err(db_err)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(db_err)?;
-    for (column, definition) in [
-        ("cwd", "TEXT"),
-        ("native_session", "TEXT"),
-        ("effort", "TEXT"),
-        ("permissions", "TEXT NOT NULL DEFAULT 'read-only'"),
-        ("workspace", "TEXT NOT NULL DEFAULT 'project'"),
-        ("workspace_id", "TEXT"),
+    for (table, column, definition) in [
+        ("threads", "cwd", "TEXT"),
+        ("threads", "native_session", "TEXT"),
+        ("threads", "effort", "TEXT"),
+        (
+            "threads",
+            "permissions",
+            "TEXT NOT NULL DEFAULT 'read-only'",
+        ),
+        ("threads", "workspace", "TEXT NOT NULL DEFAULT 'project'"),
+        ("threads", "workspace_id", "TEXT"),
+        ("messages", "activity", "TEXT"),
+        ("messages", "usage", "TEXT"),
+        ("messages", "changes", "TEXT"),
+        ("messages", "checkpoint_before", "TEXT"),
+        ("messages", "checkpoint_after", "TEXT"),
     ] {
-        if !have.iter().any(|c| c == column) {
+        let have: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        if !have {
             db.execute(
-                &format!("ALTER TABLE threads ADD COLUMN {column} {definition}"),
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
                 [],
             )
             .map_err(db_err)?;
@@ -565,7 +739,8 @@ impl Store {
                    content TEXT NOT NULL, state TEXT NOT NULL, instance_id TEXT NOT NULL,
                    model TEXT NOT NULL, stream_seq INTEGER NOT NULL DEFAULT 0, stop_reason TEXT,
                    error TEXT, operation_id TEXT, created_ms INTEGER NOT NULL,
-                   UNIQUE(thread_id, seq));
+                   activity TEXT, usage TEXT, changes TEXT,
+                   checkpoint_before TEXT, checkpoint_after TEXT, UNIQUE(thread_id, seq));
                  CREATE TABLE receipts(operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
                    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
                    result TEXT NOT NULL, created_ms INTEGER NOT NULL);
@@ -915,6 +1090,14 @@ impl Store {
                 return Err("Only CLI threads have a reasoning effort.".into());
             }
         }
+        if req.permissions.is_some() {
+            if thread.kind != ThreadKind::Cli {
+                return Err("Only CLI threads have permissions.".into());
+            }
+            if thread.streaming {
+                return Err("Stop the reply before changing permissions.".into());
+            }
+        }
         let changes_target = req.instance_id.is_some() || req.model.is_some();
         if changes_target {
             if thread.streaming {
@@ -928,6 +1111,7 @@ impl Store {
         tx.execute(
             "UPDATE threads SET title=COALESCE(?2,title), instance_id=COALESCE(?3,instance_id),
              model=COALESCE(?4,model), effort=CASE WHEN ?6 THEN ?7 ELSE effort END,
+             permissions=COALESCE(?8,permissions),
              revision=revision+1, updated_ms=?5 WHERE id=?1",
             params![
                 req.thread_id,
@@ -936,7 +1120,8 @@ impl Store {
                 req.model,
                 now_ms() as i64,
                 req.effort.is_some(),
-                req.effort.clone().flatten()
+                req.effort.clone().flatten(),
+                req.permissions.as_ref().map(enum_text)
             ],
         )
         .map_err(db_err)?;
@@ -1121,11 +1306,24 @@ impl Store {
         Ok(())
     }
 
-    pub fn flush(&self, message_id: &str, content: &str, stream_seq: u64) -> Result<(), String> {
+    pub fn flush(
+        &self,
+        message_id: &str,
+        content: &str,
+        stream_seq: u64,
+        activity: &[Activity],
+        usage: Option<&Usage>,
+    ) -> Result<(), String> {
         self.db
             .execute(
-                "UPDATE messages SET content=?2, stream_seq=?3 WHERE id=?1 AND state IN('dispatching','streaming')",
-                params![message_id, content, stream_seq as i64],
+                "UPDATE messages SET content=?2, stream_seq=?3, activity=?4, usage=?5 WHERE id=?1 AND state IN('dispatching','streaming')",
+                params![
+                    message_id,
+                    content,
+                    stream_seq as i64,
+                    json_opt(&activity, activity.is_empty())?,
+                    json_opt(&usage, usage.is_none())?
+                ],
             )
             .map_err(db_err)?;
         Ok(())
@@ -1190,8 +1388,20 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
         tx.execute(
-            "UPDATE messages SET state=?2, content=?3, stream_seq=?4, stop_reason=?5, error=?6 WHERE id=?1",
-            params![message_id, enum_text(&f.state), f.content, f.stream_seq as i64, f.stop_reason, f.error],
+            "UPDATE messages SET state=?2, content=?3, stream_seq=?4, stop_reason=?5, error=?6, activity=?7, usage=?8, changes=?9, checkpoint_before=?10, checkpoint_after=?11 WHERE id=?1",
+            params![
+                message_id,
+                enum_text(&f.state),
+                f.content,
+                f.stream_seq as i64,
+                f.stop_reason,
+                f.error,
+                json_opt(&f.activity, f.activity.is_empty())?,
+                json_opt(&f.usage, f.usage.is_none())?,
+                json_opt(&f.checkpoint.map(|c| &c.changes), f.checkpoint.is_none())?,
+                f.checkpoint.map(|c| &c.before),
+                f.checkpoint.map(|c| &c.after)
+            ],
         )
         .map_err(db_err)?;
         tx.execute(
@@ -1202,6 +1412,55 @@ impl Store {
         let out = (get_thread(&tx, thread_id)?, get_message(&tx, message_id)?);
         tx.commit().map_err(db_err)?;
         Ok(out)
+    }
+
+    /// The recorded checkpoint of an assistant message of `thread_id`.
+    pub fn turn_checkpoint(&self, thread_id: &str, message_id: &str) -> Result<Checkpoint, String> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT changes,checkpoint_before,checkpoint_after FROM messages WHERE id=?1 AND thread_id=?2",
+                [message_id, thread_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(db_err)?;
+        match row {
+            (Some(changes), Some(before), Some(after)) => Ok(Checkpoint {
+                changes: unjson(&changes)?,
+                before,
+                after,
+            }),
+            _ => Err("This turn has no recorded changes.".into()),
+        }
+    }
+
+    /// Flags a turn's changes as undone and bumps the thread revision; returns it.
+    pub fn mark_undone(&mut self, thread_id: &str, message_id: &str) -> Result<u64, String> {
+        let mut changes = self.turn_checkpoint(thread_id, message_id)?.changes;
+        changes.undone = true;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
+        tx.execute(
+            "UPDATE messages SET changes=?3 WHERE id=?1 AND thread_id=?2",
+            params![message_id, thread_id, json(&changes)?],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "UPDATE threads SET revision=revision+1, updated_ms=?2 WHERE id=?1",
+            params![thread_id, now_ms() as i64],
+        )
+        .map_err(db_err)?;
+        let revision = get_thread(&tx, thread_id)?.revision;
+        tx.commit().map_err(db_err)?;
+        Ok(revision)
     }
 }
 
@@ -1313,7 +1572,8 @@ mod tests {
             panic!()
         };
         s.mark_streaming(&acc.assistant.message_id).unwrap();
-        s.flush(&acc.assistant.message_id, "par", 1).unwrap();
+        s.flush(&acc.assistant.message_id, "par", 1, &[], None)
+            .unwrap();
         let (thread, msg) = s
             .finish(
                 &t.thread_id,
@@ -1324,6 +1584,9 @@ mod tests {
                     stream_seq: 2,
                     stop_reason: Some("stop"),
                     error: None,
+                    activity: &[],
+                    usage: None,
+                    checkpoint: None,
                 },
             )
             .unwrap();
@@ -1355,6 +1618,9 @@ mod tests {
                 stream_seq: 0,
                 stop_reason: None,
                 error: Some("e"),
+                activity: &[],
+                usage: None,
+                checkpoint: None,
             },
         )
         .unwrap();
@@ -1410,6 +1676,7 @@ mod tests {
             instance_id: None,
             model: None,
             effort: None,
+            permissions: None,
         };
         let renamed = s.update(&upd(Some(" New "), 1), |_| Ok(())).unwrap();
         assert_eq!(renamed.title, "New");
@@ -1447,6 +1714,7 @@ mod tests {
             instance_id: None,
             model: None,
             effort: effort.map(|e| e.map(Into::into)),
+            permissions: None,
         };
         let a = s.update(&upd(Some(Some("high")), 1), |_| Ok(())).unwrap();
         assert_eq!(a.effort.as_deref(), Some("high"));
@@ -1463,6 +1731,46 @@ mod tests {
         assert_eq!(req.effort, None);
     }
 
+    #[test]
+    fn update_permissions_checks_revision_kind_and_streaming() {
+        let (_dir, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
+        let upd = |permissions, rev| ThreadUpdate {
+            thread_id: t.thread_id.clone(),
+            expected_revision: rev,
+            title: None,
+            instance_id: None,
+            model: None,
+            effort: None,
+            permissions,
+        };
+        assert!(
+            s.update(&upd(Some(Permissions::Full), 9), |_| Ok(()))
+                .is_err()
+        );
+        assert_eq!(
+            s.thread(&t.thread_id).unwrap().permissions,
+            Permissions::ReadOnly
+        );
+        let a = s
+            .update(&upd(Some(Permissions::Edit), 1), |_| Ok(()))
+            .unwrap();
+        assert_eq!((a.permissions, a.revision), (Permissions::Edit, 2));
+        let b = s.update(&upd(None, 2), |_| Ok(())).unwrap();
+        assert_eq!(b.permissions, Permissions::Edit);
+        let req: ThreadUpdate =
+            serde_json::from_str(r#"{"threadId":"x","expectedRevision":1,"permissions":"full"}"#)
+                .unwrap();
+        assert_eq!(req.permissions, Some(Permissions::Full));
+        let req: ThreadUpdate =
+            serde_json::from_str(r#"{"threadId":"x","expectedRevision":1}"#).unwrap();
+        assert_eq!(req.permissions, None);
+        let api = s.create(&create_req("d"), "A", ThreadKind::Api).unwrap();
+        let mut u = upd(Some(Permissions::Full), 1);
+        u.thread_id = api.thread_id;
+        assert!(s.update(&u, |_| Ok(())).is_err());
+    }
+
     fn begin(s: &mut Store, t: &ThreadSummary, op: &str, text: &str) -> ThreadSendAccepted {
         match s.send_begin(&send_req(op, t, text), 0, |_| Ok(())).unwrap() {
             SendBegin::New(a, _) => a,
@@ -1477,6 +1785,9 @@ mod tests {
             stream_seq: 1,
             stop_reason: Some("stop"),
             error: None,
+            activity: &[],
+            usage: None,
+            checkpoint: None,
         }
     }
 
@@ -1589,7 +1900,8 @@ mod tests {
         let (_d, mut s) = open();
         let t = s.create(&create_req("c"), "T", ThreadKind::Api).unwrap();
         let acc = begin(&mut s, &t, "s1", "q");
-        s.flush(&acc.assistant.message_id, "part", 1).unwrap();
+        s.flush(&acc.assistant.message_id, "part", 1, &[], None)
+            .unwrap();
         let (thread, msg) = s
             .finish_minimal(&t.thread_id, &acc.assistant.message_id)
             .unwrap();
@@ -1686,6 +1998,7 @@ mod tests {
             instance_id: None,
             model: None,
             effort: None,
+            permissions: None,
         };
         let a = s
             .update_receipted("u1", "req", &update, |_| Ok(()))
@@ -1791,6 +2104,150 @@ mod tests {
             s.create(&req, "N", ThreadKind::Cli).unwrap().cwd.as_deref(),
             Some("/w")
         );
+    }
+
+    fn sample_activity() -> Activity {
+        Activity {
+            id: "a1".into(),
+            kind: ActivityKind::Edit,
+            title: "a.txt".into(),
+            status: ActivityStatus::Completed,
+            at: 7,
+            detail: Some("ok".into()),
+            diff: Some(ActivityDiff {
+                path: "a.txt".into(),
+                before: None,
+                after: "bye".into(),
+            }),
+            approval: None,
+        }
+    }
+
+    #[test]
+    fn activity_and_usage_round_trip() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
+        let acc = begin(&mut s, &t, "s1", "q");
+        let id = acc.assistant.message_id.clone();
+        let (a, u) = (
+            vec![sample_activity()],
+            Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cached_input_tokens: 3,
+                cost_usd: Some(0.5),
+            },
+        );
+        s.flush(&id, "par", 1, &a, Some(&u)).unwrap();
+        let m = s.snapshot(&t.thread_id).unwrap().messages.pop().unwrap();
+        assert_eq!(
+            (m.activity.clone(), m.usage.clone()),
+            (a.clone(), Some(u.clone()))
+        );
+        // finish replaces both; an empty list is stored as NULL and reads back empty
+        let mut f = done("full");
+        f.activity = &a;
+        f.usage = Some(&u);
+        let (_, m) = s.finish(&t.thread_id, &id, &f).unwrap();
+        assert_eq!((m.activity, m.usage), (a, Some(u)));
+        let t = s.thread(&t.thread_id).unwrap();
+        let acc = begin(&mut s, &t, "s2", "q2");
+        let (_, m) = s
+            .finish(&t.thread_id, &acc.assistant.message_id, &done("x"))
+            .unwrap();
+        assert!(m.activity.is_empty() && m.usage.is_none());
+        // wire shape
+        let v = serde_json::to_value(sample_activity()).unwrap();
+        assert_eq!(v["kind"], "edit");
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["diff"]["after"], "bye");
+    }
+
+    #[test]
+    fn invalid_stored_activity_reads_as_empty() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
+        let acc = begin(&mut s, &t, "s1", "q");
+        s.db.execute(
+            "UPDATE messages SET activity='not json', usage='[1]' WHERE id=?1",
+            [&acc.assistant.message_id],
+        )
+        .unwrap();
+        let m = s.snapshot(&t.thread_id).unwrap().messages.pop().unwrap();
+        assert!(m.activity.is_empty() && m.usage.is_none());
+    }
+
+    #[test]
+    fn old_messages_table_gains_activity_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Connection::open(dir.path().join("threads.sqlite")).unwrap();
+            db.execute_batch(&format!(
+                "CREATE TABLE threads(id TEXT PRIMARY KEY, project TEXT NOT NULL,
+                   kind TEXT NOT NULL CHECK(kind IN('api','cli')), instance_id TEXT NOT NULL,
+                   model TEXT NOT NULL, title TEXT NOT NULL, cwd TEXT, native_session TEXT,
+                   effort TEXT, permissions TEXT NOT NULL DEFAULT 'read-only',
+                   workspace TEXT NOT NULL DEFAULT 'project', workspace_id TEXT,
+                   revision INTEGER NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
+                 CREATE TABLE messages(id TEXT PRIMARY KEY,
+                   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                   seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+                   state TEXT NOT NULL, instance_id TEXT NOT NULL, model TEXT NOT NULL,
+                   stream_seq INTEGER NOT NULL DEFAULT 0, stop_reason TEXT, error TEXT,
+                   operation_id TEXT, created_ms INTEGER NOT NULL, UNIQUE(thread_id, seq));
+                 CREATE TABLE receipts(operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+                   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                   result TEXT NOT NULL, created_ms INTEGER NOT NULL);
+                 INSERT INTO threads VALUES('t','/p','api','openai','gpt','Old',NULL,NULL,NULL,'read-only','project',NULL,1,1,2);
+                 INSERT INTO messages VALUES('m','t',1,'assistant','hi','completed','openai','gpt',0,NULL,NULL,NULL,3);
+                 PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1;"
+            ))
+            .unwrap();
+        }
+        let s = Store::open(dir.path()).unwrap();
+        let m = s.snapshot("t").unwrap().messages.pop().unwrap();
+        assert_eq!(
+            (m.content.as_str(), m.activity.len(), m.usage),
+            ("hi", 0, None)
+        );
+        assert!(m.changes.is_none());
+        assert!(s.turn_checkpoint("t", "m").is_err());
+    }
+
+    #[test]
+    fn turn_changes_round_trip_and_undo_flag() {
+        use crate::checkpoint::ChangeStatus;
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
+        let acc = begin(&mut s, &t, "s1", "q");
+        let id = acc.assistant.message_id.clone();
+        let cp = Checkpoint {
+            before: "b".repeat(40),
+            after: "a".repeat(40),
+            changes: TurnChanges {
+                files: vec![FileChange {
+                    path: "src/a.rs".into(),
+                    status: ChangeStatus::Modified,
+                    additions: 2,
+                    deletions: 1,
+                    binary: false,
+                }],
+                undone: false,
+            },
+        };
+        let mut f = done("x");
+        f.checkpoint = Some(&cp);
+        let (_, m) = s.finish(&t.thread_id, &id, &f).unwrap();
+        assert_eq!(m.changes.as_ref(), Some(&cp.changes));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["changes"]["files"][0]["additions"], 2);
+        assert_eq!(v["changes"]["undone"], false);
+        assert_eq!(s.turn_checkpoint(&t.thread_id, &id).unwrap(), cp);
+        assert!(s.turn_checkpoint("other", &id).is_err());
+        let before = s.thread(&t.thread_id).unwrap().revision;
+        assert_eq!(s.mark_undone(&t.thread_id, &id).unwrap(), before + 1);
+        let m = s.snapshot(&t.thread_id).unwrap().messages.pop().unwrap();
+        assert!(m.changes.unwrap().undone);
     }
 
     #[test]
