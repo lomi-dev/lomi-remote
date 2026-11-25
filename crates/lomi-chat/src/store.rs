@@ -352,6 +352,8 @@ pub struct Store {
     db: Connection,
     /// Chat storage directory; private thread folders live under `workspaces/`.
     dir: PathBuf,
+    /// Host (one-shot) mode: Kimi's read-only agent file only applies to a fresh session.
+    pub(crate) restricted: bool,
 }
 
 fn db_err<E>(_: E) -> String {
@@ -779,6 +781,7 @@ impl Store {
         Ok(Self {
             db,
             dir: dir.to_path_buf(),
+            restricted: false,
         })
     }
 
@@ -1112,6 +1115,7 @@ impl Store {
             "UPDATE threads SET title=COALESCE(?2,title), instance_id=COALESCE(?3,instance_id),
              model=COALESCE(?4,model), effort=CASE WHEN ?6 THEN ?7 ELSE effort END,
              permissions=COALESCE(?8,permissions),
+             native_session=CASE WHEN ?9 THEN NULL ELSE native_session END,
              revision=revision+1, updated_ms=?5 WHERE id=?1",
             params![
                 req.thread_id,
@@ -1121,7 +1125,12 @@ impl Store {
                 now_ms() as i64,
                 req.effort.is_some(),
                 req.effort.clone().flatten(),
-                req.permissions.as_ref().map(enum_text)
+                req.permissions.as_ref().map(enum_text),
+                // Kimi's read-only mode is fixed by the agent file of the session's first turn
+                // (restricted path), so a resumed session cannot follow a permissions change.
+                self.restricted
+                    && thread.instance_id == "kimi"
+                    && req.permissions.is_some_and(|p| p != thread.permissions)
             ],
         )
         .map_err(db_err)?;
@@ -1732,6 +1741,35 @@ mod tests {
     }
 
     #[test]
+    fn permissions_change_resets_the_kimi_session_only() {
+        let (_dir, mut s) = open();
+        s.restricted = true;
+        for (id, kept) in [("kimi", false), ("claude", true)] {
+            let mut req = create_req(id);
+            req.instance_id = id.into();
+            let t = s.create(&req, "T", ThreadKind::Cli).unwrap();
+            s.set_native_session(&t.thread_id, Some("sess-1")).unwrap();
+            let upd = |permissions| ThreadUpdate {
+                thread_id: t.thread_id.clone(),
+                expected_revision: t.revision,
+                title: None,
+                instance_id: None,
+                model: None,
+                effort: None,
+                permissions,
+            };
+            // Same mode: nothing to reset.
+            s.update(&upd(Some(t.permissions)), |_| Ok(())).unwrap();
+            assert!(s.native_session(&t.thread_id).unwrap().is_some());
+            let t2 = s.thread(&t.thread_id).unwrap();
+            let mut change = upd(Some(Permissions::Edit));
+            change.expected_revision = t2.revision;
+            s.update(&change, |_| Ok(())).unwrap();
+            assert_eq!(s.native_session(&t.thread_id).unwrap().is_some(), kept);
+        }
+    }
+
+    #[test]
     fn update_permissions_checks_revision_kind_and_streaming() {
         let (_dir, mut s) = open();
         let t = s.create(&create_req("c"), "T", ThreadKind::Cli).unwrap();
@@ -1758,6 +1796,7 @@ mod tests {
         assert_eq!((a.permissions, a.revision), (Permissions::Edit, 2));
         let b = s.update(&upd(None, 2), |_| Ok(())).unwrap();
         assert_eq!(b.permissions, Permissions::Edit);
+
         let req: ThreadUpdate =
             serde_json::from_str(r#"{"threadId":"x","expectedRevision":1,"permissions":"full"}"#)
                 .unwrap();

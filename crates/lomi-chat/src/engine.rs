@@ -153,7 +153,8 @@ impl Engine {
                 Loaded::Valid(s) => (s, None),
                 Loaded::Invalid(message) => (ChatSettings::default(), Some(message)),
             };
-            let store = Store::open(&dir)?;
+            let mut store = Store::open(&dir)?;
+            store.restricted = self.0.restricted;
             *guard = Some(Inner {
                 _owner: owner,
                 dir,
@@ -359,15 +360,30 @@ impl Engine {
         thread_id: &str,
         message_id: &str,
     ) -> Result<(UndoReport, u64), String> {
-        if self.is_active(thread_id)? {
-            return Err("Stop the reply before undoing.".into());
-        }
+        // Registered as active for the whole undo, so a send is refused meanwhile.
+        let _guard = {
+            let mut active = self.active()?;
+            if active.contains_key(thread_id) {
+                return Err("Stop the reply before undoing.".into());
+            }
+            let stop = Arc::new(Notify::new());
+            active.insert(thread_id.into(), stop.clone());
+            ActiveGuard {
+                chat: self.clone(),
+                thread_id: thread_id.into(),
+                stop,
+            }
+        };
         let (cwd, cp) = self.turn_context(thread_id, message_id)?;
         if cp.changes.undone {
             return Err("This turn was already undone.".into());
         }
         let report = checkpoint::undo(&cwd, &cp.before, &cp.after)?;
-        let revision = self.with(|i| i.store.mark_undone(thread_id, message_id))?;
+        let revision = if report.restored.is_empty() {
+            self.with(|i| Ok(i.store.thread(thread_id)?.revision))?
+        } else {
+            self.with(|i| i.store.mark_undone(thread_id, message_id))?
+        };
         Ok((report, revision))
     }
 
@@ -548,6 +564,10 @@ impl Engine {
         let mut provider = None;
         let begin =
             store.send_begin(request, settings.behavior.system_instructions.len(), |t| {
+                // An undo holds the thread's active entry.
+                if self.is_active(&t.thread_id)? {
+                    return Err("This thread is already waiting for a response.".into());
+                }
                 provider = Some(match t.kind {
                     ThreadKind::Api => {
                         let p = settings
@@ -913,7 +933,8 @@ async fn run_stream(chat: Engine, job: Job, sink: Arc<dyn EventSink>) {
     let (outcome, checkpoint) = match early {
         None => (stopped_outcome(Acc::new()), None),
         Some(pending) => {
-            let outcome = stream(&chat, &job, &*sink, &stop).await;
+            let mut outcome = stream(&chat, &job, &*sink, &stop).await;
+            close_activities(&mut outcome.activity);
             let checkpoint = match pending {
                 Some(p) => capture_after(p).await,
                 None => None,
@@ -1028,6 +1049,22 @@ async fn capture_after(p: PendingCheckpoint) -> Option<Checkpoint> {
     .flatten()
 }
 
+/// A finished turn has nothing still running or awaiting an answer.
+fn close_activities(activity: &mut [Activity]) {
+    for a in activity {
+        if let Some(p) = a
+            .approval
+            .as_mut()
+            .filter(|p| p.state == ApprovalState::Pending)
+        {
+            p.state = ApprovalState::Expired;
+        }
+        if a.status == ActivityStatus::Running {
+            a.status = ActivityStatus::Failed;
+        }
+    }
+}
+
 fn stopped_outcome(acc: Acc) -> Outcome {
     Outcome {
         start_failed: false,
@@ -1077,7 +1114,8 @@ impl Acc {
                 a.approval = self.activity[i].approval.clone();
             }
             self.activity[i] = a.clone();
-        } else if self.activity.len() < MAX_ACTIVITIES {
+        // An activity with an approval is never dropped: the turn would wait for it forever.
+        } else if self.activity.len() < MAX_ACTIVITIES || a.approval.is_some() {
             a.at = self.utf16;
             self.activity.push(a.clone());
         } else {
@@ -1136,7 +1174,15 @@ impl Acc {
     }
 
     /// Appends and emits `text`; false when it would exceed the stored-content cap.
-    fn push(&mut self, message_id: &str, sink: &dyn EventSink, text: String) -> bool {
+    fn push(&mut self, message_id: &str, sink: &dyn EventSink, mut text: String) -> bool {
+        // Text resuming after an activity must not glue onto the previous block.
+        if !text.is_empty()
+            && !self.content.is_empty()
+            && !self.content.ends_with('\n')
+            && self.activity.last().is_some_and(|a| a.at == self.utf16)
+        {
+            text.insert_str(0, "\n\n");
+        }
         if self.content.len() + text.len() > CONTENT_CAP {
             return false;
         }
@@ -1570,6 +1616,18 @@ async fn run_live(
         heard |= v["type"] != "control_response";
         match v["type"].as_str() {
             Some("control_response") => continue,
+            Some("control_cancel_request") => {
+                if let Some(id) = v["request_id"].as_str() {
+                    session.cancel_pending(id);
+                    acc.settle(
+                        &job.message_id,
+                        sink,
+                        |p| p.request_id == id,
+                        ApprovalState::Expired,
+                    );
+                }
+                continue;
+            }
             Some("control_request") => {
                 on_control(
                     &session,
@@ -1823,7 +1881,7 @@ async fn run_codex(
     if let Some(message) = failure {
         return acc.failed(message);
     }
-    if acc.content.is_empty() {
+    if acc.content.is_empty() && acc.activity.is_empty() {
         return acc.failed("The CLI returned no response.".into());
     }
     Outcome {
@@ -3535,6 +3593,42 @@ read -r never
         }
         // 1 first insert + 1 update + the capped inserts; overflow ids emit nothing.
         assert_eq!(events, 2 + MAX_ACTIVITIES - 1);
+    }
+
+    #[test]
+    fn text_after_an_activity_is_separated_and_approvals_bypass_the_cap() {
+        let (tx, _rx) = unbounded_channel();
+        let sink = Recorder(tx);
+        let mut acc = Acc::new();
+        assert!(acc.push("m", &sink, "starts.".into()));
+        acc.upsert("m", &sink, act("a"));
+        assert!(acc.push("m", &sink, "The port".into()));
+        assert!(acc.push("m", &sink, " ok".into()));
+        assert_eq!(acc.content, "starts.\n\nThe port ok");
+        assert_eq!(acc.activity[0].at, 7);
+        assert_eq!(acc.utf16, acc.content.encode_utf16().count() as u64);
+        for i in 0..MAX_ACTIVITIES {
+            acc.upsert("m", &sink, act(&format!("n{i}")));
+        }
+        let mut asked = act("ask");
+        asked.approval = Some(Approval {
+            request_id: "r".into(),
+            state: ApprovalState::Pending,
+            can_remember: false,
+        });
+        acc.upsert("m", &sink, asked);
+        assert!(acc.activity.iter().any(|a| a.id == "ask"));
+        close_activities(&mut acc.activity);
+        let last = acc.activity.last().unwrap();
+        assert_eq!(
+            (last.status, last.approval.as_ref().unwrap().state),
+            (ActivityStatus::Failed, ApprovalState::Expired)
+        );
+        assert!(
+            acc.activity
+                .iter()
+                .all(|a| a.status != ActivityStatus::Running)
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {

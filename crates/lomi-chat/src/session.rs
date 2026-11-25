@@ -128,7 +128,14 @@ pub fn reply_line(r: &ToolRequest, decision: Decision, interrupt: bool) -> Strin
     if decision == Decision::AllowSession
         && let Some(s) = &r.suggestions
     {
-        body["updatedPermissions"] = s.clone();
+        // Suggestions may target settings files; "allow for session" must never persist.
+        let mut s = s.clone();
+        for item in s.as_array_mut().into_iter().flatten() {
+            if let Some(o) = item.as_object_mut() {
+                o.insert("destination".into(), json!("session"));
+            }
+        }
+        body["updatedPermissions"] = s;
     }
     if interrupt && decision == Decision::Deny {
         body["interrupt"] = json!(true);
@@ -210,6 +217,7 @@ impl Wire {
             let _guard = guard;
             let (mut split, mut buf) = (cli::LineSplitter::default(), [0u8; 8192]);
             let mut drain_until: Option<tokio::time::Instant> = None;
+            let mut oversize = false;
             loop {
                 let n = tokio::select! {
                     r = proc.stdout.read(&mut buf) => r.unwrap_or(0),
@@ -232,6 +240,13 @@ impl Wire {
                 for l in ls {
                     let _ = tx.send(l);
                 }
+                if split.take_dropped() && !oversize {
+                    // A lost line may carry a permission prompt or the result; fail the turn
+                    // by ending the process instead of waiting for it forever.
+                    oversize = true;
+                    dead_w.store(true, Ordering::Release);
+                    cli::kill_group(pgid);
+                }
                 if n == 0 {
                     break;
                 }
@@ -242,8 +257,11 @@ impl Wire {
             } else {
                 format!(": {stderr}")
             };
-            *exit_w.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(format!("The CLI exited ({status}){detail}"));
+            *exit_w.lock().unwrap_or_else(|e| e.into_inner()) = Some(if oversize {
+                "The CLI sent a message that is too large; the reply was stopped.".to_string()
+            } else {
+                format!("The CLI exited ({status}){detail}")
+            });
             dead_w.store(true, Ordering::Release);
         });
         let wire = Self {
@@ -357,6 +375,13 @@ impl ClaudeSession {
         }
     }
 
+    /// Forgets a prompt the CLI cancelled (`control_cancel_request`).
+    pub fn cancel_pending(&self, request_id: &str) {
+        if let Ok(mut p) = self.pending.lock() {
+            p.remove(request_id);
+        }
+    }
+
     /// Answers a pending prompt on behalf of the user.
     pub fn respond(&self, request_id: &str, decision: Decision) -> Result<(), String> {
         let r = self
@@ -434,6 +459,17 @@ mod tests {
             session["response"]["response"]["updatedPermissions"],
             json!([{"type":"setMode","mode":"acceptEdits","destination":"session"}])
         );
+        // Persistent destinations are rewritten to the session.
+        let persistent = ToolRequest {
+            suggestions: Some(
+                json!([{"type":"addRules","destination":"userSettings"},{"type":"setMode","mode":"acceptEdits","destination":"localSettings"}]),
+            ),
+            ..tool()
+        };
+        assert_eq!(
+            v(&reply_line(&persistent, Decision::AllowSession, false))["response"]["response"]["updatedPermissions"],
+            json!([{"type":"addRules","destination":"session"},{"type":"setMode","mode":"acceptEdits","destination":"session"}])
+        );
         let deny = reply(Decision::Deny, false);
         assert_eq!(
             deny["response"]["response"],
@@ -490,6 +526,27 @@ mod tests {
         assert_eq!(closed, vec!["hi".to_string()]);
         assert!(!wire.alive());
         assert!(wire.exit_detail().starts_with("The CLI exited"));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_line_ends_the_session_with_a_clear_error() {
+        let spec = cli::Spec {
+            bin: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "head -c 2000000 /dev/zero | tr '\\0' x; echo; sleep 30".into(),
+            ],
+            stdin: None,
+            interactive: true,
+            cwd: "/tmp".into(),
+        };
+        let (wire, mut lines) = Wire::start(&spec, spec.args.clone(), None, |_| ()).unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(10), async {
+            while lines.recv().await.is_some() {}
+        })
+        .await;
+        assert!(end.is_ok(), "the session must end, not hang");
+        assert!(wire.exit_detail().contains("too large"));
     }
 
     #[test]

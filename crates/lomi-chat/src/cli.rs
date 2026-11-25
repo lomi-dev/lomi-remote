@@ -776,6 +776,7 @@ impl Parser {
 pub struct LineSplitter {
     buf: Vec<u8>,
     skipping: bool,
+    dropped: bool,
 }
 
 impl LineSplitter {
@@ -787,6 +788,7 @@ impl LineSplitter {
                 self.buf.extend_from_slice(part);
                 if self.buf.len() > LINE_CAP + 1 {
                     self.buf.clear();
+                    self.dropped = true;
                     self.skipping = !ends;
                     continue;
                 }
@@ -801,6 +803,11 @@ impl LineSplitter {
             }
         }
         lines
+    }
+
+    /// Whether a line was dropped since the last call.
+    pub fn take_dropped(&mut self) -> bool {
+        std::mem::take(&mut self.dropped)
     }
 
     pub fn finish(&mut self) -> Vec<String> {
@@ -1644,6 +1651,7 @@ not json"#,
         let mut s = LineSplitter::default();
         let huge = vec![b'x'; LINE_CAP + 10];
         assert!(s.push(&huge).is_empty());
+        assert!(s.take_dropped() && !s.take_dropped());
         assert!(s.push(b"more").is_empty());
         assert_eq!(s.push(b"tail\nok\n"), vec!["ok"]);
         assert!(s.finish().is_empty());

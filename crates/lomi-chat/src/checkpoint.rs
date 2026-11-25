@@ -436,6 +436,15 @@ pub fn undo(cwd: &Path, before: &str, after: &str) -> Result<UndoReport, String>
             report.skipped.push(path);
         }
     }
+    // A case-only rename would delete the only copy on a case-insensitive filesystem.
+    let planned: Vec<&String> = deletes
+        .iter()
+        .chain(writes.iter().map(|(p, _)| p))
+        .collect();
+    let clash = case_collisions(&planned);
+    deletes.retain(|p| !clash.contains(p));
+    writes.retain(|(p, _)| !clash.contains(p));
+    report.skipped.extend(clash);
     // Deletions first so a file <-> directory swap can be reverted.
     for path in deletes {
         match remove_path(&top, &path) {
@@ -451,6 +460,19 @@ pub fn undo(cwd: &Path, before: &str, after: &str) -> Result<UndoReport, String>
     }
     report.restored.sort();
     Ok(report)
+}
+
+/// Paths that share a lowercase form with another path, sorted.
+fn case_collisions(paths: &[&String]) -> std::collections::BTreeSet<String> {
+    let mut seen: HashMap<String, &String> = HashMap::new();
+    let mut clash = std::collections::BTreeSet::new();
+    for p in paths {
+        if let Some(other) = seen.insert(p.to_lowercase(), p) {
+            clash.insert(other.clone());
+            clash.insert((*p).clone());
+        }
+    }
+    clash
 }
 
 fn remove_path(top: &Path, path: &str) -> Result<(), String> {
@@ -770,6 +792,21 @@ mod tests {
         assert!(undo(p, &before, &after).is_err());
         assert!(!marker.exists());
         assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "agent\n");
+    }
+
+    #[test]
+    fn case_only_renames_collide() {
+        let (a, b, c) = (
+            "Foo.txt".to_string(),
+            "foo.txt".to_string(),
+            "x".to_string(),
+        );
+        let clash = case_collisions(&[&a, &b, &c]);
+        assert_eq!(
+            clash.into_iter().collect::<Vec<_>>(),
+            vec!["Foo.txt", "foo.txt"]
+        );
+        assert!(case_collisions(&[&a, &c]).is_empty());
     }
 
     #[test]
