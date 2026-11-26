@@ -429,15 +429,20 @@ impl std::ops::Deref for ClaudeSession {
 
 impl ClaudeSession {
     /// Starts the process (`spec.args` plus `--resume`) and its reader/writer tasks.
+    /// `at` truncates the resumed conversation after that assistant message (a rewind).
     /// Must run inside a Tokio runtime.
     pub fn spawn<G: Send + 'static>(
         spec: &cli::Spec,
         resume: Option<&str>,
+        at: Option<&str>,
         track: impl FnOnce(Option<u32>) -> G,
     ) -> Result<Arc<Self>, String> {
         let mut args = spec.args.clone();
         if let Some(s) = resume {
             args.extend(["--resume".into(), s.into()]);
+            if let Some(at) = at {
+                args.extend(["--resume-session-at".into(), at.into()]);
+            }
         }
         let (wire, lines) = Wire::start(spec, args, Some(request("initialize")), track)?;
         let (answers, answers_rx) = unbounded_channel();

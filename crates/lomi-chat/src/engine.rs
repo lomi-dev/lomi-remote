@@ -494,9 +494,12 @@ impl Engine {
             }
             s.kill();
         }
-        let s = ClaudeSession::spawn(&run.spec, run.session.as_deref(), |pid| {
-            self.track_group(pid)
-        })?;
+        let s = ClaudeSession::spawn(
+            &run.spec,
+            run.session.as_deref(),
+            run.resume_at.as_deref(),
+            |pid| self.track_group(pid),
+        )?;
         map.insert(thread_id.into(), s.clone());
         drop(map);
         self.start_reaper();
@@ -595,6 +598,81 @@ impl Engine {
             })?
         };
         Ok((report, revision))
+    }
+
+    /// Rewinds a thread to just before one of its user messages: optionally
+    /// restores the files later replies changed (newest first), deletes the
+    /// message and everything after it, and kills the warm session so the next
+    /// send resumes the agent at that point. Blocking: call from `spawn_blocking`.
+    pub fn rewind(&self, req: &ThreadRewind) -> Result<RewindReport, String> {
+        // Registered as active for the whole rewind, so a send is refused meanwhile.
+        let _guard = {
+            let mut active = self.active()?;
+            if active.contains_key(&req.thread_id) {
+                return Err("Stop the reply before editing a message.".into());
+            }
+            let stop = Arc::new(Notify::new());
+            active.insert(req.thread_id.clone(), stop.clone());
+            ActiveGuard {
+                chat: self.clone(),
+                thread_id: req.thread_id.clone(),
+                stop,
+            }
+        };
+        let (thread, cli, later) = self.with(|i| {
+            let thread = i.store.thread(&req.thread_id)?;
+            if thread.revision != req.expected_revision {
+                return Err("This thread changed in another view. Reload and try again.".into());
+            }
+            let cli = i
+                .settings
+                .cli_providers
+                .iter()
+                .find(|p| p.instance_id == thread.instance_id)
+                .map(|p| p.cli.clone());
+            let later = if req.restore_files {
+                i.store.later_checkpoints(&req.thread_id, &req.message_id)?
+            } else {
+                Vec::new()
+            };
+            Ok((thread, cli, later))
+        })?;
+        let mut report = UndoReport::default();
+        if let Some(cwd) = thread.cwd.as_deref().filter(|_| !later.is_empty()) {
+            let cwd = std::path::Path::new(cwd);
+            for (_, cp) in &later {
+                match checkpoint::undo(cwd, &cp.before, &cp.after, None) {
+                    Ok(r) => {
+                        report.restored.extend(r.restored);
+                        report.skipped.extend(r.skipped);
+                    }
+                    Err(_) => report
+                        .skipped
+                        .extend(cp.changes.files.iter().map(|f| f.path.clone())),
+                }
+            }
+        }
+        let rewound = self.with(|i| i.store.rewind(req, cli.as_deref()))?;
+        self.forget_session(&req.thread_id);
+        if let Some(cwd) = thread.cwd.as_deref() {
+            for id in &rewound.removed {
+                let _ = checkpoint::remove_refs(
+                    std::path::Path::new(cwd),
+                    &format!("refs/lomi/chat/{}/{id}/", req.thread_id),
+                );
+            }
+        }
+        report.restored.sort();
+        report.restored.dedup();
+        report.skipped.sort();
+        report.skipped.dedup();
+        report.skipped.retain(|p| !report.restored.contains(p));
+        Ok(RewindReport {
+            thread: rewound.thread,
+            restored: report.restored,
+            skipped: report.skipped,
+            context: rewound.context,
+        })
     }
 
     fn turn_context(
@@ -864,7 +942,14 @@ impl Engine {
                         } else {
                             None
                         };
-                        Target::Cli(cli_job(
+                        let rewind = match store.pending_rewind(&a.thread.thread_id)? {
+                            Some(p) => Some((
+                                p,
+                                replay_text(&store.transcript(&a.thread.thread_id, a.user.seq)?),
+                            )),
+                            None => None,
+                        };
+                        Target::Cli(Box::new(cli_job(
                             &id,
                             bin,
                             &a,
@@ -873,7 +958,8 @@ impl Engine {
                             &settings.behavior.system_instructions,
                             agent_file.as_deref(),
                             self.0.restricted,
-                        ))
+                            rewind,
+                        )))
                     }
                 };
                 // Registered under the storage lock so stop/delete never see a started send as stuck.
@@ -916,6 +1002,16 @@ impl Engine {
             }
         })
     }
+}
+
+/// Result of [`Engine::rewind`].
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindReport {
+    pub thread: ThreadSummary,
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
+    pub context: RewindContext,
 }
 
 struct GroupGuard(Engine, Option<u32>);
@@ -986,11 +1082,19 @@ struct CliJob {
     codex: Option<codex_server::Params>,
     /// Turn of a thread on the persistent ACP agent (`spec` is then `acp`).
     acp: Option<Box<acp::Params>>,
+    /// Claude: resume only up to this assistant message (a pending rewind).
+    resume_at: Option<String>,
+    /// Codex: `thread/revert` before this turn after resuming (a pending rewind).
+    revert_before: Option<String>,
+    /// Codex: the prompt with the kept conversation, sent when the revert fails.
+    replay: Option<String>,
+    /// A rewind is pending; a turn that produced output settles it.
+    rewinding: bool,
 }
 
 enum Target {
     Api(ApiJob),
-    Cli(CliJob),
+    Cli(Box<CliJob>),
 }
 
 struct Job {
@@ -1027,6 +1131,7 @@ fn cli_job(
     system: &str,
     agent_file: Option<&str>,
     restricted: bool,
+    rewind: Option<(PendingRewind, String)>,
 ) -> CliJob {
     let (thread, files) = (&accepted.thread, &accepted.user.attachments);
     let cwd = thread
@@ -1045,11 +1150,27 @@ fn cli_job(
         .filter(|a| a.kind == Kind::Image)
         .map(path)
         .collect();
-    let prompt = cli::attach_prompt(&accepted.user.content, &listed);
+    let mut prompt = cli::attach_prompt(&accepted.user.content, &listed);
     let attach_dir = files_dir.to_string_lossy();
     let live = cli_id == "claude" && !restricted;
     let server = cli_id == "codex" && !restricted;
     let agent = matches!(cli_id, "agy" | "kimi") && !restricted;
+    let rewinding = rewind.is_some();
+    let (mut resume_at, mut revert_before, mut replay) = (None, None, None);
+    let mut session = session;
+    match rewind {
+        Some((PendingRewind::ClaudeAt(at), _)) if live && session.is_some() => resume_at = Some(at),
+        Some((PendingRewind::CodexBefore(turn), history)) if server && session.is_some() => {
+            revert_before = Some(turn);
+            replay = Some(format!("{history}{prompt}"));
+        }
+        // Other paths cannot rewind a native session: a new one gets the history as text.
+        Some((_, history)) => {
+            session = None;
+            prompt = format!("{history}{prompt}");
+        }
+        None => {}
+    }
     let inv = cli::Invocation {
         cli: cli_id,
         model: &accepted.user.model,
@@ -1082,7 +1203,7 @@ fn cli_job(
         system: system.into(),
         prompt: prompt.clone(),
         images: images.clone(),
-        compact: files.is_empty() && accepted.user.content.trim() == "/compact",
+        compact: !rewinding && files.is_empty() && accepted.user.content.trim() == "/compact",
     });
     let acp = agent.then(|| {
         Box::new(acp::Params {
@@ -1108,7 +1229,54 @@ fn cli_job(
         acp,
         live: live.then_some(prompt),
         permissions: thread.permissions,
+        resume_at,
+        revert_before,
+        replay,
+        rewinding,
     }
+}
+
+/// What a CLI turn learned about its native session.
+#[derive(Default)]
+struct Seen {
+    /// Session or thread id to resume next time.
+    session: Option<String>,
+    /// End of this reply in the agent's history (Claude message uuid, Codex turn id).
+    turn: Option<String>,
+}
+
+/// Text that gives a new agent session the kept conversation of a rewound thread.
+/// Bounded: the newest messages are kept and each is cut at `PER_MESSAGE` chars.
+fn replay_text(messages: &[(Role, String)]) -> String {
+    const TOTAL: usize = 60_000;
+    const PER_MESSAGE: usize = 8_000;
+    let mut parts = Vec::new();
+    let mut used = 0;
+    for (role, content) in messages.iter().rev() {
+        let mut text: String = content.chars().take(PER_MESSAGE).collect();
+        if text.len() < content.len() {
+            text.push_str(" […]");
+        }
+        let who = if *role == Role::User {
+            "User"
+        } else {
+            "Assistant"
+        };
+        let part = format!("{who}: {text}\n\n");
+        if used + part.len() > TOTAL {
+            break;
+        }
+        used += part.len();
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.reverse();
+    format!(
+        "<earlier-conversation>\nThis chat was rewound and continues in a new session. The conversation so far, for context:\n\n{}</earlier-conversation>\n\n",
+        parts.concat()
+    )
 }
 
 #[derive(Clone)]
@@ -1869,7 +2037,7 @@ async fn stream_cli(
     sink: &dyn EventSink,
     stop: &Notify,
 ) -> Outcome {
-    let mut seen = None;
+    let mut seen = Seen::default();
     let mut outcome = run_cli(chat, job, run, sink, stop, &mut seen).await;
     // The stored session is cleared below, so the next send starts a new one.
     if outcome.start_failed && run.session.is_some() && run.cli == "claude" {
@@ -1877,18 +2045,41 @@ async fn stream_cli(
         outcome.activity.push(notice("resume_failed", detail));
     }
     let next = if !outcome.content.is_empty() || outcome.state == MessageState::Completed {
-        seen.filter(|s| run.session.as_deref() != Some(s.as_str()))
+        seen.session
+            .filter(|s| run.session.as_deref() != Some(s.as_str()))
             .map(Some)
     } else if run.session.is_some() && outcome.start_failed {
         Some(None)
     } else {
         None
     };
-    if let Some(next) = next {
-        let (chat, thread) = (chat.clone(), job.thread_id.clone());
-        let _ =
-            blocking(move || chat.with(|i| i.store.set_native_session(&thread, next.as_deref())))
-                .await;
+    let produced = !outcome.content.is_empty() || outcome.state == MessageState::Completed;
+    // A refused resume-at leaves no session; the next send replays the history instead.
+    let rewind = if produced && run.rewinding {
+        Some(None)
+    } else if outcome.start_failed && run.resume_at.is_some() {
+        Some(Some(PendingRewind::Replay))
+    } else {
+        None
+    };
+    let cursor = seen.turn.filter(|_| produced);
+    if next.is_some() || rewind.is_some() || cursor.is_some() {
+        let (chat, thread, message) = (chat.clone(), job.thread_id.clone(), job.message_id.clone());
+        let _ = blocking(move || {
+            chat.with(|i| {
+                if let Some(next) = next {
+                    i.store.set_native_session(&thread, next.as_deref())?;
+                }
+                if let Some(rewind) = rewind {
+                    i.store.set_pending_rewind(&thread, rewind.as_ref())?;
+                }
+                if let Some(cursor) = cursor {
+                    i.store.set_native_turn(&message, &cursor)?;
+                }
+                Ok(())
+            })
+        })
+        .await;
     }
     outcome
 }
@@ -1901,16 +2092,16 @@ async fn run_cli(
     run: &CliJob,
     sink: &dyn EventSink,
     stop: &Notify,
-    session: &mut Option<String>,
+    seen: &mut Seen,
 ) -> Outcome {
     if let Some(prompt) = &run.live {
-        return run_live(chat, job, run, prompt, sink, stop, session).await;
+        return run_live(chat, job, run, prompt, sink, stop, seen).await;
     }
     if let Some(p) = &run.codex {
-        return run_codex(chat, job, run, p, sink, stop, session).await;
+        return run_codex(chat, job, run, p, sink, stop, seen).await;
     }
     if let Some(p) = &run.acp {
-        return run_acp(chat, job, run, p, sink, stop, session).await;
+        return run_acp(chat, job, run, p, sink, stop, seen).await;
     }
     let stopped = stop.notified();
     tokio::pin!(stopped);
@@ -1978,9 +2169,10 @@ async fn run_cli(
                     }
                     cli::Ev::Session(id) => {
                         if cli::valid_session(&id) {
-                            *session = Some(id);
+                            seen.session = Some(id);
                         }
                     }
+                    cli::Ev::Cursor(id) => seen.turn = Some(id),
                 }
             }
         }
@@ -2039,7 +2231,7 @@ async fn run_live(
     prompt: &str,
     sink: &dyn EventSink,
     stop: &Notify,
-    sid: &mut Option<String>,
+    seen: &mut Seen,
 ) -> Outcome {
     let stopped = stop.notified();
     tokio::pin!(stopped);
@@ -2177,9 +2369,10 @@ async fn run_live(
                 cli::Ev::Error(m) => failure = Some(http::redact(&m, None)),
                 cli::Ev::Session(id) => {
                     if cli::valid_session(&id) {
-                        *sid = Some(id);
+                        seen.session = Some(id);
                     }
                 }
+                cli::Ev::Cursor(id) => seen.turn = Some(id),
             }
         }
         if oversized {
@@ -2268,7 +2461,7 @@ async fn run_codex(
     p: &codex_server::Params,
     sink: &dyn EventSink,
     stop: &Notify,
-    sid: &mut Option<String>,
+    seen: &mut Seen,
 ) -> Outcome {
     let stopped = stop.notified();
     tokio::pin!(stopped);
@@ -2287,7 +2480,7 @@ async fn run_codex(
         None => {
             let started = tokio::select! {
                 _ = &mut stopped => None,
-                r = codex_server::start(&session, rx, p, run.session.as_deref()) => Some(r),
+                r = codex_server::start(&session, rx, p, run.session.as_deref(), run.revert_before.as_deref()) => Some(r),
             };
             match started {
                 Some(Ok(started)) => started,
@@ -2303,16 +2496,22 @@ async fn run_codex(
         }
     };
     if cli::valid_session(&thread) {
-        *sid = Some(thread.clone());
+        seen.session = Some(thread.clone());
     }
     chat.keep_commands(&job.thread_id, codex_server::commands());
+    // A failed rewind left a new native thread: it gets the kept conversation as text.
+    let (replayed, reset) = match (&reset, &run.replay) {
+        (Some(_), Some(text)) => (Some(text), None),
+        _ => (None, reset),
+    };
     let started = if p.compact {
         session.request("thread/compact/start", json!({"threadId": thread}))
     } else {
-        session.request(
-            "turn/start",
-            p.turn_params(&thread, session.model().as_deref()),
-        )
+        let mut params = p.turn_params(&thread, session.model().as_deref());
+        if let Some(text) = replayed {
+            params["input"][0]["text"] = json!(text);
+        }
+        session.request("turn/start", params)
     };
     let turn_req = match started {
         Ok(id) => id,
@@ -2466,6 +2665,8 @@ async fn run_codex(
         }
         acc.flush_due(chat, job).await;
     }
+    // The turn a later rewind reverts from (`thread/revert` before it).
+    seen.turn.clone_from(&turn);
     // Answers already given but not yet applied win over expiry.
     while let Ok(a) = rx.answers.try_recv() {
         settle_answer(&mut acc, &job.message_id, sink, &a);
@@ -2507,7 +2708,7 @@ async fn run_acp(
     p: &acp::Params,
     sink: &dyn EventSink,
     stop: &Notify,
-    sid: &mut Option<String>,
+    seen: &mut Seen,
 ) -> Outcome {
     let stopped = stop.notified();
     tokio::pin!(stopped);
@@ -2542,7 +2743,7 @@ async fn run_acp(
         }
     };
     if cli::valid_session(&native) {
-        *sid = Some(native.clone());
+        seen.session = Some(native.clone());
     }
     let known = session.commands();
     if !known.is_empty() {
@@ -2852,6 +3053,24 @@ fn on_control(
 mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, path::Path};
+
+    #[test]
+    fn replay_text_keeps_the_newest_messages_in_order() {
+        assert_eq!(replay_text(&[]), "");
+        let text = replay_text(&[
+            (Role::User, "first".into()),
+            (Role::Assistant, "x".repeat(9_000)),
+            (Role::User, "last".into()),
+        ]);
+        assert!(text.starts_with("<earlier-conversation>"));
+        assert!(text.contains(" […]"));
+        assert!(text.find("User: first").unwrap() < text.find("User: last").unwrap());
+        let many: Vec<_> = (0..100)
+            .map(|n| (Role::User, format!("m{n:03} {}", "y".repeat(1_000))))
+            .collect();
+        let text = replay_text(&many);
+        assert!(text.len() < 62_000 && text.contains("m099") && !text.contains("m000"));
+    }
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
     struct Recorder(UnboundedSender<ThreadStreamEvent>);

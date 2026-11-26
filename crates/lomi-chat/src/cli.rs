@@ -267,6 +267,8 @@ pub enum Ev {
     Activity(Activity),
     Usage(Usage),
     Session(String),
+    /// Claude: uuid of a top-level assistant message, the resume point of a later rewind.
+    Cursor(String),
     /// Complete answer; used only when no text streamed.
     Final(String),
     Error(String),
@@ -655,6 +657,7 @@ impl Parser {
                     self.claude_stream_event(&v["event"], &mut out);
                 }
                 "assistant" if v["parent_tool_use_id"].is_null() => {
+                    out.extend(str_at(&v, &["uuid"]).map(|s| Ev::Cursor(s.into())));
                     self.claude_assistant(&v["message"]["content"], &mut out);
                 }
                 "user" if v["parent_tool_use_id"].is_null() => {
@@ -1376,6 +1379,15 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn claude_assistant_messages_report_their_uuid() {
+        let mut p = Parser::new("claude");
+        let evs = p.line(r#"{"type":"assistant","uuid":"u-1","parent_tool_use_id":null,"message":{"content":[]}}"#);
+        assert_eq!(evs, vec![Ev::Cursor("u-1".into())]);
+        let sub = p.line(r#"{"type":"assistant","uuid":"u-2","parent_tool_use_id":"t","message":{"content":[]}}"#);
+        assert!(sub.is_empty());
     }
 
     #[test]

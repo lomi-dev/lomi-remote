@@ -753,13 +753,16 @@ async fn call(s: &CodexSession, rx: &mut Rx, method: &str, params: Value) -> Res
 
 /// Handshake of a fresh process: `initialize`, `initialized`, then the thread.
 /// A native thread is resumed; when that fails (whatever the reason, usually an
-/// unknown thread) a new one replaces it. Returns the native thread id and, when
-/// the resume failed, its error so the caller can tell the user the context was reset.
+/// unknown thread) a new one replaces it. `revert_before` then drops that turn
+/// and every later one from the resumed history (`thread/revert`); a failed
+/// revert also replaces the thread. Returns the native thread id and, when the
+/// resume or revert failed, its error so the caller can tell the user the context was reset.
 pub async fn start(
     s: &CodexSession,
     rx: &mut Rx,
     p: &Params,
     native: Option<&str>,
+    revert_before: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
     // `experimentalApi` enables plan mode (`collaborationMode`) and its questions.
     let info = json!({
@@ -771,7 +774,20 @@ pub async fn start(
     let mut reset = None;
     let resumed = match native {
         Some(id) => match call(s, rx, "thread/resume", p.thread_params(Some(id))).await {
-            Ok(r) => Some(r),
+            Ok(r) => match revert_before {
+                Some(turn) => {
+                    let params = json!({"threadId": id, "beforeTurnId": turn});
+                    match call(s, rx, "thread/revert", params).await {
+                        // The resume result carries the model; the revert result does not.
+                        Ok(_) => Some(r),
+                        Err(e) => {
+                            reset = Some(e);
+                            None
+                        }
+                    }
+                }
+                None => Some(r),
+            },
             Err(e) => {
                 reset = Some(e);
                 None

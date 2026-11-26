@@ -388,6 +388,69 @@ fn set_or_clear<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(d).map(Some)
 }
 
+/// Rewinds a thread to just before one of its user messages.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadRewind {
+    pub thread_id: String,
+    pub message_id: String,
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub restore_files: bool,
+}
+
+/// How the agent's own context follows a rewind.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RewindContext {
+    /// API threads rebuild their context from the stored messages.
+    Api,
+    /// The native session is rewound on the next send (Claude resume-at, Codex revert).
+    Native,
+    /// Nothing is kept: the next send starts a new session.
+    Fresh,
+    /// A new session gets the kept conversation as text with the next send.
+    Replay,
+}
+
+/// Result of `Store::rewind`.
+#[derive(Debug)]
+pub struct Rewound {
+    pub thread: ThreadSummary,
+    pub context: RewindContext,
+    /// Removed assistant messages, whose checkpoint refs can be deleted.
+    pub removed: Vec<String>,
+}
+
+/// Pending native rewind stored in `threads.rewind`, applied by the next CLI send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingRewind {
+    /// Claude: `--resume-session-at` this assistant message uuid.
+    ClaudeAt(String),
+    /// Codex: `thread/revert` before this turn id.
+    CodexBefore(String),
+    /// Start a new session with the kept conversation as context.
+    Replay,
+}
+
+impl PendingRewind {
+    fn encode(&self) -> String {
+        match self {
+            Self::ClaudeAt(id) => format!("claude:{id}"),
+            Self::CodexBefore(id) => format!("codex:{id}"),
+            Self::Replay => "replay".into(),
+        }
+    }
+
+    fn decode(value: &str) -> Option<Self> {
+        match value.split_once(':') {
+            Some(("claude", id)) => Some(Self::ClaudeAt(id.into())),
+            Some(("codex", id)) => Some(Self::CodexBefore(id.into())),
+            _ => (value == "replay").then_some(Self::Replay),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadDelete {
@@ -630,6 +693,18 @@ fn get_messages(db: &Connection, id: &str) -> Result<Vec<ThreadMessage>, String>
     Ok(out)
 }
 
+/// Sequence number of a user message of `thread_id`.
+fn user_seq(db: &Connection, thread_id: &str, message_id: &str) -> Result<i64, String> {
+    db.query_row(
+        "SELECT seq FROM messages WHERE id=?1 AND thread_id=?2 AND role='user'",
+        [message_id, thread_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(db_err)?
+    .ok_or_else(|| "That message cannot be edited.".into())
+}
+
 fn get_message(db: &Connection, id: &str) -> Result<ThreadMessage, String> {
     let mut m = db
         .query_row(
@@ -797,6 +872,8 @@ fn add_missing_columns(db: &Connection) -> Result<(), String> {
         ("messages", "retry_at_ms", "INTEGER"),
         ("messages", "checkpoint_before", "TEXT"),
         ("messages", "checkpoint_after", "TEXT"),
+        ("messages", "native_turn", "TEXT"),
+        ("threads", "rewind", "TEXT"),
     ] {
         let have: bool = db
             .query_row(
@@ -858,7 +935,7 @@ impl Store {
                    kind TEXT NOT NULL CHECK(kind IN('api','cli')), instance_id TEXT NOT NULL,
                    model TEXT NOT NULL, title TEXT NOT NULL, cwd TEXT, native_session TEXT,
                    effort TEXT, permissions TEXT NOT NULL DEFAULT 'read-only',
-                   workspace TEXT NOT NULL DEFAULT 'project', workspace_id TEXT,
+                   workspace TEXT NOT NULL DEFAULT 'project', workspace_id TEXT, rewind TEXT,
                    revision INTEGER NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
                  CREATE INDEX threads_project ON threads(project, updated_ms DESC);
                  CREATE TABLE messages(id TEXT PRIMARY KEY,
@@ -868,7 +945,8 @@ impl Store {
                    model TEXT NOT NULL, stream_seq INTEGER NOT NULL DEFAULT 0, stop_reason TEXT,
                    error TEXT, operation_id TEXT, created_ms INTEGER NOT NULL,
                    activity TEXT, usage TEXT, changes TEXT, error_kind TEXT, retry_at_ms INTEGER,
-                   checkpoint_before TEXT, checkpoint_after TEXT, UNIQUE(thread_id, seq));
+                   checkpoint_before TEXT, checkpoint_after TEXT, native_turn TEXT,
+                   UNIQUE(thread_id, seq));
                  CREATE TABLE receipts(operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
                    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
                    result TEXT NOT NULL, created_ms INTEGER NOT NULL);
@@ -1716,6 +1794,203 @@ impl Store {
         tx.commit().map_err(db_err)?;
         Ok(revision)
     }
+
+    /// Assistant replies after the user message `message_id`, newest first,
+    /// with their checkpoints when they have changes that are not undone.
+    pub fn later_checkpoints(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<(String, Checkpoint)>, String> {
+        let seq = user_seq(&self.db, thread_id, message_id)?;
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .db
+                .prepare(
+                    "SELECT id FROM messages WHERE thread_id=?1 AND seq>?2 AND role='assistant' AND changes IS NOT NULL ORDER BY seq DESC",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(params![thread_id, seq], |r| r.get(0))
+                .map_err(db_err)?;
+            rows.collect::<rusqlite::Result<_>>().map_err(db_err)?
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Ok(cp) = self.turn_checkpoint(thread_id, &id)
+                && !cp.changes.undone
+            {
+                out.push((id, cp));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes the user message `req.message_id` and everything after it, and
+    /// records how the agent session follows (`cli` names the thread's CLI).
+    /// Attachment files of removed messages are deleted after the commit.
+    pub fn rewind(&mut self, req: &ThreadRewind, cli: Option<&str>) -> Result<Rewound, String> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
+        let thread = get_thread(&tx, &req.thread_id)?;
+        if thread.revision != req.expected_revision {
+            return Err("This thread changed in another view. Reload and try again.".into());
+        }
+        if thread.streaming {
+            return Err("Stop the reply before editing a message.".into());
+        }
+        let seq = user_seq(&tx, &req.thread_id, &req.message_id)?;
+        let turn_at = |at: i64| -> Result<Option<String>, String> {
+            tx.query_row(
+                "SELECT native_turn FROM messages WHERE thread_id=?1 AND seq=?2 AND role='assistant'",
+                params![req.thread_id, at],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(db_err)
+        };
+        let earlier: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id=?1 AND seq<?2)",
+                params![req.thread_id, seq],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        let session: Option<String> = tx
+            .query_row(
+                "SELECT native_session FROM threads WHERE id=?1",
+                [&req.thread_id],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        // The Claude cursor is the last reply kept; the Codex turn is the first one removed.
+        let native = match (cli, session.is_some()) {
+            (Some("claude"), true) => turn_at(seq - 1)?.map(PendingRewind::ClaudeAt),
+            (Some("codex"), true) => turn_at(seq + 1)?.map(PendingRewind::CodexBefore),
+            _ => None,
+        };
+        let (context, pending, keep_session) = match thread.kind {
+            ThreadKind::Api => (RewindContext::Api, None, true),
+            ThreadKind::Cli if !earlier => (RewindContext::Fresh, None, false),
+            ThreadKind::Cli => match native {
+                Some(p) => (RewindContext::Native, Some(p), true),
+                None => (RewindContext::Replay, Some(PendingRewind::Replay), false),
+            },
+        };
+        let removed: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM messages WHERE thread_id=?1 AND seq>?2 AND role='assistant'",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(params![req.thread_id, seq], |r| r.get(0))
+                .map_err(db_err)?;
+            rows.collect::<rusqlite::Result<_>>().map_err(db_err)?
+        };
+        let files: Vec<Attachment> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT a.id,a.name,a.mime,a.kind,a.size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.thread_id=?1 AND m.seq>=?2",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(params![req.thread_id, seq], attachment_row)
+                .map_err(db_err)?;
+            rows.collect::<rusqlite::Result<_>>().map_err(db_err)?
+        };
+        tx.execute(
+            "DELETE FROM messages WHERE thread_id=?1 AND seq>=?2",
+            params![req.thread_id, seq],
+        )
+        .map_err(db_err)?;
+        // Receipts would replay sends whose messages no longer exist.
+        tx.execute("DELETE FROM receipts WHERE thread_id=?1", [&req.thread_id])
+            .map_err(db_err)?;
+        tx.execute(
+            "UPDATE threads SET rewind=?2, native_session=CASE WHEN ?3 THEN native_session END, revision=revision+1, updated_ms=?4 WHERE id=?1",
+            params![
+                req.thread_id,
+                pending.as_ref().map(PendingRewind::encode),
+                keep_session,
+                now_ms() as i64
+            ],
+        )
+        .map_err(db_err)?;
+        let thread = get_thread(&tx, &req.thread_id)?;
+        tx.commit().map_err(db_err)?;
+        remove_files(&self.dir, &files);
+        Ok(Rewound {
+            thread,
+            context,
+            removed,
+        })
+    }
+
+    pub fn pending_rewind(&self, thread_id: &str) -> Result<Option<PendingRewind>, String> {
+        let value: Option<String> = self
+            .db
+            .query_row("SELECT rewind FROM threads WHERE id=?1", [thread_id], |r| {
+                r.get(0)
+            })
+            .map_err(db_err)?;
+        Ok(value.as_deref().and_then(PendingRewind::decode))
+    }
+
+    pub fn set_pending_rewind(
+        &self,
+        thread_id: &str,
+        pending: Option<&PendingRewind>,
+    ) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE threads SET rewind=?2 WHERE id=?1",
+                params![thread_id, pending.map(PendingRewind::encode)],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// The agent's id for the end of this reply: a Claude message uuid or a Codex turn id.
+    pub fn set_native_turn(&self, message_id: &str, turn: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE messages SET native_turn=?2 WHERE id=?1",
+                params![message_id, turn],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// User messages and finished replies before `seq`, oldest first, for a replay.
+    pub fn transcript(&self, thread_id: &str, seq: u64) -> Result<Vec<(Role, String)>, String> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT role, content FROM messages WHERE thread_id=?1 AND seq<?2 AND content<>'' AND (role='user' OR state IN('completed','stopped')) ORDER BY seq",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![thread_id, seq as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
+        rows.map(|r| {
+            let (role, content) = r.map_err(db_err)?;
+            Ok((
+                if role == "user" {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content,
+            ))
+        })
+        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -2073,6 +2348,113 @@ mod tests {
             usage: None,
             checkpoint: None,
         }
+    }
+
+    /// Three finished turns on a CLI thread with a native session; returns the user messages.
+    fn cli_turns(s: &mut Store) -> (ThreadSummary, Vec<ThreadSendAccepted>) {
+        let mut req = create_req("rw");
+        req.cwd = Some("/work".into());
+        let t = s.create(&req, "T", ThreadKind::Cli).unwrap();
+        s.set_native_session(&t.thread_id, Some("sess")).unwrap();
+        let mut sent = Vec::new();
+        for n in 0..3 {
+            let t = s.thread(&t.thread_id).unwrap();
+            let a = begin(s, &t, &format!("rw{n}"), &format!("q{n}"));
+            s.finish(
+                &t.thread_id,
+                &a.assistant.message_id,
+                &done(&format!("a{n}")),
+            )
+            .unwrap();
+            s.set_native_turn(&a.assistant.message_id, &format!("turn{n}"))
+                .unwrap();
+            sent.push(a);
+        }
+        (s.thread(&t.thread_id).unwrap(), sent)
+    }
+
+    fn rewind_req(t: &ThreadSummary, message: &ThreadSendAccepted) -> ThreadRewind {
+        ThreadRewind {
+            thread_id: t.thread_id.clone(),
+            message_id: message.user.message_id.clone(),
+            expected_revision: t.revision,
+            restore_files: false,
+        }
+    }
+
+    #[test]
+    fn rewind_truncates_and_records_the_native_resume_point() {
+        let (_d, mut s) = open();
+        let (t, sent) = cli_turns(&mut s);
+        // Claude keeps the reply before the edited message; Codex reverts the edited turn.
+        let done = s.rewind(&rewind_req(&t, &sent[1]), Some("claude")).unwrap();
+        assert_eq!(done.context, RewindContext::Native);
+        assert_eq!(done.removed.len(), 2);
+        assert!(done.thread.revision > t.revision);
+        let left: Vec<_> = s
+            .snapshot(&t.thread_id)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(left, ["q0", "a0"]);
+        assert_eq!(
+            s.pending_rewind(&t.thread_id).unwrap(),
+            Some(PendingRewind::ClaudeAt("turn0".into()))
+        );
+        assert_eq!(
+            s.native_session(&t.thread_id).unwrap().as_deref(),
+            Some("sess")
+        );
+        // The freed sequence numbers are reused by the next send.
+        let t = s.thread(&t.thread_id).unwrap();
+        let again = begin(&mut s, &t, "rw1", "q1 edited");
+        assert_eq!(again.user.seq, sent[1].user.seq);
+        assert_eq!(again.user.content, "q1 edited");
+
+        let (_d, mut s) = open();
+        let (t, sent) = cli_turns(&mut s);
+        s.rewind(&rewind_req(&t, &sent[1]), Some("codex")).unwrap();
+        assert_eq!(
+            s.pending_rewind(&t.thread_id).unwrap(),
+            Some(PendingRewind::CodexBefore("turn1".into()))
+        );
+    }
+
+    #[test]
+    fn rewind_without_a_native_point_replays_or_starts_fresh() {
+        let (_d, mut s) = open();
+        let (t, sent) = cli_turns(&mut s);
+        let done = s.rewind(&rewind_req(&t, &sent[2]), Some("kimi")).unwrap();
+        assert_eq!(done.context, RewindContext::Replay);
+        assert_eq!(
+            s.pending_rewind(&t.thread_id).unwrap(),
+            Some(PendingRewind::Replay)
+        );
+        assert_eq!(s.native_session(&t.thread_id).unwrap(), None);
+        let transcript = s.transcript(&t.thread_id, sent[2].user.seq).unwrap();
+        assert_eq!(transcript.len(), 4);
+        assert_eq!(transcript[3], (Role::Assistant, "a1".into()));
+
+        let t = s.thread(&t.thread_id).unwrap();
+        let done = s.rewind(&rewind_req(&t, &sent[0]), Some("claude")).unwrap();
+        assert_eq!(done.context, RewindContext::Fresh);
+        assert_eq!(s.pending_rewind(&t.thread_id).unwrap(), None);
+        assert!(s.snapshot(&t.thread_id).unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn rewind_rejects_stale_revisions_and_assistant_messages() {
+        let (_d, mut s) = open();
+        let (t, sent) = cli_turns(&mut s);
+        let mut stale = rewind_req(&t, &sent[1]);
+        stale.expected_revision -= 1;
+        assert!(s.rewind(&stale, Some("claude")).is_err());
+        let mut reply = rewind_req(&t, &sent[1]);
+        reply.message_id = sent[1].assistant.message_id.clone();
+        assert!(s.rewind(&reply, Some("claude")).is_err());
+        assert_eq!(s.snapshot(&t.thread_id).unwrap().messages.len(), 6);
     }
 
     #[test]
