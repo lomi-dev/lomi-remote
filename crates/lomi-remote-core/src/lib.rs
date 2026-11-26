@@ -3,7 +3,9 @@
 //! * [`frame`]: relay link frame codec, pinned by `test-vectors/relay-frames.v1.json`.
 //! * [`link`]: link client state machine for role `device` (sans-I/O).
 //! * [`session`]: the `POST /remote/session` startup request and response.
+//! * [`directory`]: on-device Host directory, merged with server data, sealed at rest.
 
+pub mod directory;
 pub mod frame;
 pub mod json;
 pub mod link;

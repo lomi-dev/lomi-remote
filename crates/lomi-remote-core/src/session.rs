@@ -156,6 +156,29 @@ fn token(o: &Object) -> R<RelayToken> {
     })
 }
 
+/// One Host entry, as in the startup response and in `inventory.changed` events.
+pub(crate) fn parse_host(h: &Object) -> R<HostEntry> {
+    Ok(HostEntry {
+        id: string(h, "hostId")?,
+        name: string(h, "name")?,
+        online: field(h, "online")?
+            .as_bool()
+            .ok_or(SessionError::Malformed)?,
+        access_epoch: string(h, "accessEpoch")?,
+        runtime_generation: string(h, "runtimeGeneration")?,
+        workspaces: array(h, "workspaces")?
+            .iter()
+            .map(|w| {
+                let w = element(w)?;
+                Ok(Workspace {
+                    id: string(w, "workspaceId")?,
+                    name: string(w, "name")?,
+                })
+            })
+            .collect::<R<_>>()?,
+    })
+}
+
 pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
     match status {
         200 => {}
@@ -173,28 +196,7 @@ pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
     let device = object(&root, "device")?;
     let hosts = array(&root, "hosts")?
         .iter()
-        .map(|h| {
-            let h = element(h)?;
-            Ok(HostEntry {
-                id: string(h, "hostId")?,
-                name: string(h, "name")?,
-                online: field(h, "online")?
-                    .as_bool()
-                    .ok_or(SessionError::Malformed)?,
-                access_epoch: string(h, "accessEpoch")?,
-                runtime_generation: string(h, "runtimeGeneration")?,
-                workspaces: array(h, "workspaces")?
-                    .iter()
-                    .map(|w| {
-                        let w = element(w)?;
-                        Ok(Workspace {
-                            id: string(w, "workspaceId")?,
-                            name: string(w, "name")?,
-                        })
-                    })
-                    .collect::<R<_>>()?,
-            })
-        })
+        .map(|h| parse_host(element(h)?))
         .collect::<R<_>>()?;
     Ok(SessionResponse {
         account: Account {
