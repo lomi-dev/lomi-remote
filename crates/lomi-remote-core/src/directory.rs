@@ -4,12 +4,18 @@
 //! the blob, keeps the key in the OS keystore and supplies the nonce.
 //!
 //! Merge rules: the server is authoritative. A session response or an
-//! `inventory.changed` snapshot replaces the Host list, but a Host entry never
-//! moves back to an older `(accessEpoch, runtimeGeneration)`, and a revoked Host
-//! cannot return below its revocation epoch. `presence` updates one known Host.
-//! `revoked` / `device.revoked` wipe the directory.
+//! `inventory.changed` snapshot (a full one: `seq` is ignored) replaces the Host
+//! list, but a Host entry never moves back to an older
+//! `(accessEpoch, runtimeGeneration)`, and a revoked Host cannot return below its
+//! revocation epoch. For an online Host the snapshot's workspaces are exact; an
+//! offline Host (listed without workspaces) keeps its last known ones. A workspace
+//! `workspaceEpoch` is an opaque UUID compared for equality only: a cached name is
+//! kept while the epoch is unchanged and dropped when it changes. `presence`
+//! updates one known Host; the READY state lists the published Hosts without
+//! workspaces ([`Directory::apply_ready_state`]). `revoked` wipes the directory.
 //!
-//! Blob format v1 (all integers big endian):
+//! Blob format v2 (v1 had decimal workspace epochs; a v1 blob is refused with
+//! [`Error::Version`] and must be discarded) (all integers big endian):
 //! `"LRDR" | version u8 | key_id u32 | nonce[24] | XChaCha20-Poly1305(plaintext) + tag[16]`.
 //! Associated data: header (first 9 bytes) | len u32 | account id | len u32 | device id.
 //! Plaintext: strict JSON in a fixed key order with Hosts sorted by id, so equal
@@ -28,7 +34,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 pub const NONCE_LEN: usize = 24;
 const MAGIC: &[u8; 4] = b"LRDR";
 const HEADER_LEN: usize = 9;
@@ -96,7 +102,8 @@ pub struct Workspace {
     pub id: String,
     /// Known only from the Host; kept across server snapshots, which carry no names.
     pub name: Option<String>,
-    pub epoch: u64,
+    /// Opaque UUID, equality only.
+    pub epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +160,7 @@ fn to_host(e: HostEntry) -> Result<Host, Error> {
                 return Err(Error::Malformed);
             }
             Ok(Workspace {
-                epoch: dec(&w.epoch)?,
+                epoch: w.epoch,
                 id: w.id,
                 name: w.name,
             })
@@ -228,11 +235,13 @@ impl Directory {
                 h.workspaces = old.workspaces.clone();
             } else {
                 for w in &mut h.workspaces {
-                    if let Some(o) = old.workspaces.iter().find(|o| o.id == w.id) {
+                    // A new epoch means a different workspace: its cached name does not carry over.
+                    if let Some(o) = old
+                        .workspaces
+                        .iter()
+                        .find(|o| o.id == w.id && o.epoch == w.epoch)
+                    {
                         w.name = w.name.take().or_else(|| o.name.clone());
-                        if o.epoch > w.epoch {
-                            *w = o.clone(); // older snapshot of this workspace
-                        }
                     }
                 }
             }
@@ -313,13 +322,61 @@ impl Directory {
         Ok(e)
     }
 
+    /// Merges the link's READY `state` (`{hosts: [{hostId, online, accessEpoch,
+    /// runtimeGeneration}]}`): the published Hosts, without workspaces. Hosts missing from it
+    /// are removed, known Hosts keep their workspaces and names, new ones start empty until
+    /// a session response or `inventory.changed` lists theirs. Nothing is changed on error.
+    pub fn apply_ready_state(&mut self, state: &Object) -> Result<Effect, Error> {
+        self.live()?;
+        let list = state
+            .get("hosts")
+            .and_then(Value::as_array)
+            .ok_or(Error::Malformed)?;
+        let mut hosts = Vec::new();
+        for v in list {
+            let o = v.as_object().ok_or(Error::Malformed)?;
+            hosts.push(Host {
+                id: str_of(o, "hostId")?.to_owned(),
+                name: None,
+                online: o
+                    .get("online")
+                    .and_then(Value::as_bool)
+                    .ok_or(Error::Malformed)?,
+                access_epoch: dec(str_of(o, "accessEpoch")?)?,
+                runtime_generation: dec(str_of(o, "runtimeGeneration")?)?,
+                workspaces: Vec::new(),
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if !hosts.iter().all(|h| seen.insert(h.id.clone())) {
+            return Err(Error::Malformed);
+        }
+        let mut next = self.clone();
+        let before = next.hosts.len();
+        next.hosts.retain(|id, _| seen.contains(id));
+        let mut changed = next.hosts.len() != before;
+        for mut h in hosts {
+            // `upsert` keeps names; carry the known workspaces so only availability changes.
+            if let Some(old) = next.hosts.get(&h.id) {
+                h.workspaces = old.workspaces.clone();
+            }
+            changed |= next.upsert(h);
+        }
+        *self = next;
+        Ok(if changed {
+            Effect::Changed
+        } else {
+            Effect::Unchanged
+        })
+    }
+
     /// Merges a relay EVENT (`LinkEvent::Server`). Unknown events are ignored.
     /// Nothing is changed on error.
     pub fn apply_event(&mut self, name: &str, data: &Object) -> Result<Effect, Error> {
         self.live()?;
         let mut next = self.clone();
         let e = match name {
-            "revoked" | "device.revoked" => {
+            "revoked" => {
                 self.wipe();
                 return Ok(Effect::Revoked);
             }
@@ -392,7 +449,7 @@ impl Directory {
                 if let Some(n) = &w.name {
                     o.insert("name".into(), n.clone().into());
                 }
-                o.insert("epoch".into(), w.epoch.to_string().into());
+                o.insert("epoch".into(), w.epoch.clone().into());
                 Value::Object(o)
             });
             o.insert("workspaces".into(), ws.collect::<Vec<_>>().into());
@@ -441,7 +498,7 @@ impl Directory {
                         Ok(Workspace {
                             id: str_of(w, "id")?.to_owned(),
                             name: opt_str(w, "name")?,
-                            epoch: dec(str_of(w, "epoch")?)?,
+                            epoch: str_of(w, "epoch")?.to_owned(),
                         })
                     })
                     .collect::<Result<_, Error>>()?,

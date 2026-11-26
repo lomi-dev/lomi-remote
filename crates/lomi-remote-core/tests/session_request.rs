@@ -9,7 +9,7 @@ fn body() -> serde_json::Value {
         "hosts": [{
             "hostId": "11111111-1111-4111-8111-111111111111", "online": true,
             "accessEpoch": "3", "runtimeGeneration": "7",
-            "workspaces": [{"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "4"}]
+            "workspaces": [{"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}]
         }],
         "device": {"state": "registered", "deviceId": "dev-1"},
         "futureField": {"ignored": true}
@@ -44,7 +44,10 @@ fn parses_one_response() {
     assert_eq!(r.relay.expires_at, 1794003600000);
     assert_eq!(r.hosts[0].name, None);
     assert_eq!(r.hosts[0].workspaces[0].name, None);
-    assert_eq!(r.hosts[0].workspaces[0].epoch, "4");
+    assert_eq!(
+        r.hosts[0].workspaces[0].epoch,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    );
     assert!(r.hosts[0].online && r.hosts[0].access_epoch == "3");
     assert_eq!(
         r.device,
@@ -106,8 +109,8 @@ fn server_body() -> serde_json::Value {
             {"hostId": "11111111-1111-4111-8111-111111111111", "online": true,
              "accessEpoch": "3", "runtimeGeneration": "18446744073709551615",
              "workspaces": [
-                {"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "1"},
-                {"workspaceId": "33333333-3333-4333-8333-333333333333", "workspaceEpoch": "0"}]},
+                {"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+                {"workspaceId": "33333333-3333-4333-8333-333333333333", "workspaceEpoch": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"}]},
             {"hostId": "44444444-4444-4444-8444-444444444444", "online": false,
              "accessEpoch": "1", "runtimeGeneration": "2", "workspaces": []}
         ],
@@ -144,7 +147,16 @@ fn parses_server_shaped_session_without_names() {
     assert_eq!(parse(200, &v).unwrap().device, DeviceState::Unregistered);
     v["device"] = json!({"state": "revoked"});
     assert_eq!(parse(200, &v).unwrap().device, DeviceState::Revoked);
-    // workspaceEpoch is required.
+    // workspaceEpoch is required and must be a lowercase UUID (a decimal counter is refused).
+    for bad in [
+        json!("1"),
+        json!("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
+        json!(7),
+    ] {
+        let mut v = server_body();
+        v["hosts"][0]["workspaces"][0]["workspaceEpoch"] = bad;
+        assert_eq!(parse(200, &v), Err(SessionError::Malformed));
+    }
     let mut v = server_body();
     v["hosts"][0]["workspaces"][0]
         .as_object_mut()

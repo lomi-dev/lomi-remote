@@ -5,7 +5,8 @@
 //!
 //! Shapes follow the server (`auth-app` `src/remote/api/session.ts`). The server
 //! knows no Host or workspace names (they come from the Host), so names are
-//! optional. Times are Unix ms; epochs and generations are decimal strings.
+//! optional. Times are Unix ms; access epochs and runtime generations are decimal strings;
+//! workspace epochs are opaque UUIDs.
 //! Unknown fields in the response are ignored; missing or mistyped ones are an error.
 
 use crate::json::{self, Object};
@@ -69,7 +70,7 @@ pub struct Workspace {
     pub id: String,
     /// Not sent by the server; known only from the Host.
     pub name: Option<String>,
-    /// Decimal string.
+    /// Opaque lowercase UUID: a different value means the workspace was replaced or reshared.
     pub epoch: String,
 }
 
@@ -146,6 +147,19 @@ fn opt_string(o: &Object, k: &str) -> R<Option<String>> {
         .map(|v| v.as_str().map(str::to_owned).ok_or(SessionError::Malformed))
         .transpose()
 }
+fn uuid(o: &Object, k: &str) -> R<String> {
+    let s = string(o, k)?;
+    let ok = s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        });
+    if ok {
+        Ok(s)
+    } else {
+        Err(SessionError::Malformed)
+    }
+}
 fn uint(o: &Object, k: &str) -> R<u64> {
     field(o, k)?
         .as_u64()
@@ -185,7 +199,7 @@ pub(crate) fn parse_host(h: &Object) -> R<HostEntry> {
                 Ok(Workspace {
                     id: string(w, "workspaceId")?,
                     name: opt_string(w, "name")?,
-                    epoch: string(w, "workspaceEpoch")?,
+                    epoch: uuid(w, "workspaceEpoch")?,
                 })
             })
             .collect::<R<_>>()?,

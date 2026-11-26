@@ -7,6 +7,8 @@ use serde_json::Value;
 
 const ACC: &str = "acc-1";
 const DEV: &str = "dev-1";
+const EP1: &str = "11111111-1111-4111-8111-111111111111";
+const EP2: &str = "22222222-2222-4222-8222-222222222222";
 const N: [u8; NONCE_LEN] = [7; NONCE_LEN];
 
 fn key(id: u32, b: u8) -> Key {
@@ -16,7 +18,7 @@ fn key(id: u32, b: u8) -> Key {
 fn host(id: &str, epoch: u64, generation: u64, online: bool, ws: &[&str]) -> String {
     let ws: Vec<String> = ws
         .iter()
-        .map(|w| format!(r#"{{"workspaceId":"{w}","workspaceEpoch":"1"}}"#))
+        .map(|w| format!(r#"{{"workspaceId":"{w}","workspaceEpoch":"{EP1}"}}"#))
         .collect();
     format!(
         r#"{{"hostId":"{id}","online":{online},"accessEpoch":"{epoch}","runtimeGeneration":"{generation}","workspaces":[{}]}}"#,
@@ -225,10 +227,10 @@ fn tamper_and_wrong_binding_are_rejected() {
 fn version_mismatch_is_reported_before_decrypting() {
     let k = key(1, 9);
     let mut blob = loaded().seal(&k, N).unwrap();
-    blob[4] = 2;
+    blob[4] = 9;
     assert_eq!(
         Directory::open(&blob, ACC, DEV, &[k], 0),
-        Err(Error::Version(2))
+        Err(Error::Version(9))
     );
 }
 
@@ -328,38 +330,158 @@ fn names_survive_snapshots_and_offline_hosts_keep_workspaces() {
 }
 
 #[test]
-fn workspace_epoch_is_monotonic() {
-    let ws = |epoch: u64| {
+fn workspace_epoch_is_identity_not_order() {
+    let ws = |epoch: &str| {
         format!(
             r#"{{"hostId":"h1","online":true,"accessEpoch":"1","runtimeGeneration":"1","workspaces":[{{"workspaceId":"w","workspaceEpoch":"{epoch}"}}]}}"#
         )
     };
     let mut d = Directory::new(ACC, DEV);
-    d.apply_session(&session(ACC, DEV, &[ws(5)])).unwrap();
+    d.apply_session(&session(ACC, DEV, &[ws(EP1)])).unwrap();
     d.set_workspace_name("h1", "w", "keep");
+    // Same epoch: name kept, nothing to store.
     assert_eq!(
-        d.apply_session(&session(ACC, DEV, &[ws(4)])),
+        d.apply_session(&session(ACC, DEV, &[ws(EP1)])),
         Ok(Effect::Unchanged)
     );
-    assert_eq!(d.host("h1").unwrap().workspaces[0].epoch, 5);
     assert_eq!(
-        d.apply_session(&session(ACC, DEV, &[ws(6)])),
+        d.host("h1").unwrap().workspaces[0].name.as_deref(),
+        Some("keep")
+    );
+    // Another epoch (either direction): the workspace was replaced, its cached name is dropped.
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[ws(EP2)])),
         Ok(Effect::Changed)
     );
     let w = &d.host("h1").unwrap().workspaces[0];
-    assert_eq!((w.epoch, w.name.as_deref()), (6, Some("keep")));
+    assert_eq!((w.epoch.as_str(), w.name.as_deref()), (EP2, None));
+    d.apply_session(&session(ACC, DEV, &[ws(EP1)])).unwrap();
+    assert_eq!(d.host("h1").unwrap().workspaces[0].epoch, EP1);
+}
+
+const VECTORS: &str = include_str!("../test-vectors/relay-frames.v1.json");
+
+/// (event name, data) of a vendored relay vector: type byte 0x03 then the JSON object.
+fn vector_event(name: &str) -> (String, lomi_remote_core::json::Object) {
+    let d: Value = serde_json::from_str(VECTORS).unwrap();
+    let v = d["valid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap();
+    let hex = v["hex"].as_str().unwrap();
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    assert_eq!(bytes[0], 0x03);
+    let Value::Object(o) = json::parse(std::str::from_utf8(&bytes[1..]).unwrap()).unwrap() else {
+        panic!()
+    };
+    (
+        o["name"].as_str().unwrap().to_owned(),
+        o["data"].as_object().unwrap().clone(),
+    )
+}
+
+const H1: &str = "11111111-1111-4111-8111-111111111111";
+const H2: &str = "22222222-2222-4222-8222-222222222222";
+
+#[test]
+fn server_link_events_from_vectors() {
+    let mut d = Directory::new(ACC, DEV);
+    let apply = |d: &mut Directory, n: &str| {
+        let (name, data) = vector_event(n);
+        d.apply_event(&name, &data)
+    };
+    // Full snapshot with `seq`: H1 online with a workspace, H2 offline without any.
+    assert_eq!(
+        apply(&mut d, "event-inventory-changed"),
+        Ok(Effect::Changed)
+    );
+    assert_eq!(d.host(H1).unwrap().workspaces[0].epoch, EP1);
+    assert!(!d.host(H2).unwrap().online && d.host(H2).unwrap().workspaces.is_empty());
+    assert_eq!(
+        apply(&mut d, "event-inventory-changed"),
+        Ok(Effect::Unchanged)
+    );
+    // presence {H1 offline, epoch 3, generation 7} equals the snapshot's stamp: availability only.
+    assert_eq!(apply(&mut d, "event-presence"), Ok(Effect::Changed));
+    assert!(!d.host(H1).unwrap().online);
+    assert_eq!(d.host(H1).unwrap().workspaces.len(), 1);
+    // host.revoked {seq, hostId, accessEpoch 3}: removed; the same epoch cannot come back.
+    assert_eq!(
+        apply(&mut d, "event-host-revoked-device"),
+        Ok(Effect::Changed)
+    );
+    assert!(d.host(H1).is_none());
+    assert_eq!(
+        apply(&mut d, "event-inventory-changed"),
+        Ok(Effect::Unchanged)
+    );
+    assert!(d.host(H1).is_none() && d.host(H2).is_some());
+    // device.revoked is for Hosts: no effect here. authority.fresh too.
+    assert_eq!(apply(&mut d, "event-device-revoked"), Ok(Effect::Unchanged));
+    assert_eq!(
+        apply(&mut d, "event-authority-fresh"),
+        Ok(Effect::Unchanged)
+    );
+    // revoked {seq}: wipe.
+    assert_eq!(apply(&mut d, "event-revoked"), Ok(Effect::Revoked));
+    assert!(d.is_wiped());
 }
 
 #[test]
-fn degraded_answer_cannot_reach_the_directory() {
-    // The type system keeps it out (apply_session takes a full response); the directory
-    // stays as it was while the caller persists the new credentials and retries.
-    let d = loaded();
+fn ready_state_is_availability_only() {
+    let mut d = Directory::new(ACC, DEV);
+    d.apply_session(&session(
+        ACC,
+        DEV,
+        &[
+            host("h1", 3, 7, true, &["a"]),
+            host("h2", 1, 1, true, &["b"]),
+        ],
+    ))
+    .unwrap();
+    d.set_host_name("h1", "Mac");
+    let state = |hosts: &str| event(&format!(r#"{{"hosts":[{hosts}]}}"#));
+    let e = |id: &str, on: bool, ep: u32, g: u32| {
+        format!(
+            r#"{{"hostId":"{id}","online":{on},"accessEpoch":"{ep}","runtimeGeneration":"{g}"}}"#
+        )
+    };
+    // h1 went offline, h2 is no longer published, h3 is new (no workspaces yet).
+    let s = state(&format!("{},{}", e("h1", false, 3, 8), e("h3", true, 1, 1)));
+    assert_eq!(d.apply_ready_state(&s), Ok(Effect::Changed));
+    let h1 = d.host("h1").unwrap();
+    assert!(!h1.online && h1.workspaces.len() == 1 && h1.name.as_deref() == Some("Mac"));
+    assert!(d.host("h2").is_none());
+    assert!(d.host("h3").unwrap().workspaces.is_empty());
+    assert_eq!(d.apply_ready_state(&s), Ok(Effect::Unchanged));
+    // A stale READY (older generation) does not move h1 back; malformed leaves the directory alone.
     let before = d.clone();
-    let body = r#"{"degraded":true,"reason":"SERVICE_UNAVAILABLE","accessToken":{"token":"a","expiresAt":1},"refreshCredential":"s.r"}"#;
-    assert!(matches!(
-        parse_session_response(200, body.as_bytes()),
-        Ok(SessionOutcome::Degraded { .. })
-    ));
-    assert_eq!(d, before);
+    assert_eq!(
+        d.apply_ready_state(&state(&e("h1", true, 3, 2))),
+        Ok(Effect::Changed)
+    ); // h3 dropped
+    assert!(!d.host("h1").unwrap().online);
+    let mut d2 = before.clone();
+    assert_eq!(
+        d2.apply_ready_state(&event(r#"{"hosts":[{"hostId":"h1"}]}"#)),
+        Err(Error::Malformed)
+    );
+    assert_eq!(d2, before);
+}
+
+#[test]
+fn v1_blob_is_refused_by_version() {
+    let k = key(1, 9);
+    let mut blob = loaded().seal(&k, N).unwrap();
+    assert_eq!(blob[4], 2);
+    blob[4] = 1;
+    assert_eq!(
+        Directory::open(&blob, ACC, DEV, &[k], 0),
+        Err(Error::Version(1))
+    );
 }
