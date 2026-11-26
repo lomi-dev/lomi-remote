@@ -62,6 +62,42 @@ impl RelayTransport {
         })
     }
 
+    /// DNS, one TCP attempt, verified TLS and the WebSocket upgrade for `url`,
+    /// all inside `state`'s bound. Shared by the channel and uplink connects.
+    fn open(&self, url: &str, state: &Arc<budget::State>) -> Result<Socket> {
+        let uri: tungstenite::http::Uri = url.parse().map_err(|_| Error::InvalidConfig)?;
+        let host = uri.host().ok_or(Error::InvalidConfig)?;
+        let port = uri.port_u16().unwrap_or(443);
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
+            .map_err(|_| Error::InvalidConfig)?;
+        let addresses = resolver::relay_addresses(host, port, state)?;
+        // Exactly one TCP attempt. No hidden fallback/reconnect/replay.
+        let address = addresses.into_iter().next().ok_or(Error::Network)?;
+        let tcp = budget::connect_socket(address, state, state.deadline())
+            .map_err(crate::network_error)?;
+        tcp.set_nodelay(true).map_err(|_| Error::Network)?;
+        let connection = rustls::ClientConnection::new(self.tls.clone(), server_name)
+            .map_err(|_| Error::InvalidConfig)?;
+        let stream = rustls::StreamOwned::new(
+            connection,
+            RelaySocket {
+                tcp,
+                state: Some(state.clone()),
+                polling: false,
+            },
+        );
+        // client_with_config uses this exact verified TLS stream, never its
+        // own DNS/connect/TLS/redirect convenience path. All handshake errors
+        // are immediately collapsed; no response headers/body escape.
+        let (socket, _) =
+            tungstenite::client::client_with_config(url, stream, Some(config(READY_LIMIT)))
+                .map_err(|error| match error {
+                    tungstenite::HandshakeError::Failure(error) => ws_error(error),
+                    tungstenite::HandshakeError::Interrupted(_) => Error::Network,
+                })?;
+        Ok(socket)
+    }
+
     /// The timestamp is captured BEFORE requesting the one-use ticket, never
     /// when this method starts. DNS/TCP/TLS/upgrade/admission/ready all share
     /// min(original deadline, ticket request start + expires_in_ms). A failed
@@ -103,43 +139,7 @@ impl RelayTransport {
             if body.len() > ADMISSION_LIMIT {
                 return Err(Error::Request);
             }
-            let uri: tungstenite::http::Uri = self
-                .endpoint
-                .as_str()
-                .parse()
-                .map_err(|_| Error::InvalidConfig)?;
-            let host = uri.host().ok_or(Error::InvalidConfig)?;
-            let port = uri.port_u16().unwrap_or(443);
-            let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
-                .map_err(|_| Error::InvalidConfig)?;
-            let addresses = resolver::relay_addresses(host, port, &state)?;
-            // Exactly one TCP attempt. No hidden fallback/reconnect/replay.
-            let address = addresses.into_iter().next().ok_or(Error::Network)?;
-            let tcp = budget::connect_socket(address, &state, state.deadline())
-                .map_err(crate::network_error)?;
-            tcp.set_nodelay(true).map_err(|_| Error::Network)?;
-            let connection = rustls::ClientConnection::new(self.tls.clone(), server_name)
-                .map_err(|_| Error::InvalidConfig)?;
-            let stream = rustls::StreamOwned::new(
-                connection,
-                RelaySocket {
-                    tcp,
-                    state: Some(state.clone()),
-                    polling: false,
-                },
-            );
-            // client_with_config uses this exact verified TLS stream, never its
-            // own DNS/connect/TLS/redirect convenience path. All handshake errors
-            // are immediately collapsed; no response headers/body escape.
-            let (mut socket, _) = tungstenite::client::client_with_config(
-                self.endpoint.as_str(),
-                stream,
-                Some(config(READY_LIMIT)),
-            )
-            .map_err(|error| match error {
-                tungstenite::HandshakeError::Failure(error) => ws_error(error),
-                tungstenite::HandshakeError::Interrupted(_) => Error::Network,
-            })?;
+            let mut socket = self.open(self.endpoint.as_str(), &state)?;
             state.check()?;
             socket
                 .send(Message::Text(body.as_str().into()))
@@ -166,6 +166,38 @@ impl RelayTransport {
             Ok(RelayConnection {
                 socket: Some(socket),
                 ready_deadline: Some(deadline),
+            })
+        })
+    }
+}
+impl RelayTransport {
+    /// Opens the Remote 1.0 uplink socket: the same verified TLS and upgrade as
+    /// a channel, on the `/relay` path of the configured relay host, with no
+    /// admission text frame. Every later message is a binary link frame. One TCP
+    /// attempt; the uplink thread owns retry and backoff.
+    pub fn connect_link(
+        &self,
+        original_deadline: Instant,
+        check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
+    ) -> Result<RelayConnection> {
+        let url = self
+            .endpoint
+            .as_str()
+            .strip_suffix("/v2/relay")
+            .map(|base| format!("{base}/relay"))
+            .ok_or(Error::InvalidConfig)?;
+        budget::run(original_deadline, check, |state| {
+            state.check()?;
+            let mut socket = self.open(&url, &state)?;
+            socket.set_config(|c| {
+                c.max_message_size = Some(MAX_TRANSPORT_FRAME_LEN);
+                c.max_frame_size = Some(MAX_TRANSPORT_FRAME_LEN);
+            });
+            state.check()?;
+            socket.get_mut().sock.state = None;
+            Ok(RelayConnection {
+                socket: Some(socket),
+                ready_deadline: None,
             })
         })
     }

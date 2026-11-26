@@ -20,6 +20,7 @@ mod budget_api;
 pub mod diagnostics;
 mod relay;
 mod resolver;
+pub mod uplink;
 pub use data::{DataFailure, DataTransport, RemoteApiOrigin};
 pub use relay::{RelayConnection, RelayTransport, relay_bytes_read};
 

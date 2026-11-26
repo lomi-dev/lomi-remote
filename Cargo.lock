@@ -2231,6 +2231,7 @@ dependencies = [
  "libc",
  "log",
  "lomi-host-auth",
+ "lomi-remote-core",
  "lomi-remote-protocol",
  "rustls",
  "serde",
