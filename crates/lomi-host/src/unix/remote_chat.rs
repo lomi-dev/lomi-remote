@@ -2383,8 +2383,13 @@ printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","del
             stream_seq: 3,
             stop_reason: None,
             error: None,
+            error_kind: None,
+            retry_at_ms: None,
             created_ms: 1,
             attachments: vec![],
+            activity: vec![],
+            usage: None,
+            changes: None,
         };
         let dto = to_message(&m).unwrap();
         assert!(dto.truncated && dto.content.as_str().len() <= CHAT_MESSAGE_CONTENT_BYTES);
@@ -2487,8 +2492,13 @@ printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","del
             stream_seq: 1,
             stop_reason: None,
             error: None,
+            error_kind: None,
+            retry_at_ms: None,
             created_ms: 1,
             attachments: vec![],
+            activity: vec![],
+            usage: None,
+            changes: None,
         };
         for unit in ["\"", "\n", "\u{1}", "\\", "\u{7f}é"] {
             let m = make(unit.repeat(CHAT_MESSAGE_CONTENT_BYTES), 2);

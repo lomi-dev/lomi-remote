@@ -1,9 +1,11 @@
 //! threads.sqlite: thread index, API messages and idempotency receipts.
 use crate::attachments::{self, Attachment};
 use crate::checkpoint::FileChange;
+use crate::errors::{self, ErrorKind};
 use crate::settings::{Permissions, Workspace};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const APPLICATION_ID: i64 = 0x4C4D_4348;
@@ -71,6 +73,10 @@ pub enum ActivityKind {
     Execute,
     Fetch,
     Agent,
+    /// Machine-titled system note (`context_reset`, `checkpoint_unavailable`); the UI translates the title.
+    Notice,
+    /// A question the CLI asked the user; see [`Activity::question`].
+    Question,
     Other,
 }
 
@@ -106,6 +112,60 @@ pub struct Activity {
     /// Tool-permission prompt of a persistent Claude session, if one was raised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// Question asked through `AskUserQuestion` (Claude) or `requestUserInput` (Codex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Box<Question>>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionState {
+    Pending,
+    Answered,
+    Declined,
+    Expired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionItem {
+    /// Key of the answer; Claude has no ids, so it is the question text.
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+    /// Free text is accepted besides the options.
+    pub allow_other: bool,
+    /// The answer is a secret: it is sent to the CLI but never stored.
+    #[serde(default)]
+    pub secret: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub request_id: String,
+    pub items: Vec<QuestionItem>,
+    pub state: QuestionState,
+    /// Chosen labels or free text by item id, once answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<HashMap<String, Vec<String>>>,
+}
+
+/// A slash command the CLI offers; sent as plain message text.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadCommand {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,8 +204,11 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
+/// Largest page a client may request.
+pub const MAX_PAGE: usize = 500;
 pub const MAX_ACTIVITIES: usize = 500;
 pub const DETAIL_CAP: usize = 4096;
+pub const MAX_QUESTIONS: usize = 8;
 pub const DIFF_CAP: usize = 16 * 1024;
 
 /// Truncates to at most `max` bytes on a char boundary.
@@ -164,6 +227,14 @@ impl Activity {
     pub fn clamp(&mut self) {
         if let Some(d) = &mut self.detail {
             truncate_utf8(d, DETAIL_CAP);
+        }
+        // Question texts stay whole (Claude keys its answers by them); only the count is bounded.
+        if let Some(q) = &mut self.question {
+            q.items.truncate(MAX_QUESTIONS);
+            for o in q.items.iter_mut().flat_map(|i| &mut i.options) {
+                truncate_utf8(&mut o.label, 512);
+                truncate_utf8(&mut o.description, 512);
+            }
         }
         if let Some(d) = &mut self.diff {
             truncate_utf8(&mut d.after, DIFF_CAP);
@@ -187,6 +258,12 @@ pub struct ThreadMessage {
     pub stream_seq: u64,
     pub stop_reason: Option<String>,
     pub error: Option<String>,
+    /// Class of `error` on a failed turn.
+    #[serde(default)]
+    pub error_kind: Option<ErrorKind>,
+    /// Epoch milliseconds at which a rate limit resets, when the CLI or API said.
+    #[serde(default)]
+    pub retry_at_ms: Option<u64>,
     pub created_ms: u64,
     /// Files of a user message; empty otherwise.
     #[serde(default)]
@@ -222,6 +299,44 @@ pub struct Checkpoint {
 pub struct ThreadSnapshot {
     pub thread: ThreadSummary,
     pub messages: Vec<ThreadMessage>,
+    /// Older messages exist beyond a limited snapshot.
+    #[serde(default)]
+    pub has_more: bool,
+}
+
+/// A page of older messages, oldest first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePage {
+    pub messages: Vec<ThreadMessage>,
+    pub has_more: bool,
+}
+
+/// In-memory state of the streaming assistant message; `seq` numbers the last
+/// delta included in `content`, so a subscriber drops deltas up to it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadLive {
+    pub message_id: String,
+    pub seq: u64,
+    pub content: String,
+    pub activity: Vec<Activity>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    Idle,
+    Running,
+    /// A tool-permission prompt or a question awaits an answer.
+    Waiting,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadStatus {
+    pub thread_id: String,
+    pub state: RunState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -399,7 +514,7 @@ fn enum_from<T: DeserializeOwned>(text: String) -> rusqlite::Result<T> {
 const THREAD_COLUMNS: &str = "id,project,kind,instance_id,model,title,cwd,revision,created_ms,updated_ms,\
     EXISTS(SELECT 1 FROM messages m WHERE m.thread_id=threads.id AND m.state IN('dispatching','streaming')),\
     effort,permissions,workspace,workspace_id";
-const MESSAGE_COLUMNS: &str = "id,seq,role,content,state,instance_id,model,stream_seq,stop_reason,error,created_ms,activity,usage,changes";
+const MESSAGE_COLUMNS: &str = "id,seq,role,content,state,instance_id,model,stream_seq,stop_reason,error,created_ms,activity,usage,changes,error_kind,retry_at_ms";
 
 fn summary_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadSummary> {
     Ok(ThreadSummary {
@@ -433,6 +548,10 @@ fn message_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadMessage> {
         stream_seq: r.get::<_, i64>(7)? as u64,
         stop_reason: r.get(8)?,
         error: r.get(9)?,
+        error_kind: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok()),
+        retry_at_ms: r.get::<_, Option<i64>>(15)?.map(|v| v as u64),
         created_ms: r.get::<_, i64>(10)? as u64,
         attachments: Vec::new(),
         activity: r
@@ -669,6 +788,8 @@ fn add_missing_columns(db: &Connection) -> Result<(), String> {
         ("messages", "activity", "TEXT"),
         ("messages", "usage", "TEXT"),
         ("messages", "changes", "TEXT"),
+        ("messages", "error_kind", "TEXT"),
+        ("messages", "retry_at_ms", "INTEGER"),
         ("messages", "checkpoint_before", "TEXT"),
         ("messages", "checkpoint_after", "TEXT"),
     ] {
@@ -741,7 +862,7 @@ impl Store {
                    content TEXT NOT NULL, state TEXT NOT NULL, instance_id TEXT NOT NULL,
                    model TEXT NOT NULL, stream_seq INTEGER NOT NULL DEFAULT 0, stop_reason TEXT,
                    error TEXT, operation_id TEXT, created_ms INTEGER NOT NULL,
-                   activity TEXT, usage TEXT, changes TEXT,
+                   activity TEXT, usage TEXT, changes TEXT, error_kind TEXT, retry_at_ms INTEGER,
                    checkpoint_before TEXT, checkpoint_after TEXT, UNIQUE(thread_id, seq));
                  CREATE TABLE receipts(operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
                    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
@@ -992,10 +1113,37 @@ impl Store {
     }
 
     pub fn snapshot(&self, id: &str) -> Result<ThreadSnapshot, String> {
+        self.snapshot_limited(id, None)
+    }
+
+    /// The whole thread, or only its newest `limit` messages (`has_more` then says if older ones exist).
+    pub fn snapshot_limited(
+        &self,
+        id: &str,
+        limit: Option<usize>,
+    ) -> Result<ThreadSnapshot, String> {
+        let thread = get_thread(&self.db, id)?;
+        let (messages, has_more) = match limit {
+            Some(n) => self.messages_page(id, None, n.clamp(1, MAX_PAGE))?,
+            None => (get_messages(&self.db, id)?, false),
+        };
         Ok(ThreadSnapshot {
-            thread: get_thread(&self.db, id)?,
-            messages: get_messages(&self.db, id)?,
+            thread,
+            messages,
+            has_more,
         })
+    }
+
+    /// Up to `limit` messages older than `before_seq`, oldest first.
+    pub fn messages_before(
+        &self,
+        id: &str,
+        before_seq: u64,
+        limit: usize,
+    ) -> Result<MessagePage, String> {
+        let (messages, has_more) =
+            self.messages_page(id, Some(before_seq), limit.clamp(1, MAX_PAGE))?;
+        Ok(MessagePage { messages, has_more })
     }
 
     pub fn create_replay(&self, req: &ThreadCreate) -> Result<Option<ThreadSummary>, String> {
@@ -1396,8 +1544,16 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
+        // Only failures are classified; the notes on truncated replies are not errors.
+        let (kind, retry) = match f.error.filter(|_| f.state == MessageState::Failed) {
+            Some(e) => {
+                let (k, r) = errors::classify(e, now_ms());
+                (Some(k.as_str()), r.map(|v| v as i64))
+            }
+            None => (None, None),
+        };
         tx.execute(
-            "UPDATE messages SET state=?2, content=?3, stream_seq=?4, stop_reason=?5, error=?6, activity=?7, usage=?8, changes=?9, checkpoint_before=?10, checkpoint_after=?11 WHERE id=?1",
+            "UPDATE messages SET state=?2, content=?3, stream_seq=?4, stop_reason=?5, error=?6, activity=?7, usage=?8, changes=?9, checkpoint_before=?10, checkpoint_after=?11, error_kind=?12, retry_at_ms=?13 WHERE id=?1",
             params![
                 message_id,
                 enum_text(&f.state),
@@ -1409,7 +1565,9 @@ impl Store {
                 json_opt(&f.usage, f.usage.is_none())?,
                 json_opt(&f.checkpoint.map(|c| &c.changes), f.checkpoint.is_none())?,
                 f.checkpoint.map(|c| &c.before),
-                f.checkpoint.map(|c| &c.after)
+                f.checkpoint.map(|c| &c.after),
+                kind,
+                retry
             ],
         )
         .map_err(db_err)?;
@@ -1449,10 +1607,21 @@ impl Store {
         }
     }
 
-    /// Flags a turn's changes as undone and bumps the thread revision; returns it.
-    pub fn mark_undone(&mut self, thread_id: &str, message_id: &str) -> Result<u64, String> {
+    /// Flags the `restored` files of a turn as undone and bumps the thread revision;
+    /// returns it. The turn counts as undone when `whole` (an undo of every file)
+    /// or when no file is left.
+    pub fn mark_undone(
+        &mut self,
+        thread_id: &str,
+        message_id: &str,
+        restored: &[String],
+        whole: bool,
+    ) -> Result<u64, String> {
         let mut changes = self.turn_checkpoint(thread_id, message_id)?.changes;
-        changes.undone = true;
+        for f in &mut changes.files {
+            f.undone |= restored.contains(&f.path);
+        }
+        changes.undone = whole || changes.files.iter().all(|f| f.undone);
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1831,6 +2000,55 @@ mod tests {
     }
 
     #[test]
+    fn limited_snapshot_and_older_pages() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("p"), "T", ThreadKind::Api).unwrap();
+        for n in 0..3 {
+            let t = s.thread(&t.thread_id).unwrap();
+            let a = begin(&mut s, &t, &format!("s{n}"), "q");
+            s.finish(&t.thread_id, &a.assistant.message_id, &done("a"))
+                .unwrap();
+        }
+        // Six messages, seq 1..=6.
+        let all = s.snapshot(&t.thread_id).unwrap();
+        assert_eq!((all.messages.len(), all.has_more), (6, false));
+        let newest = s.snapshot_limited(&t.thread_id, Some(2)).unwrap();
+        let seqs: Vec<u64> = newest.messages.iter().map(|m| m.seq).collect();
+        assert_eq!((seqs, newest.has_more), (vec![5, 6], true));
+        let page = s.messages_before(&t.thread_id, 5, 3).unwrap();
+        let seqs: Vec<u64> = page.messages.iter().map(|m| m.seq).collect();
+        assert_eq!((seqs, page.has_more), (vec![2, 3, 4], true));
+        let rest = s.messages_before(&t.thread_id, 2, 10).unwrap();
+        assert_eq!((rest.messages.len(), rest.has_more), (1, false));
+        assert!(s.messages_before("missing", 5, 3).is_err());
+    }
+
+    #[test]
+    fn failed_turns_store_their_error_kind() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("e"), "T", ThreadKind::Api).unwrap();
+        let a = begin(&mut s, &t, "s1", "q");
+        let mut f = done("");
+        f.state = MessageState::Failed;
+        let at = now_ms() / 1000 + 3600;
+        let text = format!("Claude AI usage limit reached|{at}");
+        f.error = Some(&text);
+        let (_, m) = s.finish(&t.thread_id, &a.assistant.message_id, &f).unwrap();
+        assert_eq!(m.error_kind, Some(ErrorKind::RateLimit));
+        assert_eq!(m.retry_at_ms, Some(at * 1000));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["errorKind"], "rate_limit");
+        assert_eq!(v["retryAtMs"], at * 1000);
+        // A size-limit note on a completed reply is not an error.
+        let t = s.thread(&t.thread_id).unwrap();
+        let b = begin(&mut s, &t, "s2", "q");
+        let mut f = done("x");
+        f.error = Some("Response exceeded the size limit and was truncated.");
+        let (_, m) = s.finish(&t.thread_id, &b.assistant.message_id, &f).unwrap();
+        assert_eq!((m.error_kind, m.retry_at_ms), (None, None));
+    }
+
+    #[test]
     fn receipts_hold_no_text_and_follow_the_thread() {
         let (_d, mut s) = open();
         let t = s.create(&create_req("c"), "T", ThreadKind::Api).unwrap();
@@ -2159,6 +2377,7 @@ mod tests {
                 after: "bye".into(),
             }),
             approval: None,
+            question: None,
         }
     }
 
@@ -2270,6 +2489,8 @@ mod tests {
                     additions: 2,
                     deletions: 1,
                     binary: false,
+                    agent: false,
+                    undone: false,
                 }],
                 undone: false,
             },
@@ -2284,7 +2505,10 @@ mod tests {
         assert_eq!(s.turn_checkpoint(&t.thread_id, &id).unwrap(), cp);
         assert!(s.turn_checkpoint("other", &id).is_err());
         let before = s.thread(&t.thread_id).unwrap().revision;
-        assert_eq!(s.mark_undone(&t.thread_id, &id).unwrap(), before + 1);
+        assert_eq!(
+            s.mark_undone(&t.thread_id, &id, &[], true).unwrap(),
+            before + 1
+        );
         let m = s.snapshot(&t.thread_id).unwrap().messages.pop().unwrap();
         assert!(m.changes.unwrap().undone);
     }

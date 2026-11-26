@@ -6,6 +6,7 @@ pub mod cli;
 pub mod cli_bin;
 pub mod codex_server;
 pub mod engine;
+pub mod errors;
 pub mod http;
 pub mod session;
 pub mod settings;

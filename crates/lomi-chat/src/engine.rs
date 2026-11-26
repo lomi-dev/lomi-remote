@@ -14,6 +14,7 @@ use crate::{
     storage::{self, Owner},
     store::{self, *},
 };
+use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -23,7 +24,14 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncReadExt, sync::Notify};
+use tokio::{
+    io::AsyncReadExt,
+    sync::{
+        Notify,
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        oneshot,
+    },
+};
 use zeroize::Zeroizing;
 
 const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
@@ -41,11 +49,36 @@ const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 /// Receives the events of one send. Delivery failures are the sink's to ignore.
 pub trait EventSink: Send + Sync {
     fn send(&self, event: ThreadStreamEvent);
+
+    /// Like [`EventSink::send`], false when the receiver is gone. Attached sinks
+    /// that fail are dropped; the default never fails.
+    fn try_send(&self, event: ThreadStreamEvent) -> bool {
+        self.send(event);
+        true
+    }
+}
+
+/// Stable error code of [`Engine::steer`] when the message cannot join the running turn.
+pub const STEER_UNSUPPORTED: &str = "steer_unsupported";
+/// Stable error code of [`Engine::steer`] when the line may have reached the CLI; the caller must not queue it again.
+pub const STEER_UNKNOWN: &str = "steer_unknown";
+/// How long a steer waits for the turn loop to deliver it.
+const STEER_WAIT: Duration = Duration::from_secs(10);
+/// After a Claude `result`, how long a steered turn waits for the queued turn's `init`.
+const STEER_GRACE: Duration = Duration::from_millis(1500);
+
+/// A message for the running turn, delivered by the turn loop.
+struct SteerReq {
+    text: String,
+    reply: oneshot::Sender<Result<(), String>>,
+    /// Set by the turn loop once the line was written to the CLI.
+    sent: Arc<AtomicBool>,
 }
 
 type ApiKeyFn = dyn Fn(&str) -> Result<Option<Zeroizing<String>>, String> + Send + Sync;
 type ChangedFn = dyn Fn(u64, &str) + Send + Sync;
 type ResolveFn = dyn Fn(&str) -> Option<PathBuf> + Send + Sync;
+type StatusFn = dyn Fn(&str, RunState) + Send + Sync;
 
 /// Host-provided pieces; the engine never touches a keyring or a UI.
 pub struct Hooks {
@@ -84,6 +117,28 @@ struct Shared {
     /// Persistent ACP agents (`agy acp`, `kimi acp`) by thread. Never held across `.await`.
     acp: Mutex<HashMap<String, Arc<AcpSession>>>,
     reaper: AtomicBool,
+    /// In-memory state of each running turn by thread. Never held across `.await`.
+    live: Mutex<HashMap<String, Arc<Mutex<LiveTurn>>>>,
+    /// Receives every change of a thread's [`RunState`]; set once by the host.
+    status: OnceLock<Box<StatusFn>>,
+    /// Slash commands each thread's CLI last reported. Never held across `.await`.
+    commands: Mutex<HashMap<String, Vec<ThreadCommand>>>,
+}
+
+/// What a client attaching mid-turn needs: the text and activities emitted so far.
+/// Events are sent while this is locked, so a read sees exactly the events up to `seq`.
+struct LiveTurn {
+    message_id: String,
+    seq: u64,
+    content: String,
+    activity: Vec<Activity>,
+    waiting: bool,
+    /// Extra subscribers of the turn ([`Engine::attach`]); they get every event after `seq`.
+    sinks: Vec<Arc<dyn EventSink>>,
+    /// The final event went out: nothing can attach any more.
+    done: bool,
+    /// Delivers a steering message to the turn loop; only Claude and Codex turns take one.
+    steer: Option<UnboundedSender<SteerReq>>,
 }
 
 /// Cheap to clone; clones share all state.
@@ -136,7 +191,132 @@ impl Engine {
             codex: Mutex::new(HashMap::new()),
             acp: Mutex::new(HashMap::new()),
             reaper: AtomicBool::new(false),
+            live: Mutex::new(HashMap::new()),
+            status: OnceLock::new(),
+            commands: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Registers the listener of thread run-state changes (first call wins).
+    pub fn on_status(&self, f: impl Fn(&str, RunState) + Send + Sync + 'static) {
+        let _ = self.0.status.set(Box::new(f));
+    }
+
+    fn emit_status(&self, thread_id: &str, state: RunState) {
+        if let Some(f) = self.0.status.get() {
+            f(thread_id, state);
+        }
+    }
+
+    /// Run state of one thread: idle, running, or waiting for a permission answer.
+    pub fn run_state(&self, thread_id: &str) -> RunState {
+        if !self.is_active(thread_id).unwrap_or(false) {
+            return RunState::Idle;
+        }
+        let turn = self
+            .0
+            .live
+            .lock()
+            .ok()
+            .and_then(|m| m.get(thread_id).cloned());
+        match turn.and_then(|t| t.lock().ok().map(|t| t.waiting)) {
+            Some(true) => RunState::Waiting,
+            _ => RunState::Running,
+        }
+    }
+
+    /// The streaming assistant message of `thread_id` as held in memory, or `None`.
+    /// A client that subscribed to the stream first drops deltas with `seq <= live.seq`.
+    pub fn live(&self, thread_id: &str) -> Option<ThreadLive> {
+        let turn = self.0.live.lock().ok()?.get(thread_id).cloned()?;
+        let t = turn.lock().ok()?;
+        Some(ThreadLive {
+            message_id: t.message_id.clone(),
+            seq: t.seq,
+            content: t.content.clone(),
+            activity: t.activity.clone(),
+        })
+    }
+
+    /// [`Engine::live`] plus a subscription: `sink` gets every later event of the
+    /// running turn, up to and including its final one. `None` when no turn runs.
+    pub fn attach(&self, thread_id: &str, sink: Arc<dyn EventSink>) -> Option<ThreadLive> {
+        let turn = self.0.live.lock().ok()?.get(thread_id).cloned()?;
+        let mut t = turn.lock().ok()?;
+        if t.done {
+            return None;
+        }
+        t.sinks.push(sink);
+        Some(ThreadLive {
+            message_id: t.message_id.clone(),
+            seq: t.seq,
+            content: t.content.clone(),
+            activity: t.activity.clone(),
+        })
+    }
+
+    /// Adds `text` to the running turn. Fails with [`STEER_UNSUPPORTED`] when the CLI
+    /// cannot take it (API, one-shot, ACP) or no turn runs; the caller then queues it.
+    pub async fn steer(&self, thread_id: &str, text: String) -> Result<(), String> {
+        let text = text.trim().to_string();
+        if text.is_empty() || text.len() > MAX_TEXT {
+            return Err("Invalid message.".into());
+        }
+        let tx = {
+            let turn = self
+                .0
+                .live
+                .lock()
+                .ok()
+                .and_then(|m| m.get(thread_id).cloned());
+            turn.and_then(|t| t.lock().ok().and_then(|t| t.steer.clone()))
+        };
+        let unsupported = || STEER_UNSUPPORTED.to_string();
+        let (reply, done) = oneshot::channel();
+        let sent = Arc::new(AtomicBool::new(false));
+        tx.ok_or_else(unsupported)?
+            .send(SteerReq {
+                text,
+                reply,
+                sent: sent.clone(),
+            })
+            .map_err(|_| unsupported())?;
+        // The loop skips a request whose `done` is gone, so an unsent one never goes out later.
+        match tokio::time::timeout(STEER_WAIT, done).await {
+            Ok(Ok(r)) => r,
+            _ if sent.load(Ordering::SeqCst) => Err(STEER_UNKNOWN.into()),
+            _ => Err(unsupported()),
+        }
+    }
+
+    /// Slash commands the thread's CLI reported; empty before its session started.
+    pub fn commands(&self, thread_id: &str) -> Vec<ThreadCommand> {
+        self.0
+            .commands
+            .lock()
+            .ok()
+            .and_then(|m| m.get(thread_id).cloned())
+            .unwrap_or_default()
+    }
+
+    fn keep_commands(&self, thread_id: &str, list: Vec<ThreadCommand>) {
+        if let Ok(mut m) = self.0.commands.lock() {
+            m.insert(thread_id.into(), list);
+        }
+    }
+
+    /// Records the commands a protocol line carries, if any.
+    fn tap_commands(
+        &self,
+        thread_id: &str,
+        parse: fn(&serde_json::Value) -> Option<Vec<ThreadCommand>>,
+        line: &str,
+    ) {
+        if line.contains("ommands")
+            && let Some(list) = serde_json::from_str(line).ok().and_then(|v| parse(&v))
+        {
+            self.keep_commands(thread_id, list);
+        }
     }
 
     /// Runs `f` against the opened storage. Blocking: call from `spawn_blocking`.
@@ -319,6 +499,9 @@ impl Engine {
 
     /// Kills the thread's warm session, e.g. after the thread was deleted.
     pub fn forget_session(&self, thread_id: &str) {
+        if let Ok(mut m) = self.0.commands.lock() {
+            m.remove(thread_id);
+        }
         if let Some(s) = self.sessions().ok().and_then(|mut m| m.remove(thread_id)) {
             s.kill();
         }
@@ -359,6 +542,7 @@ impl Engine {
         &self,
         thread_id: &str,
         message_id: &str,
+        paths: Option<Vec<String>>,
     ) -> Result<(UndoReport, u64), String> {
         // Registered as active for the whole undo, so a send is refused meanwhile.
         let _guard = {
@@ -378,11 +562,21 @@ impl Engine {
         if cp.changes.undone {
             return Err("This turn was already undone.".into());
         }
-        let report = checkpoint::undo(&cwd, &cp.before, &cp.after)?;
+        if let Some(paths) = &paths
+            && let Some(bad) = paths
+                .iter()
+                .find(|p| !cp.changes.files.iter().any(|f| f.path == **p))
+        {
+            return Err(format!("{bad} is not part of this turn."));
+        }
+        let report = checkpoint::undo(&cwd, &cp.before, &cp.after, paths.as_deref())?;
         let revision = if report.restored.is_empty() {
             self.with(|i| Ok(i.store.thread(thread_id)?.revision))?
         } else {
-            self.with(|i| i.store.mark_undone(thread_id, message_id))?
+            self.with(|i| {
+                i.store
+                    .mark_undone(thread_id, message_id, &report.restored, paths.is_none())
+            })?
         };
         Ok((report, revision))
     }
@@ -484,6 +678,25 @@ impl Engine {
                 .await;
             }
         });
+    }
+
+    /// Answers a pending question of a running turn; `None` declines it.
+    pub fn answer(
+        &self,
+        thread_id: &str,
+        request_id: &str,
+        answers: Option<HashMap<String, Vec<String>>>,
+    ) -> Result<(), String> {
+        let claude = self.sessions()?.get(thread_id).cloned();
+        if let Some(s) = claude {
+            return s.answer(request_id, answers);
+        }
+        let codex = self
+            .codex_sessions()?
+            .get(thread_id)
+            .cloned()
+            .ok_or(session::NOT_PENDING)?;
+        codex.answer(request_id, answers)
     }
 
     /// Answers a pending tool-permission prompt of a running turn.
@@ -649,6 +862,24 @@ impl Engine {
                 };
                 // Registered under the storage lock so stop/delete never see a started send as stuck.
                 let guard = ActiveGuard::new(self, a.thread.thread_id.clone())?;
+                let steerable =
+                    matches!(&target, Target::Cli(c) if c.live.is_some() || c.codex.is_some());
+                let (steer_tx, steer_rx) = unbounded_channel();
+                let live = Arc::new(Mutex::new(LiveTurn {
+                    message_id: a.assistant.message_id.clone(),
+                    seq: 0,
+                    content: String::new(),
+                    activity: Vec::new(),
+                    waiting: false,
+                    sinks: Vec::new(),
+                    done: false,
+                    steer: steerable.then_some(steer_tx),
+                }));
+                self.0
+                    .live
+                    .lock()
+                    .map_err(|_| "Chat state is unavailable.")?
+                    .insert(a.thread.thread_id.clone(), live.clone());
                 let checkpoint_cwd = (matches!(target, Target::Cli(_))
                     && a.thread.permissions != Permissions::ReadOnly)
                     .then(|| a.thread.cwd.as_deref().map(std::path::PathBuf::from))
@@ -661,6 +892,9 @@ impl Engine {
                     target,
                     guard,
                     checkpoint_cwd,
+                    live,
+                    steer_rx: Mutex::new(Some(steer_rx)),
+                    notices: Mutex::new(Vec::new()),
                 };
                 (a, Some(job))
             }
@@ -689,6 +923,7 @@ impl ActiveGuard {
     fn new(chat: &Engine, thread_id: String) -> Result<Self, String> {
         let stop = Arc::new(Notify::new());
         chat.active()?.insert(thread_id.clone(), stop.clone());
+        chat.emit_status(&thread_id, RunState::Running);
         Ok(Self {
             chat: chat.clone(),
             thread_id,
@@ -706,6 +941,11 @@ impl Drop for ActiveGuard {
                 .is_some_and(|s| Arc::ptr_eq(s, &self.stop))
             {
                 active.remove(&self.thread_id);
+                if let Ok(mut live) = self.chat.0.live.lock() {
+                    live.remove(&self.thread_id);
+                }
+                drop(active);
+                self.chat.emit_status(&self.thread_id, RunState::Idle);
             }
         }
     }
@@ -746,6 +986,12 @@ struct Job {
     guard: ActiveGuard,
     /// Folder to checkpoint around the turn: CLI threads that may edit files.
     checkpoint_cwd: Option<std::path::PathBuf>,
+    /// Memory mirror of the turn served by [`Engine::live`].
+    live: Arc<Mutex<LiveTurn>>,
+    /// Steering messages for the turn loop, which takes the receiver once.
+    steer_rx: Mutex<Option<UnboundedReceiver<SteerReq>>>,
+    /// Notices raised before the stream starts; the first `Acc` of the turn emits them.
+    notices: Mutex<Vec<Activity>>,
 }
 
 /// Provider state a send needs, captured under the storage lock.
@@ -820,6 +1066,7 @@ fn cli_job(
         system: system.into(),
         prompt: prompt.clone(),
         images: images.clone(),
+        compact: files.is_empty() && accepted.user.content.trim() == "/compact",
     });
     let acp = agent.then(|| {
         Box::new(acp::Params {
@@ -933,10 +1180,22 @@ async fn run_stream(chat: Engine, job: Job, sink: Arc<dyn EventSink>) {
     let (outcome, checkpoint) = match early {
         None => (stopped_outcome(Acc::new()), None),
         Some(pending) => {
+            let pending = match pending {
+                Ok(p) => p,
+                Err(reason) => {
+                    if let Ok(mut n) = job.notices.lock() {
+                        n.push(notice("checkpoint_unavailable", Some(reason)));
+                    }
+                    None
+                }
+            };
             let mut outcome = stream(&chat, &job, &*sink, &stop).await;
+            // A failure before the first `Acc` leaves the notices unsent; keep them in the stored reply.
+            let unsent = job.notices.lock().map(|mut n| std::mem::take(&mut *n));
+            outcome.activity.splice(0..0, unsent.unwrap_or_default());
             close_activities(&mut outcome.activity);
             let checkpoint = match pending {
-                Some(p) => capture_after(p).await,
+                Some(p) => capture_after(p, edited_paths(&outcome.activity)).await,
                 None => None,
             };
             (outcome, checkpoint)
@@ -945,11 +1204,32 @@ async fn run_stream(chat: Engine, job: Job, sink: Arc<dyn EventSink>) {
     let finished = commit_outcome(&chat, &job, &outcome, checkpoint.as_ref()).await;
     // The entry is removed on every path, including panics, when `job` drops.
     drop(job.guard);
+    // Attached sinks get the final event under the live lock, so none attaches after it.
+    let mut last = job.live.lock().unwrap_or_else(|e| e.into_inner());
+    last.done = true;
+    let attached = std::mem::take(&mut last.sinks);
+    drop(last);
+    // A failed commit still ends the stream: report what the store can still tell.
+    let finished = finished.or_else(|_| {
+        let thread = chat.with(|i| i.store.thread(&job.thread_id))?;
+        let mut message = chat
+            .with(|i| i.store.last_message(&job.thread_id))?
+            .filter(|l| l.message_id == job.message_id)
+            .ok_or_else(|| "gone".to_string())?;
+        message.state = MessageState::Interrupted;
+        message.content = outcome.content.clone();
+        message.error = Some("The response could not be saved.".into());
+        Ok::<_, String>((thread, message))
+    });
     if let Ok((thread, message)) = finished {
-        sink.send(ThreadStreamEvent::Final {
+        let event = ThreadStreamEvent::Final {
             thread: thread.clone(),
             message,
-        });
+        };
+        for s in attached {
+            s.try_send(event.clone());
+        }
+        sink.send(event);
         chat.notify(thread.revision, &thread.thread_id);
     }
 }
@@ -985,33 +1265,80 @@ async fn bounded<T: Send + 'static>(
 /// The folder may also be edited by the user or other chats during the turn;
 /// that is accepted (the diff can include those edits) and `undo` skips files
 /// changed after the turn.
-async fn capture_before(job: &Job) -> Option<PendingCheckpoint> {
-    let cwd = job.checkpoint_cwd.clone()?;
+/// `Ok(None)` when no checkpoint applies; `Err(reason)` when one failed or timed out.
+async fn capture_before(job: &Job) -> Result<Option<PendingCheckpoint>, String> {
+    let Some(cwd) = job.checkpoint_cwd.clone() else {
+        return Ok(None);
+    };
     let prefix = format!("refs/lomi/chat/{}/{}", job.thread_id, job.message_id);
     let reference = format!("{prefix}/before");
     let (dir, late_dir, late_prefix) = (cwd.clone(), cwd.clone(), prefix.clone());
     let before = bounded(
         CHECKPOINT_TIMEOUT,
-        move || checkpoint::capture(&dir, &reference).ok().flatten(),
+        move || checkpoint::capture(&dir, &reference),
         // The turn went on without it: drop the ref the late capture just wrote.
         move |late| {
-            if late.is_some() {
+            if matches!(late, Ok(Some(_))) {
                 let _ = checkpoint::remove_refs(&late_dir, &late_prefix);
             }
         },
     )
     .await
-    .flatten()?;
-    Some(PendingCheckpoint {
-        cwd,
-        prefix,
-        before,
-    })
+    .ok_or("The snapshot timed out.")?;
+    match before? {
+        Some(before) => Ok(Some(PendingCheckpoint {
+            cwd,
+            prefix,
+            before,
+        })),
+        // Not a Git work tree (or one with content filters): the normal case, not worth a notice.
+        None => Ok(None),
+    }
+}
+
+/// System note shown in the reply; `title` is a stable key the UI translates.
+fn notice(title: &str, detail: Option<String>) -> Activity {
+    let mut a = Activity {
+        id: format!("notice:{title}"),
+        kind: ActivityKind::Notice,
+        title: title.into(),
+        status: ActivityStatus::Completed,
+        at: 0,
+        detail,
+        diff: None,
+        approval: None,
+        question: None,
+    };
+    a.clamp();
+    a
+}
+
+/// Tells the user the native session could not be resumed and a new one began.
+fn context_reset(acc: &mut Acc, job: &Job, sink: &dyn EventSink, error: Option<String>) {
+    if let Some(e) = error {
+        let detail = http::redact(&e, None);
+        acc.upsert(&job.message_id, sink, notice("context_reset", Some(detail)));
+    }
+}
+
+/// Paths the turn's edit activities name: diff paths plus the titles of edit
+/// activities (Codex lists its changed files there, comma separated).
+fn edited_paths(activity: &[Activity]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in activity {
+        if let Some(d) = &a.diff {
+            out.push(d.path.clone());
+        }
+        if a.kind == ActivityKind::Edit {
+            out.extend(a.title.split(", ").map(str::to_string));
+        }
+    }
+    out
 }
 
 /// Records the state after the turn and its changed files; `None` (refs
 /// removed) when nothing changed, git failed or it took too long.
-async fn capture_after(p: PendingCheckpoint) -> Option<Checkpoint> {
+async fn capture_after(p: PendingCheckpoint, edited: Vec<String>) -> Option<Checkpoint> {
     let (late_cwd, late_prefix) = (p.cwd.clone(), p.prefix.clone());
     bounded(
         CHECKPOINT_TIMEOUT,
@@ -1026,14 +1353,17 @@ async fn capture_after(p: PendingCheckpoint) -> Option<Checkpoint> {
                     }
                 });
             match done {
-                Ok((after, files)) if !files.is_empty() => Some(Checkpoint {
-                    before: p.before,
-                    after,
-                    changes: TurnChanges {
-                        files,
-                        undone: false,
-                    },
-                }),
+                Ok((after, mut files)) if !files.is_empty() => {
+                    checkpoint::mark_agent(&p.cwd, &mut files, &edited);
+                    Some(Checkpoint {
+                        before: p.before,
+                        after,
+                        changes: TurnChanges {
+                            files,
+                            undone: false,
+                        },
+                    })
+                }
                 _ => {
                     let _ = checkpoint::remove_refs(&p.cwd, &p.prefix);
                     None
@@ -1058,6 +1388,13 @@ fn close_activities(activity: &mut [Activity]) {
             .filter(|p| p.state == ApprovalState::Pending)
         {
             p.state = ApprovalState::Expired;
+        }
+        if let Some(q) = a
+            .question
+            .as_mut()
+            .filter(|q| q.state == QuestionState::Pending)
+        {
+            q.state = QuestionState::Expired;
         }
         if a.status == ActivityStatus::Running {
             a.status = ActivityStatus::Failed;
@@ -1088,6 +1425,8 @@ struct Acc {
     last_flush: Instant,
     activity: Vec<Activity>,
     usage: Option<Usage>,
+    /// Engine, thread and memory mirror served by [`Engine::live`]; `None` outside a job.
+    live: Option<(Engine, String, Arc<Mutex<LiveTurn>>)>,
 }
 
 impl Acc {
@@ -1100,6 +1439,64 @@ impl Acc {
             last_flush: Instant::now(),
             activity: Vec::new(),
             usage: None,
+            live: None,
+        }
+    }
+
+    /// An accumulator mirrored to the job's live state; emits the notices raised before the stream.
+    fn for_job(chat: &Engine, job: &Job, sink: &dyn EventSink) -> Self {
+        let mut acc = Self::new();
+        acc.live = Some((chat.clone(), job.thread_id.clone(), job.live.clone()));
+        let notices = job.notices.lock().map(|mut n| std::mem::take(&mut *n));
+        for n in notices.unwrap_or_default() {
+            acc.upsert(&job.message_id, sink, n);
+        }
+        acc
+    }
+
+    /// Sends `event` and mirrors it into the live state under one lock, so
+    /// [`Engine::live`] never observes a state out of step with the events.
+    fn emit(&self, sink: &dyn EventSink, event: ThreadStreamEvent) {
+        let Some((chat, thread_id, live)) = &self.live else {
+            return sink.send(event);
+        };
+        let mut t = live.lock().unwrap_or_else(|e| e.into_inner());
+        // Only activity events can change what the turn waits for.
+        let mut waiting = t.waiting;
+        match &event {
+            ThreadStreamEvent::Delta { seq, text, .. } => {
+                t.seq = *seq;
+                t.content.push_str(text);
+            }
+            ThreadStreamEvent::Activity { activity, .. } => {
+                match t.activity.iter().position(|e| e.id == activity.id) {
+                    Some(i) => t.activity[i] = activity.clone(),
+                    None => t.activity.push(activity.clone()),
+                }
+                waiting = t.activity.iter().any(|a| {
+                    a.approval
+                        .as_ref()
+                        .is_some_and(|p| p.state == ApprovalState::Pending)
+                        || a.question
+                            .as_ref()
+                            .is_some_and(|q| q.state == QuestionState::Pending)
+                });
+            }
+            ThreadStreamEvent::Final { .. } => {}
+        }
+        sink.send(event.clone());
+        t.sinks.retain(|s| s.try_send(event.clone()));
+        let changed = std::mem::replace(&mut t.waiting, waiting) != waiting;
+        drop(t);
+        if changed {
+            chat.emit_status(
+                thread_id,
+                if waiting {
+                    RunState::Waiting
+                } else {
+                    RunState::Running
+                },
+            );
         }
     }
 
@@ -1113,50 +1510,114 @@ impl Acc {
             if a.approval.is_none() {
                 a.approval = self.activity[i].approval.clone();
             }
+            // Likewise for a question: its tool events keep the question and its state.
+            if a.question.is_none() && self.activity[i].question.is_some() {
+                a.question = self.activity[i].question.clone();
+                a.kind = ActivityKind::Question;
+            }
             self.activity[i] = a.clone();
         // An activity with an approval is never dropped: the turn would wait for it forever.
-        } else if self.activity.len() < MAX_ACTIVITIES || a.approval.is_some() {
+        } else if self.activity.len() < MAX_ACTIVITIES
+            || a.approval.is_some()
+            || a.question.is_some()
+        {
             a.at = self.utf16;
             self.activity.push(a.clone());
         } else {
             return;
         }
         self.pending += 1 + a.title.len() + a.detail.as_ref().map_or(0, String::len);
-        sink.send(ThreadStreamEvent::Activity {
-            message_id: message_id.into(),
-            activity: a,
-        });
+        self.emit(
+            sink,
+            ThreadStreamEvent::Activity {
+                message_id: message_id.into(),
+                activity: a,
+            },
+        );
     }
 
     /// Moves matching pending approvals to `to` and emits the changed activities.
+    /// Pending questions are expired the same way; `pick` sees the request id.
     fn settle(
         &mut self,
         message_id: &str,
         sink: &dyn EventSink,
-        pick: impl Fn(&Approval) -> bool,
+        pick: impl Fn(&str) -> bool,
         to: ApprovalState,
     ) {
-        let changed: Vec<Activity> = self
-            .activity
-            .iter()
-            .filter(|a| {
-                a.approval
-                    .as_ref()
-                    .is_some_and(|p| p.state == ApprovalState::Pending && pick(p))
-            })
-            .cloned()
-            .map(|mut a| {
-                a.approval.as_mut().expect("filtered").state = to;
+        let expire = to == ApprovalState::Expired;
+        let mut changed = Vec::new();
+        for a in &self.activity {
+            let mut a = a.clone();
+            let mut hit = false;
+            if let Some(p) = a
+                .approval
+                .as_mut()
+                .filter(|p| p.state == ApprovalState::Pending && pick(&p.request_id))
+            {
+                p.state = to;
+                hit = true;
+            }
+            if let Some(q) = a
+                .question
+                .as_mut()
+                .filter(|q| expire && q.state == QuestionState::Pending && pick(&q.request_id))
+            {
+                q.state = QuestionState::Expired;
+                hit = true;
+            }
+            if hit {
                 // An expired prompt means the tool never ran.
-                if to == ApprovalState::Expired && a.status == ActivityStatus::Running {
+                if expire && a.status == ActivityStatus::Running {
                     a.status = ActivityStatus::Failed;
                 }
-                a
-            })
-            .collect();
+                changed.push(a);
+            }
+        }
         for a in changed {
             self.upsert(message_id, sink, a);
         }
+    }
+
+    /// Records the user's answer (or decline) of a pending question.
+    fn settle_question(
+        &mut self,
+        message_id: &str,
+        sink: &dyn EventSink,
+        request_id: &str,
+        answers: Option<HashMap<String, Vec<String>>>,
+    ) {
+        let Some(mut a) = self
+            .activity
+            .iter()
+            .find(|a| {
+                a.question.as_ref().is_some_and(|q| {
+                    q.state == QuestionState::Pending && q.request_id == request_id
+                })
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let q = a.question.as_mut().expect("filtered");
+        (q.state, a.status) = match answers {
+            Some(_) => (QuestionState::Answered, ActivityStatus::Completed),
+            None => (QuestionState::Declined, ActivityStatus::Failed),
+        };
+        q.answers = answers;
+        self.upsert(message_id, sink, a);
+    }
+
+    /// Shows a steering message in the reply, anchored at the current text offset.
+    fn steered(&mut self, message_id: &str, sink: &dyn EventSink, text: &str) {
+        let n = self
+            .activity
+            .iter()
+            .filter(|a| a.kind == ActivityKind::Notice && a.title == "steer")
+            .count();
+        let mut a = notice("steer", Some(text.into()));
+        a.id = format!("steer:{n}");
+        self.upsert(message_id, sink, a);
     }
 
     /// Failed outcome that keeps what streamed so far.
@@ -1190,11 +1651,14 @@ impl Acc {
         self.utf16 += text.encode_utf16().count() as u64;
         self.seq += 1;
         self.pending += text.len();
-        sink.send(ThreadStreamEvent::Delta {
-            message_id: message_id.into(),
-            seq: self.seq,
-            text,
-        });
+        self.emit(
+            sink,
+            ThreadStreamEvent::Delta {
+                message_id: message_id.into(),
+                seq: self.seq,
+                text,
+            },
+        );
         true
     }
 
@@ -1299,7 +1763,7 @@ async fn stream_api(
     }
 
     let mut parser = http::SseParser::default();
-    let mut acc = Acc::new();
+    let mut acc = Acc::for_job(chat, job, sink);
     let (mut done, mut stop_reason): (bool, Option<String>) = (false, None);
     let mut failure: Option<String> = None;
     let mut oversized = false;
@@ -1390,7 +1854,12 @@ async fn stream_cli(
     stop: &Notify,
 ) -> Outcome {
     let mut seen = None;
-    let outcome = run_cli(chat, job, run, sink, stop, &mut seen).await;
+    let mut outcome = run_cli(chat, job, run, sink, stop, &mut seen).await;
+    // The stored session is cleared below, so the next send starts a new one.
+    if outcome.start_failed && run.session.is_some() && run.cli == "claude" {
+        let detail = outcome.error.as_deref().map(|e| http::redact(e, None));
+        outcome.activity.push(notice("resume_failed", detail));
+    }
     let next = if !outcome.content.is_empty() || outcome.state == MessageState::Completed {
         seen.filter(|s| run.session.as_deref() != Some(s.as_str()))
             .map(Some)
@@ -1440,7 +1909,7 @@ async fn run_cli(
 
     let mut parser = cli::Parser::new(&run.cli);
     let mut splitter = cli::LineSplitter::default();
-    let mut acc = Acc::new();
+    let mut acc = Acc::for_job(chat, job, sink);
     let mut fallback: Option<String> = None;
     let (mut failure, mut oversized) = (None::<String>, false);
     let mut buf = [0u8; 8192];
@@ -1567,22 +2036,29 @@ async fn run_live(
     }
     let mut guard = session.rx().await;
     let rx = &mut *guard; // split borrow of the two receivers
-    rx.drain();
+    rx.drain_with(|l| chat.tap_commands(&job.thread_id, session::parse_commands, l));
     if session.send_user(prompt).is_err() {
         chat.drop_session(&job.thread_id, &session);
         return Outcome::failed(session.exit_detail(), String::new(), 0);
     }
     let mut parser = cli::Parser::new(&run.cli);
-    let mut acc = Acc::new();
+    let mut acc = Acc::for_job(chat, job, sink);
     let mut fallback = None::<String>;
     let (mut failure, mut oversized) = (None::<String>, false);
     // Set once a stop sent the interrupt: the CLI then gets `INTERRUPT_WAIT` to end the turn.
     let mut deadline: Option<tokio::time::Instant> = None;
     // The process produced no output at all: it never started (e.g. `--resume` was refused).
     let mut heard = false;
+    let mut steers = steer_rx(job);
+    // Steering lines sent whose turn has not been seen to end. A line folded into the
+    // running turn yields no `result` of its own, a queued one starts a turn with an `init`.
+    let mut steered = 0u32;
+    // Set at a `result` with `steered > 0`: the wait for that queued turn's `init`.
+    let mut grace: Option<tokio::time::Instant> = None;
     loop {
         let line = tokio::select! {
             _ = &mut stopped, if deadline.is_none() => {
+                (steered, grace) = (0, None);
                 session.deny_pending();
                 acc.settle(&job.message_id, sink, |_| true, ApprovalState::Expired);
                 session.interrupt();
@@ -1596,6 +2072,26 @@ async fn run_live(
             Some(a) = rx.answers.recv() => {
                 settle_answer(&mut acc, &job.message_id, sink, &a);
                 continue;
+            }
+            Some(req) = next_steer(&mut steers), if deadline.is_none() => {
+                if req.reply.is_closed() {
+                    continue;
+                }
+                let sent = session.send_user(&req.text).map_err(|_| STEER_UNSUPPORTED.to_string());
+                if sent.is_ok() {
+                    req.sent.store(true, Ordering::SeqCst);
+                    steered += 1;
+                    acc.steered(&job.message_id, sink, &req.text);
+                }
+                let _ = req.reply.send(sent);
+                continue;
+            }
+            _ = tokio::time::sleep_until(grace.unwrap_or_else(tokio::time::Instant::now)), if grace.is_some() => {
+                // Folded into the ended turn or queued as one that has not started: the CLI does
+                // not say which, and a late turn would leak into the next reply. Not reusing
+                // the process costs a resume on the next send.
+                chat.drop_session(&job.thread_id, &session);
+                break;
             }
             l = rx.lines.recv() => l,
         };
@@ -1613,18 +2109,16 @@ async fn run_live(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if let Some(list) = session::parse_commands(&v) {
+            chat.keep_commands(&job.thread_id, list);
+        }
         heard |= v["type"] != "control_response";
         match v["type"].as_str() {
             Some("control_response") => continue,
             Some("control_cancel_request") => {
                 if let Some(id) = v["request_id"].as_str() {
                     session.cancel_pending(id);
-                    acc.settle(
-                        &job.message_id,
-                        sink,
-                        |p| p.request_id == id,
-                        ApprovalState::Expired,
-                    );
+                    acc.settle(&job.message_id, sink, |r| r == id, ApprovalState::Expired);
                 }
                 continue;
             }
@@ -1640,6 +2134,14 @@ async fn run_live(
                 continue;
             }
             _ => {}
+        }
+        if grace.is_some() && v["type"] == "system" && v["subtype"] == "init" {
+            // The queued steering turn started; its text continues the reply.
+            (grace, steered) = (None, steered.saturating_sub(1));
+            // `push` already separates text that follows an activity at the end.
+            if !acc.content.is_empty() && acc.activity.last().is_none_or(|a| a.at != acc.utf16) {
+                oversized |= !acc.push(&job.message_id, sink, "\n\n".into());
+            }
         }
         for event in parser.line(&line) {
             match event {
@@ -1662,7 +2164,10 @@ async fn run_live(
             return acc.oversized();
         }
         if v["type"] == "result" {
-            break;
+            if steered == 0 {
+                break;
+            }
+            grace = Some(tokio::time::Instant::now() + STEER_GRACE);
         }
         acc.flush_due(chat, job).await;
     }
@@ -1697,14 +2202,35 @@ async fn run_live(
     }
 }
 
+/// The next steering message of the turn; pends forever when the loop has no receiver.
+async fn next_steer(rx: &mut Option<UnboundedReceiver<SteerReq>>) -> Option<SteerReq> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Takes the steering receiver of the job (once per turn).
+fn steer_rx(job: &Job) -> Option<UnboundedReceiver<SteerReq>> {
+    job.steer_rx.lock().ok().and_then(|mut r| r.take())
+}
+
 /// Applies the user's answer to the matching pending approval.
 fn settle_answer(acc: &mut Acc, message_id: &str, sink: &dyn EventSink, a: &session::Answer) {
+    let asked = acc.activity.iter().any(|x| {
+        x.question
+            .as_ref()
+            .is_some_and(|q| q.request_id == a.request_id)
+    });
+    if asked {
+        return acc.settle_question(message_id, sink, &a.request_id, a.answers.clone());
+    }
     let state = if a.allowed {
         ApprovalState::Allowed
     } else {
         ApprovalState::Denied
     };
-    acc.settle(message_id, sink, |p| p.request_id == a.request_id, state);
+    acc.settle(message_id, sink, |r| r == a.request_id, state);
 }
 
 /// Runs one turn on the thread's persistent `codex app-server`. Approval
@@ -1731,15 +2257,15 @@ async fn run_codex(
     let mut guard = session.rx().await;
     let rx = &mut *guard; // split borrow of the two receivers
     rx.drain();
-    let thread = match session.thread() {
-        Some(t) => t,
+    let (thread, reset) = match session.thread() {
+        Some(t) => (t, None),
         None => {
             let started = tokio::select! {
                 _ = &mut stopped => None,
                 r = codex_server::start(&session, rx, p, run.session.as_deref()) => Some(r),
             };
             match started {
-                Some(Ok(t)) => t,
+                Some(Ok(started)) => started,
                 Some(Err(m)) => {
                     chat.drop_codex(&job.thread_id, &session);
                     return Outcome::failed(http::redact(&m, None), String::new(), 0);
@@ -1754,7 +2280,13 @@ async fn run_codex(
     if cli::valid_session(&thread) {
         *sid = Some(thread.clone());
     }
-    let turn_req = match session.request("turn/start", p.turn_params(&thread)) {
+    chat.keep_commands(&job.thread_id, codex_server::commands());
+    let started = if p.compact {
+        session.request("thread/compact/start", json!({"threadId": thread}))
+    } else {
+        session.request("turn/start", p.turn_params(&thread))
+    };
+    let turn_req = match started {
         Ok(id) => id,
         Err(_) => {
             chat.drop_codex(&job.thread_id, &session);
@@ -1762,7 +2294,11 @@ async fn run_codex(
         }
     };
     let mut mapper = codex_server::Mapper::default();
-    let mut acc = Acc::new();
+    let mut acc = Acc::for_job(chat, job, sink);
+    context_reset(&mut acc, job, sink, reset);
+    let mut steers = steer_rx(job);
+    // `turn/steer` requests awaiting their response, by request id.
+    let mut steer_calls: HashMap<u64, SteerReq> = HashMap::new();
     let (mut turn, mut end) = (None::<String>, None);
     let (mut failure, mut oversized, mut interrupted) = (None::<String>, false, false);
     // Set once a stop was requested: the server then gets `INTERRUPT_WAIT` to end the turn.
@@ -1789,6 +2325,27 @@ async fn run_codex(
             }
             Some(a) = rx.answers.recv() => {
                 settle_answer(&mut acc, &job.message_id, sink, &a);
+                continue;
+            }
+            Some(req) = next_steer(&mut steers), if deadline.is_none() => {
+                if req.reply.is_closed() {
+                    continue;
+                }
+                let sent = match &turn {
+                    Some(t) if !p.compact => {
+                        session.request("turn/steer", codex_server::steer_params(&thread, t, &req.text))
+                    }
+                    _ => Err(String::new()),
+                };
+                match sent {
+                    Ok(id) => {
+                        req.sent.store(true, Ordering::SeqCst);
+                        steer_calls.insert(id, req);
+                    }
+                    Err(_) => {
+                        let _ = req.reply.send(Err(STEER_UNSUPPORTED.into()));
+                    }
+                }
                 continue;
             }
             l = rx.lines.recv() => l,
@@ -1818,14 +2375,27 @@ async fn run_codex(
                             sink,
                         );
                     }
-                    None => {
-                        let _ = session.write(codex_server::unsupported_line(id));
-                    }
+                    None => match codex_server::parse_question(&v) {
+                        Some(q) => on_question(&session, q, &mut acc, &job.message_id, sink),
+                        None => {
+                            let _ = session.write(codex_server::unsupported_line(id));
+                        }
+                    },
                 }
                 continue;
             }
-            // A response; only the `turn/start` one matters.
+            // A response; only the `turn/start` and `turn/steer` ones matter.
             (false, Some(id)) => {
+                if let Some(req) = id.as_u64().and_then(|n| steer_calls.remove(&n)) {
+                    let sent = if v.get("error").is_some() {
+                        Err(STEER_UNSUPPORTED.to_string())
+                    } else {
+                        acc.steered(&job.message_id, sink, &req.text);
+                        Ok(())
+                    };
+                    let _ = req.reply.send(sent);
+                    continue;
+                }
                 if *id == turn_req {
                     if let Some(e) = v.get("error") {
                         let m = e["message"].as_str().unwrap_or("Codex refused the turn.");
@@ -1840,6 +2410,9 @@ async fn run_codex(
         }
         if v["method"] == "turn/started" {
             turn = codex_server::started_turn(&v).map(String::from).or(turn);
+        }
+        if p.compact && codex_server::compaction_done(&v) {
+            acc.upsert(&job.message_id, sink, notice("context_compacted", None));
         }
         if let Some((id, e)) = codex_server::turn_end(&v) {
             // A late completion of an earlier, interrupted turn is not ours.
@@ -1919,16 +2492,16 @@ async fn run_acp(
     }
     let mut guard = session.rx().await;
     let rx = &mut *guard; // split borrow of the two receivers
-    rx.drain();
-    let native = match session.native() {
-        Some(n) => n,
+    rx.drain_with(|l| chat.tap_commands(&job.thread_id, acp::parse_commands, l));
+    let (native, reset) = match session.native() {
+        Some(n) => (n, None),
         None => {
             let started = tokio::select! {
                 _ = &mut stopped => None,
                 r = acp::start(&session, rx, p, run.session.as_deref()) => Some(r),
             };
             match started {
-                Some(Ok(n)) => n,
+                Some(Ok(started)) => started,
                 Some(Err(m)) => {
                     chat.drop_acp(&job.thread_id, &session);
                     return Outcome::failed(http::redact(&m, None), String::new(), 0);
@@ -1943,6 +2516,10 @@ async fn run_acp(
     if cli::valid_session(&native) {
         *sid = Some(native.clone());
     }
+    let known = session.commands();
+    if !known.is_empty() {
+        chat.keep_commands(&job.thread_id, known);
+    }
     let images = if session.accepts_images() {
         acp::image_blocks(&p.images).await
     } else {
@@ -1953,7 +2530,8 @@ async fn run_acp(
         return Outcome::failed(session.exit_detail(), String::new(), 0);
     };
     let mut mapper = acp::Mapper::default();
-    let mut acc = Acc::new();
+    let mut acc = Acc::for_job(chat, job, sink);
+    context_reset(&mut acc, job, sink, reset);
     let (mut end, mut failure, mut oversized) = (None::<acp::End>, None::<String>, false);
     // Set once a stop was requested: the agent then gets `INTERRUPT_WAIT` to end the turn.
     let mut deadline: Option<tokio::time::Instant> = None;
@@ -2022,6 +2600,9 @@ async fn run_acp(
                 continue;
             }
             _ => {}
+        }
+        if let Some(list) = acp::parse_commands(&v) {
+            chat.keep_commands(&job.thread_id, list);
         }
         for event in mapper.update(&v) {
             match event {
@@ -2162,6 +2743,23 @@ fn on_prompt(
     acc.upsert(message_id, sink, a);
 }
 
+/// Shows a `requestUserInput` request as a pending question on its item's activity.
+fn on_question(
+    session: &CodexSession,
+    q: codex_server::QuestionPrompt,
+    acc: &mut Acc,
+    message_id: &str,
+    sink: &dyn EventSink,
+) {
+    // Registered before the UI sees it, so an immediate answer finds it.
+    let scoped = session.add_question(&q);
+    let mut a = q.activity(&scoped);
+    if let Some(known) = acc.activity.iter().find(|a| a.id == q.item_id) {
+        a.title.clone_from(&known.title);
+    }
+    acc.upsert(message_id, sink, a);
+}
+
 /// Handles a `control_request` line: permission prompts become pending approvals, the rest is refused.
 /// A read-only thread is not asked about tools that may change things; they are denied here.
 fn on_control(
@@ -2184,6 +2782,20 @@ fn on_control(
         .find(|a| a.id == t.tool_use_id)
         .cloned()
         .unwrap_or_else(|| cli::claude_activity(&t.tool_use_id, &t.tool_name, &t.input));
+    let items = session::question_items(&t.input);
+    if t.tool_name == session::ASK_TOOL && !items.is_empty() {
+        a.kind = ActivityKind::Question;
+        a.status = ActivityStatus::Running;
+        a.question = Some(Box::new(Question {
+            request_id: t.request_id.clone(),
+            items,
+            state: QuestionState::Pending,
+            answers: None,
+        }));
+        // Registered before the UI sees it, so an immediate answer finds it.
+        session.add_pending(t);
+        return acc.upsert(message_id, sink, a);
+    }
     let denied = permissions == Permissions::ReadOnly && !session::read_only_tool(&t.tool_name);
     a.status = if denied {
         ActivityStatus::Failed
@@ -2322,6 +2934,17 @@ mod tests {
         revision: u64,
         operation: &str,
     ) -> (ThreadSendAccepted, UnboundedReceiver<ThreadStreamEvent>) {
+        send_text(instance, engine, thread_id, revision, operation, "hi").await
+    }
+
+    async fn send_text(
+        instance: &str,
+        engine: &Engine,
+        thread_id: &str,
+        revision: u64,
+        operation: &str,
+        text: &str,
+    ) -> (ThreadSendAccepted, UnboundedReceiver<ThreadStreamEvent>) {
         let (tx, rx) = unbounded_channel();
         let accepted = engine
             .send(
@@ -2331,7 +2954,7 @@ mod tests {
                     expected_revision: revision,
                     instance_id: instance.into(),
                     model: "m".into(),
-                    text: "hi".into(),
+                    text: text.into(),
                     attachments: vec![],
                 },
                 Arc::new(Recorder(tx)),
@@ -2689,6 +3312,7 @@ read -r third
                 break activity;
             }
         };
+        assert_eq!(engine.run_state(&thread.thread_id), RunState::Waiting);
         assert_eq!(pending.id, "I1");
         assert_eq!(pending.kind, ActivityKind::Execute);
         assert_eq!(pending.title, "ls");
@@ -3472,17 +4096,12 @@ read -r never
             acc.activity[0].approval.as_ref().unwrap().state,
             ApprovalState::Pending
         );
-        acc.settle(
-            "m",
-            &sink,
-            |p| p.request_id == "other",
-            ApprovalState::Allowed,
-        );
+        acc.settle("m", &sink, |r| r == "other", ApprovalState::Allowed);
         assert_eq!(
             acc.activity[0].approval.as_ref().unwrap().state,
             ApprovalState::Pending
         );
-        acc.settle("m", &sink, |p| p.request_id == "R", ApprovalState::Denied);
+        acc.settle("m", &sink, |r| r == "R", ApprovalState::Denied);
         // Only pending prompts move: expiry leaves an answered one alone.
         acc.settle("m", &sink, |_| true, ApprovalState::Expired);
         let a = &acc.activity[0];
@@ -3554,6 +4173,7 @@ read -r never
             detail: None,
             diff: None,
             approval: None,
+            question: None,
         }
     }
 
@@ -3710,7 +4330,7 @@ printf '%s\n' '{"type":"result","result":"done"}'"#;
             thread.thread_id.clone(),
             accepted.assistant.message_id.clone(),
         );
-        let (report, revision) = blocking(move || e.turn_undo(&t, &m)).await.unwrap();
+        let (report, revision) = blocking(move || e.turn_undo(&t, &m, None)).await.unwrap();
         assert_eq!(report.restored, vec!["a.txt".to_string()]);
         assert_eq!(
             std::fs::read_to_string(repo.join("a.txt")).unwrap(),
@@ -3735,7 +4355,7 @@ printf '%s\n' '{"type":"result","result":"done"}'"#;
             thread.thread_id.clone(),
             accepted.assistant.message_id.clone(),
         );
-        assert!(blocking(move || e.turn_undo(&t, &m)).await.is_err());
+        assert!(blocking(move || e.turn_undo(&t, &m, None)).await.is_err());
 
         engine.remove_checkpoints(&thread.thread_id, repo.to_str());
         assert!(refs(&repo).is_empty());
@@ -3792,5 +4412,705 @@ printf '%s\n' '{"type":"result","result":"done"}'"#;
         let message = final_message(&mut rx).await;
         assert_eq!(message.state, MessageState::Completed);
         assert!(message.changes.is_none());
+    }
+
+    #[tokio::test]
+    async fn attaching_mid_turn_returns_state_consistent_with_delta_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"part"}}}'
+exec sleep 60"#,
+            dir.path(),
+            true,
+        );
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let seen = states.clone();
+        engine.on_status(move |_, s| seen.lock().unwrap().push(s));
+        assert!(engine.live(&thread.thread_id).is_none());
+        let (accepted, mut rx) = send(&engine, &thread).await;
+        let Some(ThreadStreamEvent::Delta { seq, .. }) = rx.recv().await else {
+            panic!("expected a delta");
+        };
+        let live = engine.live(&thread.thread_id).expect("live turn");
+        assert_eq!(live.message_id, accepted.assistant.message_id);
+        assert_eq!((live.seq, live.content.as_str()), (seq, "part"));
+        assert_eq!(engine.run_state(&thread.thread_id), RunState::Running);
+        let stopper = engine.clone();
+        let id = thread.thread_id.clone();
+        blocking(move || stopper.stop(&id)).await.unwrap();
+        final_message(&mut rx).await;
+        assert!(engine.live(&thread.thread_id).is_none());
+        assert_eq!(engine.run_state(&thread.thread_id), RunState::Idle);
+        assert_eq!(
+            *states.lock().unwrap(),
+            vec![RunState::Running, RunState::Idle]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cli_turn_is_classified() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup(
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Not logged in"}'"#,
+            dir.path(),
+            true,
+        );
+        let (_, mut rx) = send(&engine, &thread).await;
+        let m = final_message(&mut rx).await;
+        assert_eq!(m.state, MessageState::Failed);
+        assert_eq!(m.error_kind, Some(crate::errors::ErrorKind::Auth));
+    }
+
+    #[tokio::test]
+    async fn selective_undo_marks_agent_files_and_validates_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo(dir.path());
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "b"]);
+        // The CLI edits both files but only reports an edit of a.txt (absolute path).
+        let body = format!(
+            r#"echo two > a.txt
+echo two > b.txt
+printf '%s\n' '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Edit","input":{{"file_path":"{}/a.txt","old_string":"one","new_string":"two"}}}}]}}}}' '{{"type":"result","result":"done"}}'"#,
+            repo.display()
+        );
+        let (engine, thread) =
+            setup_with("claude", &body, dir.path(), true, Permissions::Edit, &repo);
+        let (accepted, mut rx) = send(&engine, &thread).await;
+        let message = final_message(&mut rx).await;
+        let files = message.changes.unwrap().files;
+        let agent: Vec<(&str, bool)> = files.iter().map(|f| (f.path.as_str(), f.agent)).collect();
+        assert_eq!(agent, vec![("a.txt", true), ("b.txt", false)]);
+
+        let undo = |paths: Option<Vec<String>>| {
+            let (e, t, m) = (
+                engine.clone(),
+                thread.thread_id.clone(),
+                accepted.assistant.message_id.clone(),
+            );
+            blocking(move || e.turn_undo(&t, &m, paths))
+        };
+        assert!(undo(Some(vec!["nope.txt".into()])).await.is_err());
+        let (report, _) = undo(Some(vec!["a.txt".into()])).await.unwrap();
+        assert_eq!(report.restored, vec!["a.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "two\n"
+        );
+        let changes = assistant(&engine, &thread.thread_id).changes.unwrap();
+        assert!(!changes.undone);
+        assert_eq!(
+            changes.files.iter().map(|f| f.undone).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        let (report, _) = undo(Some(vec!["b.txt".into()])).await.unwrap();
+        assert_eq!(report.restored, vec!["b.txt".to_string()]);
+        assert!(
+            assistant(&engine, &thread.thread_id)
+                .changes
+                .unwrap()
+                .undone
+        );
+        engine.remove_checkpoints(&thread.thread_id, repo.to_str());
+    }
+
+    #[tokio::test]
+    async fn failed_codex_resume_starts_a_new_thread_with_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"read -r init
+printf '%s\n' '{"id":1,"result":{}}'
+read -r initialized
+read -r resume
+printf '%s\n' '{"id":2,"error":{"message":"thread not found"}}'
+read -r start
+printf '%s\n' '{"id":3,"result":{"thread":{"id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}}}'
+read -r turn
+printf '%s\n' '{"id":4,"result":{"turn":{"id":"T1"}}}' '{"method":"item/agentMessage/delta","params":{"itemId":"m","delta":"ok"}}' '{"method":"turn/completed","params":{"turn":{"id":"T1","status":"completed"}}}'
+read -r never"#;
+        let (engine, thread) = setup_edit("codex", body, dir.path());
+        let id = thread.thread_id.clone();
+        engine
+            .with(|i| {
+                i.store
+                    .set_native_session(&id, Some("1b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"))
+            })
+            .unwrap();
+        let (_, mut rx) = send_as("codex", &engine, &thread.thread_id, thread.revision, "s1").await;
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        let n = &message.activity[0];
+        assert_eq!(
+            (n.kind, n.title.as_str()),
+            (ActivityKind::Notice, "context_reset")
+        );
+        assert_eq!(n.detail.as_deref(), Some("thread not found"));
+    }
+    /// An attached sink whose receiver is gone: counts how often it was tried.
+    struct Dying(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl EventSink for Dying {
+        fn send(&self, _: ThreadStreamEvent) {}
+
+        fn try_send(&self, _: ThreadStreamEvent) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+
+    const DELTA_FN: &str = r#"
+delta() {
+  printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$1\"}}}"
+}
+result() {
+  printf '%s\n' '{"type":"result","result":"x"}'
+}
+init() {
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}'
+}
+"#;
+
+    /// Claude fake: one steering line arrives mid-turn; `$1` is what the CLI prints after it.
+    fn claude_steer(after: &str) -> String {
+        format!(
+            "{DELTA_FN}read -r init\nread -r first\ninit\ndelta one\nread -r steer\nprintf '%s\\n' \"$steer\" > steer.txt\n{after}\nread -r never\n"
+        )
+    }
+
+    async fn wait_delta(rx: &mut UnboundedReceiver<ThreadStreamEvent>) {
+        while !matches!(rx.recv().await, Some(ThreadStreamEvent::Delta { .. })) {}
+    }
+
+    #[tokio::test]
+    async fn steer_folded_into_the_turn_is_shown_and_reaches_attached_sinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = claude_steer("delta two\nresult");
+        let (engine, thread) = setup(&body, dir.path(), false);
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        wait_delta(&mut rx).await;
+        let (tx, mut attached_rx) = unbounded_channel();
+        let live = engine
+            .attach(&tid, Arc::new(Recorder(tx)))
+            .expect("a turn is running");
+        assert_eq!((live.seq, live.content.as_str()), (1, "one"));
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.attach(&tid, Arc::new(Dying(tries.clone()))).unwrap();
+        engine.steer(&tid, "  more  ".into()).await.unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        // Text after the steering note starts a new paragraph.
+        assert_eq!(message.content, "one\n\ntwo");
+        let note = &message.activity[0];
+        assert_eq!(
+            (
+                note.kind,
+                note.title.as_str(),
+                note.detail.as_deref(),
+                note.at
+            ),
+            (ActivityKind::Notice, "steer", Some("more"), 3)
+        );
+        let line = std::fs::read_to_string(dir.path().join("steer.txt")).unwrap();
+        assert!(
+            line.contains(r#""type":"user""#) && line.contains("more"),
+            "{line}"
+        );
+        // The attached sink saw the rest of the turn, the final event last.
+        let mut seen = vec![];
+        while let Ok(e) = attached_rx.try_recv() {
+            seen.push(e);
+        }
+        assert!(matches!(
+            seen.as_slice(),
+            [
+                ThreadStreamEvent::Activity { .. },
+                ThreadStreamEvent::Delta { seq: 2, .. },
+                ThreadStreamEvent::Final { .. }
+            ]
+        ));
+        // A sink whose send failed is dropped after the first try.
+        assert_eq!(tries.load(Ordering::SeqCst), 1);
+        assert!(engine.attach(&tid, Arc::new(Dying(tries))).is_none());
+        assert_eq!(
+            engine.steer(&tid, "late".into()).await.unwrap_err(),
+            STEER_UNSUPPORTED
+        );
+        // The grace ended with the steer unaccounted for: the process is not reused.
+        assert!(engine.sessions().unwrap().is_empty());
+        engine.kill_cli_groups();
+    }
+
+    #[tokio::test]
+    async fn steer_whose_caller_gave_up_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = claude_steer("delta two\nresult");
+        let (engine, thread) = setup(&body, dir.path(), false);
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        wait_delta(&mut rx).await;
+        let turn = engine.0.live.lock().unwrap().get(&tid).cloned().unwrap();
+        let tx = turn.lock().unwrap().steer.clone().unwrap();
+        // A timed-out steer leaves its request queued with a closed reply.
+        let (reply, done) = oneshot::channel();
+        drop(done);
+        let sent = Arc::new(AtomicBool::new(false));
+        tx.send(SteerReq {
+            text: "abandoned".into(),
+            reply,
+            sent: sent.clone(),
+        })
+        .unwrap();
+        engine.steer(&tid, "real".into()).await.unwrap();
+        final_of(&mut rx).await;
+        let line = std::fs::read_to_string(dir.path().join("steer.txt")).unwrap();
+        assert!(
+            line.contains("real") && !line.contains("abandoned"),
+            "{line}"
+        );
+        assert!(!sent.load(Ordering::SeqCst));
+        engine.kill_cli_groups();
+    }
+
+    #[tokio::test]
+    async fn steer_queued_by_the_cli_continues_the_reply_in_a_second_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = claude_steer("result\ninit\ndelta two\nresult");
+        let (engine, thread) = setup(&body, dir.path(), false);
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        wait_delta(&mut rx).await;
+        engine.steer(&tid, "more".into()).await.unwrap();
+        let started = Instant::now();
+        let (_, message) = final_of(&mut rx).await;
+        // Two user lines, two results: the first `result` must not end the turn.
+        assert_eq!(message.content, "one\n\ntwo");
+        assert!(
+            started.elapsed() < STEER_GRACE,
+            "no grace wait after the last result"
+        );
+        engine.kill_cli_groups();
+    }
+
+    #[tokio::test]
+    async fn steer_needs_a_live_claude_or_codex_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup("exec sleep 60", dir.path(), true);
+        let tid = thread.thread_id.clone();
+        let unsupported = |e: Result<(), String>| assert_eq!(e.unwrap_err(), STEER_UNSUPPORTED);
+        unsupported(engine.steer(&tid, "x".into()).await);
+        let (_, mut rx) = send(&engine, &thread).await;
+        // The one-shot (Host) path has no stdin to steer through.
+        unsupported(engine.steer(&tid, "x".into()).await);
+        let stopper = engine.clone();
+        blocking(move || stopper.stop(&tid)).await.unwrap();
+        final_of(&mut rx).await;
+    }
+
+    /// Claude fake: reports its commands, then asks one question (sanitized `AskUserQuestion` capture).
+    const ASK: &str = r#"
+delta() {
+  printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$1\"}}}"
+}
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"lomi-1","response":{"commands":[{"name":"hello","description":"Say hello","argumentHint":"<name>"}]}}}'
+read -r first
+printf '%s\n' '{"type":"control_request","request_id":"Q1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","display_name":"AskUserQuestion","input":{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Red","description":"Pick red"},{"label":"Green","description":"Pick green"}],"multiSelect":false}]},"tool_use_id":"toolu_Q","requires_user_interaction":true}}'
+read -r answer
+printf '%s\n' "$answer" > answer.txt
+delta done
+printf '%s\n' '{"type":"result","result":"x"}'
+read -r never
+"#;
+
+    async fn pending_question(
+        rx: &mut UnboundedReceiver<ThreadStreamEvent>,
+    ) -> (Activity, Question) {
+        loop {
+            if let Some(ThreadStreamEvent::Activity { activity, .. }) = rx.recv().await
+                && let Some(q) = activity.question.clone().map(|q| *q)
+            {
+                return (activity, q);
+            }
+        }
+    }
+
+    fn color(answer: &str) -> Option<HashMap<String, Vec<String>>> {
+        Some(HashMap::from([(
+            "Which color do you prefer?".to_string(),
+            vec![answer.to_string()],
+        )]))
+    }
+
+    #[tokio::test]
+    async fn claude_question_is_answered_even_on_a_read_only_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup_with(
+            "claude",
+            ASK,
+            dir.path(),
+            false,
+            Permissions::ReadOnly,
+            dir.path(),
+        );
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        let (activity, q) = pending_question(&mut rx).await;
+        // Not mutating, so a read-only thread is not denied on its own.
+        assert_eq!(q.state, QuestionState::Pending);
+        assert_eq!(
+            (
+                activity.id.as_str(),
+                activity.kind,
+                activity.status,
+                &activity.approval
+            ),
+            (
+                "toolu_Q",
+                ActivityKind::Question,
+                ActivityStatus::Running,
+                &None
+            )
+        );
+        assert_eq!(q.request_id, "Q1");
+        let item = &q.items[0];
+        assert_eq!(
+            (
+                item.id.as_str(),
+                item.header.as_str(),
+                item.multi_select,
+                item.allow_other
+            ),
+            ("Which color do you prefer?", "Color", false, true)
+        );
+        assert_eq!(item.options[1].label, "Green");
+        assert_eq!(engine.run_state(&tid), RunState::Waiting);
+        assert_eq!(
+            engine.commands(&tid),
+            vec![ThreadCommand {
+                name: "hello".into(),
+                description: "Say hello".into(),
+                argument_hint: "<name>".into()
+            }]
+        );
+        // A question is not an approval, and only asked items are accepted.
+        assert!(engine.respond(&tid, "Q1", Decision::Allow).is_err());
+        let wrong = Some(HashMap::from([(
+            "Other?".to_string(),
+            vec!["x".to_string()],
+        )]));
+        assert_eq!(
+            engine.answer(&tid, "Q1", wrong).unwrap_err(),
+            "Invalid answer."
+        );
+        engine.answer(&tid, "Q1", color("Green")).unwrap();
+        assert!(engine.answer(&tid, "Q1", color("Red")).is_err());
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        let q = message.activity[0].question.as_ref().unwrap();
+        assert_eq!(q.state, QuestionState::Answered);
+        assert_eq!(q.answers, color("Green"));
+        assert_eq!(message.activity[0].status, ActivityStatus::Completed);
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("answer.txt")).unwrap())
+                .unwrap();
+        let body = &sent["response"]["response"];
+        assert_eq!(body["behavior"], "allow");
+        assert_eq!(
+            body["updatedInput"]["answers"],
+            serde_json::json!({"Which color do you prefer?": "Green"})
+        );
+        assert_eq!(body["updatedInput"]["questions"][0]["header"], "Color");
+        engine.kill_cli_groups();
+    }
+
+    #[tokio::test]
+    async fn declined_and_unanswered_questions_end_declined_or_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup_edit("claude", ASK, dir.path());
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        pending_question(&mut rx).await;
+        engine.answer(&tid, "Q1", None).unwrap();
+        let (summary, message) = final_of(&mut rx).await;
+        let q = message.activity[0].question.as_ref().unwrap();
+        assert_eq!(
+            (q.state, q.answers.as_ref()),
+            (QuestionState::Declined, None)
+        );
+        assert_eq!(message.activity[0].status, ActivityStatus::Failed);
+        let sent = std::fs::read_to_string(dir.path().join("answer.txt")).unwrap();
+        assert!(sent.contains(r#""behavior":"deny""#), "{sent}");
+        engine.kill_cli_groups();
+
+        // Stopping with the question open expires it and tells the CLI.
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"read -r init
+read -r first
+printf '%s\n' '{"type":"control_request","request_id":"Q2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","header":"H","options":[],"multiSelect":true}]},"tool_use_id":"toolu_Q"}}'
+read -r deny
+printf '%s\n' "$deny" > denied.txt
+read -r interrupt
+printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true}'
+read -r never"#;
+        let (engine, thread) = setup_edit("claude", body, dir.path());
+        let (_, mut rx) = send(&engine, &thread).await;
+        pending_question(&mut rx).await;
+        let (stopper, id) = (engine.clone(), thread.thread_id.clone());
+        blocking(move || stopper.stop(&id)).await.unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(message.state, MessageState::Stopped);
+        let a = &message.activity[0];
+        assert_eq!(a.question.as_ref().unwrap().state, QuestionState::Expired);
+        assert_eq!(a.status, ActivityStatus::Failed);
+        let denied = std::fs::read_to_string(dir.path().join("denied.txt")).unwrap();
+        assert!(denied.contains(r#""behavior":"deny""#), "{denied}");
+        let _ = summary;
+        engine.kill_cli_groups();
+    }
+
+    /// Codex fake: asks one `requestUserInput` question (sanitized capture), then ends the turn.
+    const CODEX_ASK: &str = r#"
+read -r init
+printf '%s\n' '{"id":1,"result":{"userAgent":"x"}}'
+read -r initialized
+read -r start
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}}}'
+read -r first
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"T1","status":"inProgress"}}}' '{"method":"turn/started","params":{"turn":{"id":"T1"}}}'
+printf '%s\n' '{"method":"item/tool/requestUserInput","id":0,"params":{"threadId":"t","turnId":"T1","itemId":"call_1","questions":[{"id":"color","header":"Color","question":"Which color do you prefer?","isOther":true,"isSecret":false,"options":[{"label":"Red","description":"Choose Red."},{"label":"Green","description":"Choose Green."}]},{"id":"pin","header":"PIN","question":"Secret?","isOther":true,"isSecret":true,"options":null}],"isBlocking":true,"autoResolutionMs":null}}'
+read -r answer
+printf '%s\n' "$answer" > answer.txt
+printf '%s\n' '{"method":"item/agentMessage/delta","params":{"itemId":"M1","delta":"picked"}}' '{"method":"turn/completed","params":{"turn":{"id":"T1","status":"completed"}}}'
+read -r never
+"#;
+
+    #[tokio::test]
+    async fn codex_user_input_is_answered_and_secrets_are_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = setup_with(
+            "codex",
+            CODEX_ASK,
+            dir.path(),
+            false,
+            Permissions::ReadOnly,
+            dir.path(),
+        );
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send_as("codex", &engine, &tid, thread.revision, "s1").await;
+        let (activity, q) = pending_question(&mut rx).await;
+        assert_eq!(
+            (activity.id.as_str(), activity.kind),
+            ("call_1", ActivityKind::Question)
+        );
+        assert!(q.request_id.ends_with(":0"), "{}", q.request_id);
+        assert_eq!(q.items.len(), 2);
+        assert_eq!(q.items[0].options[0].description, "Choose Red.");
+        assert!(q.items[0].allow_other && !q.items[0].multi_select);
+        assert_eq!(engine.run_state(&tid), RunState::Waiting);
+        assert!(
+            engine
+                .respond(&tid, &q.request_id, Decision::Allow)
+                .is_err()
+        );
+        let answers = HashMap::from([
+            ("color".to_string(), vec!["Green".to_string()]),
+            ("pin".to_string(), vec!["1234".to_string()]),
+        ]);
+        engine.answer(&tid, &q.request_id, Some(answers)).unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        let stored = message.activity[0].question.as_ref().unwrap();
+        assert_eq!(stored.state, QuestionState::Answered);
+        assert_eq!(
+            stored.answers,
+            Some(HashMap::from([(
+                "color".to_string(),
+                vec!["Green".to_string()]
+            )]))
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("answer.txt")).unwrap())
+                .unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({"id":0,"result":{"answers":{"color":{"answers":["Green"]},"pin":{"answers":["1234"]}}}})
+        );
+        assert_eq!(engine.commands(&tid)[0].name, "compact");
+        engine.kill_cli_groups();
+    }
+
+    /// Codex fake: a turn that waits for `turn/steer`, answering it as `$1` says.
+    fn codex_steer(reply: &str) -> String {
+        format!(
+            r#"
+read -r init
+printf '%s\n' '{{"id":1,"result":{{"userAgent":"x"}}}}'
+read -r initialized
+read -r start
+printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}}}}}}'
+read -r first
+printf '%s\n' '{{"id":3,"result":{{"turn":{{"id":"T1"}}}}}}' '{{"method":"turn/started","params":{{"turn":{{"id":"T1"}}}}}}' '{{"method":"item/agentMessage/delta","params":{{"itemId":"M1","delta":"one"}}}}'
+read -r steer
+printf '%s\n' "$steer" > steer.txt
+printf '%s\n' '{reply}' '{{"method":"turn/completed","params":{{"turn":{{"id":"T1","status":"completed"}}}}}}'
+read -r never
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn codex_steer_targets_the_current_turn_and_reports_refusals() {
+        for (reply, ok) in [
+            (r#"{"id":4,"result":{"turnId":"T1"}}"#, true),
+            (
+                r#"{"id":4,"error":{"code":-32600,"message":"no active turn to steer"}}"#,
+                false,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (engine, thread) = setup_edit("codex", &codex_steer(reply), dir.path());
+            let tid = thread.thread_id.clone();
+            let (_, mut rx) = send_as("codex", &engine, &tid, thread.revision, "s1").await;
+            wait_delta(&mut rx).await;
+            let sent = engine.steer(&tid, "more".into()).await;
+            assert_eq!(sent.is_ok(), ok, "{sent:?}");
+            let (_, message) = final_of(&mut rx).await;
+            let line: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join("steer.txt")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(line["method"], "turn/steer");
+            assert_eq!(line["params"]["expectedTurnId"], "T1");
+            assert_eq!(line["params"]["input"][0]["text"], "more");
+            // Only a delivered steer is recorded in the reply.
+            let notes = message
+                .activity
+                .iter()
+                .filter(|a| a.title == "steer")
+                .count();
+            assert_eq!(notes, usize::from(ok));
+            engine.kill_cli_groups();
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_compact_runs_thread_compact_instead_of_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+read -r init
+printf '%s\n' '{"id":1,"result":{"userAgent":"x"}}'
+read -r initialized
+read -r start
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}}}'
+read -r compact
+printf '%s\n' "$compact" > compact.txt
+printf '%s\n' '{"id":3,"result":{}}' '{"method":"turn/started","params":{"turn":{"id":"T1"}}}' '{"method":"item/started","params":{"item":{"type":"contextCompaction","id":"C1"}}}' '{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"C1"}}}' '{"method":"turn/completed","params":{"turn":{"id":"T1","status":"completed"}}}'
+read -r never
+"#;
+        let (engine, thread) = setup_edit("codex", body, dir.path());
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) =
+            send_text("codex", &engine, &tid, thread.revision, "s1", " /compact ").await;
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert_eq!(message.activity[0].title, "context_compacted");
+        let line = std::fs::read_to_string(dir.path().join("compact.txt")).unwrap();
+        assert!(
+            line.contains(r#""method":"thread/compact/start""#),
+            "{line}"
+        );
+        engine.kill_cli_groups();
+    }
+    /// `cargo test -p lomi-chat real_claude -- --ignored`: answers a real `AskUserQuestion`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code account"]
+    async fn real_claude_question_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = which("claude").expect("claude on PATH");
+        let (engine, thread) = setup_with(
+            "claude",
+            "",
+            dir.path(),
+            false,
+            Permissions::Edit,
+            dir.path(),
+        );
+        // Replace the fake binary resolution with the installed CLI.
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = {
+            drop(engine);
+            let engine = Engine::new(dir.path().join("data"), hooks);
+            engine.with(|_| Ok(())).unwrap();
+            engine
+        };
+        let tid = thread.thread_id.clone();
+        let (tx, mut rx) = unbounded_channel();
+        engine
+            .send(
+                ThreadSend {
+                    operation_id: "s1".into(),
+                    thread_id: tid.clone(),
+                    expected_revision: thread.revision,
+                    instance_id: "claude".into(),
+                    model: "haiku".into(),
+                    text: "Use the AskUserQuestion tool to ask me which color I prefer, options Red, Green, Blue. After I answer, reply with exactly: YOU PICKED <color>".into(),
+                    attachments: vec![],
+                },
+                Arc::new(Recorder(tx)),
+            )
+            .await
+            .unwrap();
+        let (_, q) = pending_question(&mut rx).await;
+        let id = q.items[0].id.clone();
+        engine
+            .answer(
+                &tid,
+                &q.request_id,
+                Some(HashMap::from([(id, vec!["Green".to_string()])])),
+            )
+            .unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(message.content.contains("Green"), "{}", message.content);
+        engine.forget_session(&tid);
     }
 }

@@ -38,6 +38,12 @@ pub struct FileChange {
     pub additions: u32,
     pub deletions: u32,
     pub binary: bool,
+    /// The turn's own edit activities touched this path (not the user or another process).
+    #[serde(default)]
+    pub agent: bool,
+    /// Restored by a selective undo.
+    #[serde(default)]
+    pub undone: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -297,6 +303,8 @@ pub fn changes(cwd: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, Stri
                 additions,
                 deletions,
                 binary,
+                agent: false,
+                undone: false,
             }
         })
         .collect())
@@ -396,15 +404,60 @@ fn current_state(top: &Path, path: &str) -> Result<Current, String> {
     }
 }
 
+/// Flags the files whose path appears in `edited` (paths from the turn's edit
+/// activities, absolute or relative to `cwd`) as the agent's own changes.
+pub fn mark_agent(cwd: &Path, files: &mut [FileChange], edited: &[String]) {
+    let Ok(Some(top)) = toplevel(cwd) else {
+        return;
+    };
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (top_c, cwd_c) = (canon(&top), canon(cwd));
+    let rel: std::collections::HashSet<String> = edited
+        .iter()
+        .filter_map(|e| {
+            let p = Path::new(e);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cwd_c.join(p)
+            };
+            // The file may be gone (deleted by the turn), so only its parent resolves.
+            let abs = match (abs.parent(), abs.file_name()) {
+                (Some(dir), Some(name)) => canon(dir).join(name),
+                _ => abs,
+            };
+            let r = abs.strip_prefix(&top_c).ok()?;
+            Some(
+                r.components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            )
+        })
+        .collect();
+    for f in files {
+        f.agent = rel.contains(&f.path);
+    }
+}
+
 /// Reverts the turn `before` -> `after`, path by path, but only where the
-/// working tree still matches `after`. The index is never touched.
-pub fn undo(cwd: &Path, before: &str, after: &str) -> Result<UndoReport, String> {
+/// working tree still matches `after`; `only` limits it to those paths.
+/// The index is never touched.
+pub fn undo(
+    cwd: &Path,
+    before: &str,
+    after: &str,
+    only: Option<&[String]>,
+) -> Result<UndoReport, String> {
     let top = require_toplevel(cwd)?;
     // `hash-object` would run a configured clean filter; see `has_filters`.
     if has_filters(&top)? {
         return Err("the repository defines content filters; undo is unavailable".into());
     }
-    let paths = name_status(&top, before, after)?;
+    let mut paths = name_status(&top, before, after)?;
+    if let Some(only) = only {
+        paths.retain(|(p, _)| only.contains(p));
+    }
     for (p, _) in &paths {
         validate_rel(p)?;
     }
@@ -744,7 +797,7 @@ mod tests {
         fs::write(p.join("user.txt"), "agent\nuser edit\n").unwrap();
         let index_before = g(p, &["diff", "--cached"]);
 
-        let report = undo(p, &before, &after).unwrap();
+        let report = undo(p, &before, &after, None).unwrap();
         assert_eq!(report.skipped, vec!["user.txt"]);
         assert_eq!(
             report.restored,
@@ -789,7 +842,7 @@ mod tests {
         );
         assert_eq!(capture(p, "refs/lomi/chat/t1/3-before").unwrap(), None);
         assert_eq!(snapshot_tree(p).unwrap(), None);
-        assert!(undo(p, &before, &after).is_err());
+        assert!(undo(p, &before, &after, None).is_err());
         assert!(!marker.exists());
         assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "agent\n");
     }
@@ -825,7 +878,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(p, fs::Permissions::from_mode(0o555)).unwrap();
-            let report = undo(p, &before, &after);
+            let report = undo(p, &before, &after, None);
             fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
             let report = report.unwrap();
             assert_eq!(report.skipped, vec!["new.txt"]);

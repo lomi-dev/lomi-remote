@@ -7,7 +7,10 @@ use crate::{
     cli::{self, Ev},
     session::{Answer, Key, NOT_PENDING, Rx, Wire, line, next_generation},
     settings::Permissions,
-    store::{self, Activity, ActivityDiff, ActivityKind, ActivityStatus, Decision, Usage},
+    store::{
+        self, Activity, ActivityDiff, ActivityKind, ActivityStatus, Decision, Question,
+        QuestionItem, QuestionOption, QuestionState, ThreadCommand, Usage,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -39,6 +42,8 @@ pub struct Params {
     pub prompt: String,
     /// Absolute paths of attached images.
     pub images: Vec<String>,
+    /// The message was `/compact`: compact the thread instead of starting a turn.
+    pub compact: bool,
 }
 
 impl Params {
@@ -99,6 +104,130 @@ pub fn notification_line(method: &str) -> String {
 /// Refusal of a server request Lomi has no UI for.
 pub fn unsupported_line(id: &Value) -> String {
     line(json!({"id": id, "error": {"code": -32601, "message": "Unsupported by Lomi."}}))
+}
+
+/// `turn/steer`: adds `text` to the running turn `turn_id`.
+pub fn steer_params(thread_id: &str, turn_id: &str, text: &str) -> Value {
+    json!({"threadId": thread_id, "expectedTurnId": turn_id, "input": [{"type": "text", "text": text}]})
+}
+
+/// Commands Codex offers without listing them.
+pub fn commands() -> Vec<ThreadCommand> {
+    vec![ThreadCommand {
+        name: "compact".into(),
+        description: "Summarize the conversation to free up the context window.".into(),
+        argument_hint: String::new(),
+    }]
+}
+
+/// Whether `v` completes a `thread/compact/start` (the compaction runs as a turn item).
+pub fn compaction_done(v: &Value) -> bool {
+    v["method"] == "item/completed" && v["params"]["item"]["type"] == "contextCompaction"
+}
+
+/// A `requestUserInput` server request kept until the user answers.
+#[derive(Debug, PartialEq)]
+pub struct QuestionPrompt {
+    pub id: Value,
+    pub request_id: String,
+    pub item_id: String,
+    pub items: Vec<QuestionItem>,
+    /// Ids of the secret questions; their answers are never stored.
+    pub secret: Vec<String>,
+}
+
+/// Parses an `item/tool/requestUserInput` request; None for any other message.
+pub fn parse_question(v: &Value) -> Option<QuestionPrompt> {
+    if v["method"] != "item/tool/requestUserInput" {
+        return None;
+    }
+    let id = v
+        .get("id")
+        .filter(|i| i.is_string() || i.is_number())?
+        .clone();
+    let p = &v["params"];
+    let text = |q: &Value, k: &str| q[k].as_str().unwrap_or_default().to_string();
+    let asked: Vec<&Value> = p["questions"]
+        .as_array()?
+        .iter()
+        .filter(|q| q["id"].as_str().is_some_and(|i| !i.is_empty()))
+        .take(store::MAX_QUESTIONS)
+        .collect();
+    if asked.is_empty() {
+        return None;
+    }
+    Some(QuestionPrompt {
+        request_id: id.as_str().map_or_else(|| id.to_string(), String::from),
+        item_id: cli::str_at(p, &["itemId"])
+            .filter(|s| !s.is_empty())?
+            .into(),
+        secret: asked
+            .iter()
+            .filter(|q| q["isSecret"] == true)
+            .map(|q| text(q, "id"))
+            .collect(),
+        items: asked
+            .iter()
+            .map(|q| {
+                let options: Vec<QuestionOption> = q["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| QuestionOption {
+                        label: text(o, "label"),
+                        description: text(o, "description"),
+                    })
+                    .collect();
+                QuestionItem {
+                    id: text(q, "id"),
+                    header: text(q, "header"),
+                    question: text(q, "question"),
+                    // Without options, free text is the only way to answer.
+                    allow_other: q["isOther"] == true || options.is_empty(),
+                    options,
+                    multi_select: false,
+                    secret: q["isSecret"] == true,
+                }
+            })
+            .collect(),
+        id,
+    })
+}
+
+impl QuestionPrompt {
+    /// The activity of a question; its item may not have been announced before.
+    pub fn activity(&self, scoped: &str) -> Activity {
+        let title = self.items.first().map_or("", |i| i.header.as_str());
+        let mut a = cli::activity(
+            &self.item_id,
+            ActivityKind::Question,
+            title,
+            ActivityStatus::Running,
+        );
+        a.question = Some(Box::new(Question {
+            request_id: scoped.into(),
+            items: self.items.clone(),
+            state: QuestionState::Pending,
+            answers: None,
+        }));
+        a
+    }
+}
+
+/// The result of `requestUserInput`; a declined question is a refusal.
+pub fn answers_line(id: &Value, answers: Option<&HashMap<String, Vec<String>>>) -> String {
+    match answers {
+        Some(a) => {
+            let by_id: serde_json::Map<String, Value> = a
+                .iter()
+                .map(|(k, v)| (k.clone(), json!({"answers": v})))
+                .collect();
+            line(json!({"id": id, "result": {"answers": by_id}}))
+        }
+        None => line(
+            json!({"id": id, "error": {"code": -32000, "message": "The user declined to answer."}}),
+        ),
+    }
 }
 
 /// The wire spelling of an answer; "for session" degrades to a plain accept
@@ -387,6 +516,8 @@ impl Mapper {
 struct Pending {
     id: Value,
     remember: bool,
+    /// For a question: its item ids with whether each is secret.
+    question: Option<HashMap<String, bool>>,
 }
 
 /// One warm `codex app-server`, bound to one native Codex thread once started.
@@ -472,6 +603,7 @@ impl CodexSession {
                 Pending {
                     id: p.id.clone(),
                     remember: p.remember,
+                    question: None,
                 },
             );
         }
@@ -480,16 +612,77 @@ impl CodexSession {
 
     /// Answers a pending prompt on behalf of the user.
     pub fn respond(&self, request_id: &str, decision: Decision) -> Result<(), String> {
-        let p = self
-            .pending
-            .lock()
-            .map_err(|_| NOT_PENDING.to_string())?
-            .remove(request_id)
-            .ok_or(NOT_PENDING)?;
+        let p = self.take(request_id, false)?;
         self.write(decision_line(&p.id, decision, p.remember))?;
         let _ = self.answers.send(Answer {
             request_id: request_id.into(),
             allowed: decision != Decision::Deny,
+            answers: None,
+        });
+        Ok(())
+    }
+
+    /// Registers a question and returns its scoped id; call before showing it.
+    pub fn add_question(&self, q: &QuestionPrompt) -> String {
+        let key = format!("{}:{}", self.generation, q.request_id);
+        if let Ok(mut m) = self.pending.lock() {
+            let ids = q
+                .items
+                .iter()
+                .map(|i| (i.id.clone(), q.secret.contains(&i.id)))
+                .collect();
+            m.insert(
+                key.clone(),
+                Pending {
+                    id: q.id.clone(),
+                    remember: false,
+                    question: Some(ids),
+                },
+            );
+        }
+        key
+    }
+
+    /// Removes a pending prompt; `question` selects `requestUserInput` over approvals.
+    fn take(&self, request_id: &str, question: bool) -> Result<Pending, String> {
+        let mut m = self.pending.lock().map_err(|_| NOT_PENDING.to_string())?;
+        if m.get(request_id)
+            .is_none_or(|p| p.question.is_some() != question)
+        {
+            return Err(NOT_PENDING.into());
+        }
+        Ok(m.remove(request_id).expect("checked above"))
+    }
+
+    /// Answers a pending question; `None` declines it.
+    pub fn answer(
+        &self,
+        request_id: &str,
+        answers: Option<HashMap<String, Vec<String>>>,
+    ) -> Result<(), String> {
+        if let Some(a) = &answers {
+            let m = self.pending.lock().map_err(|_| NOT_PENDING.to_string())?;
+            let ids = m
+                .get(request_id)
+                .and_then(|p| p.question.as_ref())
+                .ok_or(NOT_PENDING)?;
+            crate::session::valid_answers(&ids.keys().map(String::as_str).collect::<Vec<_>>(), a)?;
+        }
+        let p = self.take(request_id, true)?;
+        self.write(answers_line(&p.id, answers.as_ref()))?;
+        // The UI copy of a secret answer is never stored.
+        let shown = answers.map(|mut a| {
+            a.retain(|k, _| {
+                p.question
+                    .as_ref()
+                    .is_some_and(|q| q.get(k) == Some(&false))
+            });
+            a
+        });
+        let _ = self.answers.send(Answer {
+            request_id: request_id.into(),
+            allowed: shown.is_some(),
+            answers: shown,
         });
         Ok(())
     }
@@ -502,7 +695,11 @@ impl CodexSession {
             .map(|mut m| m.drain().map(|(_, p)| p).collect())
             .unwrap_or_default();
         for p in all {
-            let _ = self.write(decision_line(&p.id, Decision::Deny, false));
+            let _ = self.write(if p.question.is_some() {
+                answers_line(&p.id, None)
+            } else {
+                decision_line(&p.id, Decision::Deny, false)
+            });
         }
     }
 }
@@ -538,21 +735,27 @@ async fn call(s: &CodexSession, rx: &mut Rx, method: &str, params: Value) -> Res
 }
 
 /// Handshake of a fresh process: `initialize`, `initialized`, then the thread.
-/// A native thread is resumed; when that fails a new one replaces it.
-/// Returns the native thread id.
+/// A native thread is resumed; when that fails (whatever the reason, usually an
+/// unknown thread) a new one replaces it. Returns the native thread id and, when
+/// the resume failed, its error so the caller can tell the user the context was reset.
 pub async fn start(
     s: &CodexSession,
     rx: &mut Rx,
     p: &Params,
     native: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let info = json!({"clientInfo": {"name": "lomi", "title": "Lomi", "version": env!("CARGO_PKG_VERSION")}});
     call(s, rx, "initialize", info).await?;
     s.write(notification_line("initialized"))?;
+    let mut reset = None;
     let resumed = match native {
-        Some(id) => call(s, rx, "thread/resume", p.thread_params(Some(id)))
-            .await
-            .ok(),
+        Some(id) => match call(s, rx, "thread/resume", p.thread_params(Some(id))).await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                reset = Some(e);
+                None
+            }
+        },
         None => None,
     };
     let result = match resumed {
@@ -563,7 +766,7 @@ pub async fn start(
     if let Ok(mut t) = s.thread.lock() {
         *t = Some(id.into());
     }
-    Ok(id.into())
+    Ok((id.into(), reset))
 }
 
 #[cfg(test)]
@@ -579,6 +782,7 @@ mod tests {
             system: "Be brief.".into(),
             prompt: "hi".into(),
             images: vec!["/a/p.png".into()],
+            compact: false,
         }
     }
 
@@ -793,5 +997,49 @@ mod tests {
             (p.request_id.as_str(), p.remember, p.activity().kind),
             ("s-1", true, ActivityKind::Edit)
         );
+    }
+
+    #[test]
+    fn user_input_requests_parse_and_reply() {
+        // Sanitized capture of `item/tool/requestUserInput`.
+        let req = v(
+            r#"{"method":"item/tool/requestUserInput","id":0,"params":{"threadId":"t","turnId":"u","itemId":"call_1","questions":[{"id":"color","header":"Color","question":"Which color do you prefer?","isOther":true,"isSecret":false,"options":[{"label":"Red","description":"Choose Red."}]},{"id":"pin","header":"PIN","question":"?","isOther":false,"isSecret":true,"options":null}],"isBlocking":true}}"#,
+        );
+        let q = parse_question(&req).unwrap();
+        assert_eq!((q.request_id.as_str(), q.item_id.as_str()), ("0", "call_1"));
+        assert_eq!(q.secret, ["pin"]);
+        assert_eq!(q.items[0].options[0].label, "Red");
+        assert!(q.items[0].allow_other && q.items[1].options.is_empty());
+        // No options: free text is the only answer; `isSecret` reaches the item.
+        assert!(q.items[1].allow_other && q.items[1].secret && !q.items[0].secret);
+        assert_eq!(q.activity("7:0").question.unwrap().request_id, "7:0");
+        assert!(
+            parse_question(&v(
+                r#"{"method":"item/tool/requestUserInput","id":1,"params":{}}"#
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_question(&v(
+                r#"{"method":"item/commandExecution/requestApproval","id":1}"#
+            ))
+            .is_none()
+        );
+        let answers = HashMap::from([("color".to_string(), vec!["Green".to_string()])]);
+        assert_eq!(
+            v(&answers_line(&q.id, Some(&answers))),
+            json!({"id":0,"result":{"answers":{"color":{"answers":["Green"]}}}})
+        );
+        assert_eq!(v(&answers_line(&q.id, None))["error"]["code"], -32000);
+        assert_eq!(
+            steer_params("T", "U", "go"),
+            json!({"threadId":"T","expectedTurnId":"U","input":[{"type":"text","text":"go"}]})
+        );
+        assert!(compaction_done(&v(
+            r#"{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"c"}}}"#
+        )));
+        assert!(!compaction_done(&v(
+            r#"{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"c"}}}"#
+        )));
     }
 }

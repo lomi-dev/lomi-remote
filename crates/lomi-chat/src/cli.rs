@@ -306,6 +306,7 @@ pub(crate) fn activity(
         detail: None,
         diff: None,
         approval: None,
+        question: None,
     }
 }
 

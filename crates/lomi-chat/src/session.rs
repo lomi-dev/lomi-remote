@@ -4,7 +4,10 @@
 //! The turn loop itself lives in the engine; this module owns the process
 //! plumbing ([`Wire`], shared with the Codex app-server), the control-message
 //! builders and the pending-approval table.
-use crate::{cli, store::Decision};
+use crate::{
+    cli,
+    store::{self, Decision, QuestionItem, QuestionOption, ThreadCommand},
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -84,11 +87,95 @@ pub fn parse_tool_request(v: &Value) -> Option<ToolRequest> {
     })
 }
 
+/// The tool through which Claude asks the user questions.
+pub const ASK_TOOL: &str = "AskUserQuestion";
+/// Largest answer text and number of values per question that reach the CLI.
+const ANSWER_CAP: usize = 4000;
+const ANSWER_VALUES: usize = 16;
+
 /// Tools that cannot change anything; every other tool is denied on a read-only thread.
 pub fn read_only_tool(name: &str) -> bool {
     matches!(
         name,
-        "Read" | "Grep" | "Glob" | "LS" | "WebFetch" | "WebSearch" | "TodoWrite"
+        "Read" | "Grep" | "Glob" | "LS" | "WebFetch" | "WebSearch" | "TodoWrite" | ASK_TOOL
+    )
+}
+
+/// The questions of an `AskUserQuestion` input; the question text is the answer key.
+pub fn question_items(input: &Value) -> Vec<QuestionItem> {
+    let text = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    input["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|q| q["question"].as_str().is_some_and(|t| !t.is_empty()))
+        .take(store::MAX_QUESTIONS)
+        .map(|q| QuestionItem {
+            id: text(q, "question"),
+            header: text(q, "header"),
+            question: text(q, "question"),
+            options: q["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|o| QuestionOption {
+                    label: text(o, "label"),
+                    description: text(o, "description"),
+                })
+                .collect(),
+            multi_select: q["multiSelect"] == true,
+            allow_other: true,
+            secret: false,
+        })
+        .collect()
+}
+
+/// Checks that `answers` only names asked items and stays small.
+pub fn valid_answers(ids: &[&str], answers: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let ok = answers.iter().all(|(k, v)| {
+        ids.contains(&k.as_str())
+            && v.len() <= ANSWER_VALUES
+            && v.iter().all(|a| a.len() <= ANSWER_CAP)
+    });
+    ok.then_some(())
+        .ok_or_else(|| "Invalid answer.".to_string())
+}
+
+/// The `control_response` answering `AskUserQuestion`: the input plus `answers`
+/// by question text (several choices joined with ", "), or a denial when declined.
+pub fn answer_line(r: &ToolRequest, answers: Option<&HashMap<String, Vec<String>>>) -> String {
+    let Some(answers) = answers else {
+        return reply_line(r, Decision::Deny, false);
+    };
+    let joined: serde_json::Map<String, Value> = answers
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(v.join(", "))))
+        .collect();
+    let mut input = r.input.clone();
+    input["answers"] = Value::Object(joined);
+    line(
+        json!({"type":"control_response","response":{"subtype":"success","request_id":r.request_id,"response":{"behavior":"allow","updatedInput":input}}}),
+    )
+}
+
+/// The commands of an `initialize` response or a `commands_changed` message.
+pub fn parse_commands(v: &Value) -> Option<Vec<ThreadCommand>> {
+    let list = match v["type"].as_str()? {
+        "control_response" => &v["response"]["response"]["commands"],
+        "system" if v["subtype"] == "commands_changed" => &v["commands"],
+        _ => return None,
+    };
+    let text = |c: &Value, k: &str| c[k].as_str().unwrap_or_default().to_string();
+    Some(
+        list.as_array()?
+            .iter()
+            .filter(|c| c["name"].as_str().is_some_and(|n| !n.is_empty()))
+            .map(|c| ThreadCommand {
+                name: text(c, "name"),
+                description: text(c, "description"),
+                argument_hint: text(c, "argumentHint"),
+            })
+            .collect(),
     )
 }
 
@@ -149,6 +236,8 @@ pub fn reply_line(r: &ToolRequest, decision: Decision, interrupt: bool) -> Strin
 pub struct Answer {
     pub request_id: String,
     pub allowed: bool,
+    /// The chosen values of a question; `None` for a permission prompt or a declined question.
+    pub answers: Option<HashMap<String, Vec<String>>>,
 }
 
 /// Receivers owned by the running turn (one turn per session at a time).
@@ -160,7 +249,14 @@ pub struct Rx {
 impl Rx {
     /// Drops whatever arrived between turns (initialize ack, late events).
     pub fn drain(&mut self) {
-        while self.lines.try_recv().is_ok() {}
+        self.drain_with(|_| {});
+    }
+
+    /// Like [`Rx::drain`], showing each dropped line to `f`.
+    pub fn drain_with(&mut self, mut f: impl FnMut(&str)) {
+        while let Ok(l) = self.lines.try_recv() {
+            f(&l);
+        }
         while self.answers.try_recv().is_ok() {}
     }
 }
@@ -384,16 +480,45 @@ impl ClaudeSession {
 
     /// Answers a pending prompt on behalf of the user.
     pub fn respond(&self, request_id: &str, decision: Decision) -> Result<(), String> {
-        let r = self
-            .pending
-            .lock()
-            .map_err(|_| NOT_PENDING.to_string())?
-            .remove(request_id)
-            .ok_or(NOT_PENDING)?;
+        let r = self.take(request_id, false)?;
         self.write(reply_line(&r, decision, false))?;
         let _ = self.answers.send(Answer {
             request_id: r.request_id,
             allowed: decision != Decision::Deny,
+            answers: None,
+        });
+        Ok(())
+    }
+
+    /// Removes a pending prompt; `question` selects `AskUserQuestion` over permission prompts.
+    fn take(&self, request_id: &str, question: bool) -> Result<ToolRequest, String> {
+        let mut p = self.pending.lock().map_err(|_| NOT_PENDING.to_string())?;
+        if p.get(request_id)
+            .is_none_or(|r| (r.tool_name == ASK_TOOL) != question)
+        {
+            return Err(NOT_PENDING.into());
+        }
+        Ok(p.remove(request_id).expect("checked above"))
+    }
+
+    /// Answers a pending question; `None` declines it.
+    pub fn answer(
+        &self,
+        request_id: &str,
+        answers: Option<HashMap<String, Vec<String>>>,
+    ) -> Result<(), String> {
+        if let Some(a) = &answers {
+            let p = self.pending.lock().map_err(|_| NOT_PENDING.to_string())?;
+            let r = p.get(request_id).ok_or(NOT_PENDING)?;
+            let items = question_items(&r.input);
+            valid_answers(&items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), a)?;
+        }
+        let r = self.take(request_id, true)?;
+        self.write(answer_line(&r, answers.as_ref()))?;
+        let _ = self.answers.send(Answer {
+            request_id: r.request_id,
+            allowed: answers.is_some(),
+            answers,
         });
         Ok(())
     }
@@ -560,5 +685,80 @@ mod tests {
         };
         assert_eq!(Key::new(&spec("a")), Key::new(&spec("a")));
         assert_ne!(Key::new(&spec("a")), Key::new(&spec("b")));
+    }
+
+    /// Sanitized capture of an `AskUserQuestion` permission request.
+    fn ask() -> ToolRequest {
+        parse_tool_request(&v(
+            r#"{"type":"control_request","request_id":"Q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Red","description":"Pick red"},{"label":"Green","description":"Pick green"}],"multiSelect":true}]},"tool_use_id":"toolu_Q","requires_user_interaction":true}}"#,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn questions_parse_and_answers_follow_the_protocol() {
+        let r = ask();
+        let items = question_items(&r.input);
+        assert_eq!(items.len(), 1);
+        let q = &items[0];
+        assert_eq!(
+            (
+                q.id.as_str(),
+                q.header.as_str(),
+                q.multi_select,
+                q.allow_other
+            ),
+            ("Which color do you prefer?", "Color", true, true)
+        );
+        assert_eq!(q.options[0].label, "Red");
+        assert!(read_only_tool(ASK_TOOL));
+        let answers = HashMap::from([(q.id.clone(), vec!["Red".to_string(), "Green".to_string()])]);
+        let reply = v(&answer_line(&r, Some(&answers)));
+        assert_eq!(reply["response"]["request_id"], "Q");
+        let body = &reply["response"]["response"];
+        assert_eq!(body["behavior"], "allow");
+        // Several choices are joined; the rest of the input is echoed back.
+        assert_eq!(
+            body["updatedInput"]["answers"],
+            json!({"Which color do you prefer?": "Red, Green"})
+        );
+        assert_eq!(body["updatedInput"]["questions"], r.input["questions"]);
+        assert_eq!(
+            v(&answer_line(&r, None))["response"]["response"]["behavior"],
+            "deny"
+        );
+        let ids = [q.id.as_str()];
+        assert!(valid_answers(&ids, &answers).is_ok());
+        let other = HashMap::from([("nope".to_string(), vec![])]);
+        assert!(valid_answers(&ids, &other).is_err());
+        let long = HashMap::from([(q.id.clone(), vec!["x".repeat(ANSWER_CAP + 1)])]);
+        assert!(valid_answers(&ids, &long).is_err());
+    }
+
+    #[test]
+    fn commands_come_from_initialize_and_commands_changed() {
+        // Sanitized: the real response also carries account data, which is never read.
+        let init = v(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"lomi-1","response":{"commands":[{"name":"hello","description":"Say hello (project)","argumentHint":"<name>"},{"name":"deep-research","description":"Research","argumentHint":"","builtin":true},{"name":""}],"account":{"email":"x"}}}}"#,
+        );
+        let list = parse_commands(&init).unwrap();
+        assert_eq!(
+            list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["hello", "deep-research"]
+        );
+        assert_eq!(list[0].argument_hint, "<name>");
+        assert_eq!(list[1].argument_hint, "");
+        let changed = v(
+            r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"a","description":"A"}]}"#,
+        );
+        assert_eq!(parse_commands(&changed).unwrap()[0].description, "A");
+        // Other responses and system messages carry no list.
+        assert!(
+            parse_commands(&v(
+                r#"{"type":"control_response","response":{"response":{}}}"#
+            ))
+            .is_none()
+        );
+        assert!(parse_commands(&v(r#"{"type":"system","subtype":"init"}"#)).is_none());
     }
 }

@@ -10,7 +10,9 @@ use crate::{
     cli::{self, Ev},
     session::{Answer, Key, NOT_PENDING, Rx, Wire, line, next_generation},
     settings::Permissions,
-    store::{self, Activity, ActivityDiff, ActivityKind, ActivityStatus, Decision, Usage},
+    store::{
+        self, Activity, ActivityDiff, ActivityKind, ActivityStatus, Decision, ThreadCommand, Usage,
+    },
 };
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -406,6 +408,29 @@ impl Mapper {
     }
 }
 
+/// The commands of an `available_commands_update` notification.
+pub fn parse_commands(v: &Value) -> Option<Vec<ThreadCommand>> {
+    let u = &v["params"]["update"];
+    if v["method"] != "session/update" || u["sessionUpdate"] != "available_commands_update" {
+        return None;
+    }
+    let text = |c: &Value, k: &str| c[k].as_str().unwrap_or_default().to_string();
+    Some(
+        u["availableCommands"]
+            .as_array()?
+            .iter()
+            .filter(|c| c["name"].as_str().is_some_and(|n| !n.is_empty()))
+            .map(|c| ThreadCommand {
+                name: text(c, "name"),
+                description: text(c, "description"),
+                argument_hint: cli::str_at(c, &["input", "hint"])
+                    .unwrap_or_default()
+                    .into(),
+            })
+            .collect(),
+    )
+}
+
 struct Pending {
     id: Value,
     options: Vec<Opt>,
@@ -423,6 +448,8 @@ pub struct AcpSession {
     native: Mutex<Option<String>>,
     /// The agent accepts image content blocks.
     images: AtomicBool,
+    /// Slash commands from the agent's last `available_commands_update`.
+    commands: Mutex<Vec<ThreadCommand>>,
     /// Prefix of the request ids shown to the UI: a stale answer cannot hit a later process.
     generation: u64,
 }
@@ -458,6 +485,7 @@ impl AcpSession {
             next: AtomicU64::new(1),
             native: Mutex::new(None),
             images: AtomicBool::new(false),
+            commands: Mutex::new(Vec::new()),
             generation: next_generation(),
         }))
     }
@@ -476,6 +504,10 @@ impl AcpSession {
     /// The native session id once the handshake succeeded.
     pub fn native(&self) -> Option<String> {
         self.native.lock().ok().and_then(|t| t.clone())
+    }
+
+    pub fn commands(&self) -> Vec<ThreadCommand> {
+        self.commands.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
     pub fn accepts_images(&self) -> bool {
@@ -527,6 +559,7 @@ impl AcpSession {
         let _ = self.answers.send(Answer {
             request_id: request_id.into(),
             allowed: decision != Decision::Deny && option.is_some(),
+            answers: None,
         });
         Ok(())
     }
@@ -558,6 +591,8 @@ async fn call(s: &AcpSession, rx: &mut Rx, method: &str, params: Value) -> Resul
             if v.get("method").is_some() {
                 if let Some(i) = v.get("id") {
                     let _ = s.write(unsupported_line(i));
+                } else if let (Some(c), Ok(mut slot)) = (parse_commands(&v), s.commands.lock()) {
+                    *slot = c;
                 }
             } else if v["id"] == id {
                 return match v.get("error") {
@@ -576,14 +611,16 @@ async fn call(s: &AcpSession, rx: &mut Rx, method: &str, params: Value) -> Resul
 }
 
 /// Handshake of a fresh process: `initialize`, then the session. A native
-/// session is resumed (or loaded); when that fails a new one replaces it.
-/// Model and mode are applied. Returns the native session id.
+/// session is resumed (or loaded); when that fails (whatever the reason, usually an
+/// unknown session) a new one replaces it. Model and mode are applied. Returns the
+/// native session id and, when the resume failed, its error so the caller can tell
+/// the user the context was reset.
 pub async fn start(
     s: &AcpSession,
     rx: &mut Rx,
     p: &Params,
     native: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let init = json!({
         "protocolVersion": 1,
         "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
@@ -603,10 +640,15 @@ pub async fn start(
         None
     };
     let mut started = None;
-    if let (Some(id), Some(m)) = (native, method)
-        && let Ok(r) = call(s, rx, m, p.session_params(Some(id), dirs)).await
-    {
-        started = Some((id.to_string(), r));
+    let mut reset = None;
+    if let Some(id) = native {
+        match method {
+            Some(m) => match call(s, rx, m, p.session_params(Some(id), dirs)).await {
+                Ok(r) => started = Some((id.to_string(), r)),
+                Err(e) => reset = Some(e),
+            },
+            None => reset = Some("The CLI cannot resume sessions.".into()),
+        }
     }
     let (id, info) = match started {
         Some(x) => x,
@@ -657,7 +699,7 @@ pub async fn start(
     if let Ok(mut n) = s.native.lock() {
         *n = Some(id.clone());
     }
-    Ok(id)
+    Ok((id, reset))
 }
 
 #[cfg(test)]
@@ -953,5 +995,23 @@ mod tests {
         assert!(up(&mut m, r#"{"method":"session/update","params":{"update":{"sessionUpdate":"usage_update","used":1}}}"#).is_empty());
         assert!(up(&mut m, r#"{"method":"other"}"#).is_empty());
         assert!(parse_prompt(&v(r#"{"id":1,"method":"fs/read_text_file","params":{}}"#)).is_none());
+    }
+
+    #[test]
+    fn available_commands_are_parsed() {
+        let list = parse_commands(&v(
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compact the conversation."},{"name":"plan","description":"Plan","input":{"hint":"<goal>"}}]}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            (list[0].name.as_str(), list[0].argument_hint.as_str()),
+            ("compact", "")
+        );
+        assert_eq!(list[1].argument_hint, "<goal>");
+        assert!(parse_commands(&v(
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"usage_update"}}}"#
+        ))
+        .is_none());
     }
 }
