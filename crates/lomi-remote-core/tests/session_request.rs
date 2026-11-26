@@ -16,7 +16,10 @@ fn body() -> serde_json::Value {
     })
 }
 fn parse(status: u16, v: &serde_json::Value) -> Result<SessionResponse, SessionError> {
-    parse_session_response(status, v.to_string().as_bytes())
+    match parse_session_response(status, v.to_string().as_bytes())? {
+        SessionOutcome::Full(r) => Ok(*r),
+        SessionOutcome::Degraded { .. } => panic!("unexpected degraded answer"),
+    }
 }
 
 #[test]
@@ -170,4 +173,67 @@ fn conflicts_are_told_apart() {
         !SessionError::UpdateRequired.is_retryable()
             && !SessionError::OutcomeUnknown.is_retryable()
     );
+}
+
+// Shape of auth-app `degraded()` (session.ts, session.test.ts): 200 after a successful refresh
+// rotation when a later step failed; no account, relay, hosts or device.
+fn degraded_body() -> serde_json::Value {
+    json!({
+        "degraded": true, "reason": "AUTH_REQUIRED",
+        "accessToken": {"token": "newAccess_-1", "expiresAt": 1794000900000u64},
+        "refreshCredential": "sess-1.bmV3UmVmcmVzaA"
+    })
+}
+
+#[test]
+fn degraded_answer_is_its_own_outcome() {
+    let out = parse_session_response(200, degraded_body().to_string().as_bytes()).unwrap();
+    assert_eq!(
+        out,
+        SessionOutcome::Degraded {
+            reason: "AUTH_REQUIRED".into(),
+            access_token: RelayToken {
+                token: "newAccess_-1".into(),
+                expires_at: 1794000900000
+            },
+            refresh_credential: "sess-1.bmV3UmVmcmVzaA".into(),
+        }
+    );
+    let bad = |f: &dyn Fn(&mut serde_json::Value)| {
+        let mut v = degraded_body();
+        f(&mut v);
+        parse_session_response(200, v.to_string().as_bytes())
+    };
+    // A degraded answer must carry the new credentials, a code and degraded:true.
+    assert_eq!(
+        bad(&|v| {
+            v.as_object_mut().unwrap().remove("refreshCredential");
+        }),
+        Err(SessionError::Malformed)
+    );
+    assert_eq!(
+        bad(&|v| {
+            v.as_object_mut().unwrap().remove("accessToken");
+        }),
+        Err(SessionError::Malformed)
+    );
+    assert_eq!(
+        bad(&|v| v["degraded"] = json!(false)),
+        Err(SessionError::Malformed)
+    );
+    assert_eq!(
+        bad(&|v| v["reason"] = json!("lower case")),
+        Err(SessionError::Malformed)
+    );
+    assert_eq!(
+        bad(&|v| {
+            v.as_object_mut().unwrap().remove("reason");
+        }),
+        Err(SessionError::Malformed)
+    );
+    // A full answer still parses as Full.
+    assert!(matches!(
+        parse_session_response(200, server_body().to_string().as_bytes()),
+        Ok(SessionOutcome::Full(_))
+    ));
 }

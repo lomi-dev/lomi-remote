@@ -2,7 +2,7 @@
 
 use lomi_remote_core::directory::{Directory, Effect, Error, Key, NONCE_LEN};
 use lomi_remote_core::json;
-use lomi_remote_core::session::parse_session_response;
+use lomi_remote_core::session::{SessionOutcome, parse_session_response};
 use serde_json::Value;
 
 const ACC: &str = "acc-1";
@@ -37,7 +37,10 @@ fn session(
         r#"{{"account":{{"id":"{account}"}},"sessionExpiresAt":1795000000000,"relay":{{"token":"t","expiresAt":1795000000000}},"hosts":[{}],"device":{dev}}}"#,
         hosts.join(",")
     );
-    parse_session_response(200, body.as_bytes()).unwrap()
+    match parse_session_response(200, body.as_bytes()).unwrap() {
+        SessionOutcome::Full(r) => *r,
+        SessionOutcome::Degraded { .. } => panic!("degraded"),
+    }
 }
 
 fn event(data: &str) -> lomi_remote_core::json::Object {
@@ -345,4 +348,18 @@ fn workspace_epoch_is_monotonic() {
     );
     let w = &d.host("h1").unwrap().workspaces[0];
     assert_eq!((w.epoch, w.name.as_deref()), (6, Some("keep")));
+}
+
+#[test]
+fn degraded_answer_cannot_reach_the_directory() {
+    // The type system keeps it out (apply_session takes a full response); the directory
+    // stays as it was while the caller persists the new credentials and retries.
+    let d = loaded();
+    let before = d.clone();
+    let body = r#"{"degraded":true,"reason":"SERVICE_UNAVAILABLE","accessToken":{"token":"a","expiresAt":1},"refreshCredential":"s.r"}"#;
+    assert!(matches!(
+        parse_session_response(200, body.as_bytes()),
+        Ok(SessionOutcome::Degraded { .. })
+    ));
+    assert_eq!(d, before);
 }

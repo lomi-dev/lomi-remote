@@ -205,7 +205,29 @@ fn conflict(body: &[u8]) -> SessionError {
     }
 }
 
-pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
+/// Result of a 200 answer from `POST /remote/session`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOutcome {
+    Full(Box<SessionResponse>),
+    /// A mobile refresh rotated the credential, but a later server step failed, so the answer
+    /// has no account, relay token, Hosts or device. The old refresh credential is dead (reusing
+    /// it is a replay and revokes the mobile session).
+    ///
+    /// Rule: persist `access_token` and `refresh_credential` BEFORE anything else, then call
+    /// again, either with `Credential::Refresh(refresh_credential)` or with the saved access
+    /// token as Bearer and no credential. Do not touch the directory (nothing to merge) and do
+    /// not treat this as a sign-out.
+    Degraded {
+        /// Uppercase server error code of the failed step (for example `AUTH_REQUIRED`,
+        /// `SERVICE_UNAVAILABLE`); for display and logs, not for control flow.
+        reason: String,
+        access_token: RelayToken,
+        /// Opaque; store and send back as is.
+        refresh_credential: String,
+    },
+}
+
+pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionOutcome> {
     match status {
         200 => {}
         401 | 403 => return Err(SessionError::Unauthorized),
@@ -219,13 +241,30 @@ pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
     let Value::Object(root) = json::parse(text).map_err(|_| SessionError::Malformed)? else {
         return Err(SessionError::Malformed);
     };
+    if root.contains_key("degraded") {
+        let reason = string(&root, "reason")?;
+        if root.get("degraded") != Some(&Value::Bool(true))
+            || reason.is_empty()
+            || reason.len() > 64
+            || !reason
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(SessionError::Malformed);
+        }
+        return Ok(SessionOutcome::Degraded {
+            reason,
+            access_token: token(object(&root, "accessToken")?)?,
+            refresh_credential: string(&root, "refreshCredential")?,
+        });
+    }
     let account = object(&root, "account")?;
     let device = object(&root, "device")?;
     let hosts = array(&root, "hosts")?
         .iter()
         .map(|h| parse_host(element(h)?))
         .collect::<R<_>>()?;
-    Ok(SessionResponse {
+    Ok(SessionOutcome::Full(Box::new(SessionResponse {
         account: Account {
             id: string(account, "id")?,
             email: opt_string(account, "email")?,
@@ -246,5 +285,5 @@ pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
             .map(|v| token(element(v)?))
             .transpose()?,
         refresh_credential: opt_string(&root, "refreshCredential")?,
-    })
+    })))
 }
