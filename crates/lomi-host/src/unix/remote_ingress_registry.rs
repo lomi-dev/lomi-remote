@@ -258,6 +258,14 @@ impl<'cancel> Registry<'cancel> {
         self.entries.values().any(Driver::has_active_git_writer)
     }
 
+    #[cfg(unix)]
+    pub(in crate::unix::auth) fn relay_wait_fds(&self) -> Vec<std::os::fd::RawFd> {
+        self.entries
+            .values()
+            .filter_map(Driver::relay_wait_fd)
+            .collect()
+    }
+
     pub(in crate::unix::auth) fn has_established_connection(&self) -> bool {
         self.entries
             .values()

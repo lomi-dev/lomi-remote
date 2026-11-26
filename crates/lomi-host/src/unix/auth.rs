@@ -1561,6 +1561,33 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn wait_readable_wakes_on_incoming_bytes_not_on_timeout() {
+        use crate::unix::auth::wait_readable;
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fds = [rx.as_raw_fd()];
+        let started = Instant::now();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            tx.write_all(b"x").unwrap();
+            tx
+        });
+        wait_readable(&fds, Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(writer.join().unwrap());
+        // Hangup also returns at once, and an idle socket waits the full bound.
+        let started = Instant::now();
+        wait_readable(&fds, Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let (_keep, idle) = std::os::unix::net::UnixStream::pair().unwrap();
+        let started = Instant::now();
+        wait_readable(&[idle.as_raw_fd()], Duration::from_millis(30));
+        assert!(started.elapsed() >= Duration::from_millis(25));
+    }
+
     #[test]
     fn actor_wait_tracks_cloud_and_reserved_stage_progress() {
         use cloud::StepOutcome;
@@ -3421,6 +3448,48 @@ impl<'a> WorkerOperationUnits<'a> {
     }
 }
 
+/// Sleep for at most `wait`, but return as soon as a command arrives or a
+/// relay socket becomes readable. A command that lands during the socket wait
+/// is picked up after at most `wait` (20-50 ms while a channel is established).
+fn wait_for_command_or_frame(
+    receiver: &mpsc::Receiver<Command>,
+    ingress: &remote_ingress::Registry<'_>,
+    wait: Duration,
+) -> Result<Command, mpsc::RecvTimeoutError> {
+    #[cfg(unix)]
+    if !wait.is_zero() && wait <= remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT {
+        let fds = ingress.relay_wait_fds();
+        if !fds.is_empty() {
+            if let Ok(command) = receiver.try_recv() {
+                return Ok(command);
+            }
+            wait_readable(&fds, wait);
+            return receiver
+                .try_recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Timeout);
+        }
+    }
+    let _ = ingress;
+    receiver.recv_timeout(wait)
+}
+
+/// Returns when any descriptor is readable/hung up or `wait` elapsed.
+#[cfg(unix)]
+fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) {
+    let mut polls: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // Round up so a sub-millisecond remainder cannot become a spin.
+    let ms = wait.as_millis().max(1).min(i32::MAX as u128) as libc::c_int;
+    // SAFETY: polls is a live, correctly sized pollfd array.
+    unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, ms) };
+}
+
 fn run_with_apis_and_coordinator(
     auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
     transport: &dyn AuthTransport,
@@ -3533,7 +3602,7 @@ fn run_with_apis_inner(
                 remote_ingress::ESTABLISHED_ACTOR_WAIT
             });
         }
-        match receiver.recv_timeout(wait) {
+        match wait_for_command_or_frame(receiver, &ingress, wait) {
             Ok(Command::Wake(id)) => {
                 let _ = id;
             }

@@ -144,9 +144,9 @@ fn relay_socket_mut(socket: &mut IngressSocket) -> &mut RelayConnection {
 mod registry;
 pub(super) use registry::Registry;
 
-/// Relay frames do not wake the actor. While a channel is established, poll
-/// it often so an RPC is not held for a whole idle wait before intake and
-/// again before its result is sent.
+/// While a channel is established the actor sleeps in `poll(2)` on the relay
+/// sockets, so an incoming frame wakes it at once. These waits are only the
+/// upper bound for work that has no descriptor (helper results, owner turns).
 pub(super) const ESTABLISHED_ACTOR_WAIT: Duration = Duration::from_millis(20);
 pub(super) const ESTABLISHED_IDLE_ACTOR_WAIT: Duration = Duration::from_millis(50);
 
@@ -922,6 +922,18 @@ impl<'cancel> Driver<'cancel> {
                 connection.socket.close();
                 false
             }
+        }
+    }
+    /// Relay socket descriptor to wait on for the next frame (readiness only).
+    #[cfg(unix)]
+    pub(super) fn relay_wait_fd(&self) -> Option<std::os::fd::RawFd> {
+        match &self.connection.as_ref()?.socket {
+            #[cfg(not(test))]
+            socket => socket.wait_fd(),
+            #[cfg(test)]
+            IngressSocket::Relay(socket) => socket.wait_fd(),
+            #[cfg(test)]
+            IngressSocket::Memory(_) => None,
         }
     }
     pub(super) fn has_established_connection(&self) -> bool {

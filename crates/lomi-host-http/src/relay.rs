@@ -218,6 +218,15 @@ impl RelayConnection {
     pub fn is_closed(&self) -> bool {
         self.socket.is_none()
     }
+    /// Descriptor of the underlying TCP stream, only for a readiness wait
+    /// (poll). Never read, write or close through it.
+    #[cfg(unix)]
+    pub fn wait_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        self.socket
+            .as_ref()
+            .map(|socket| socket.get_ref().get_ref().tcp.as_raw_fd())
+    }
     /// Immediate local shutdown. Never waits for a peer close handshake.
     pub fn close(&mut self) {
         self.socket.take();
