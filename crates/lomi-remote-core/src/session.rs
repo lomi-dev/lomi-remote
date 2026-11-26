@@ -1,0 +1,221 @@
+//! Startup request `POST /remote/session` (`03-protokol.md` section 2,
+//! `02-architektura.md` section 2). One exchange returns the account, a relay
+//! token, the Host list and the device state. The platform performs the HTTP
+//! call; the core builds the request and parses the response.
+//!
+//! The server side does not exist yet (P2.x in auth-app), so the JSON field names
+//! below are this core's proposal; the server must match them. Unknown fields in
+//! the response are ignored; missing or mistyped ones are an error.
+
+use crate::json::{self, Object};
+use serde_json::Value;
+
+pub const SESSION_PATH: &str = "/remote/session";
+/// Largest response body the core parses.
+pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
+
+/// Short-lived token for the relay link (and its absolute expiry, Unix ms).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayToken {
+    pub token: String,
+    pub expires_at: u64,
+}
+
+/// How the client authenticates the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// Browser: the session cookie, attached by the platform HTTP stack
+    /// (`credentials: "include"`); nothing goes into the body.
+    Cookie,
+    /// Mobile and desktop: the refresh credential, sent in the body.
+    Refresh(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: &'static str,
+    pub path: &'static str,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+pub fn session_request(contract_hash: &str, credential: &Credential) -> HttpRequest {
+    let mut body = Object::new();
+    body.insert(
+        "contractHash".into(),
+        Value::String(contract_hash.to_owned()),
+    );
+    if let Credential::Refresh(c) = credential {
+        body.insert("refreshCredential".into(), Value::String(c.clone()));
+    }
+    HttpRequest {
+        method: "POST",
+        path: SESSION_PATH,
+        headers: vec![("content-type".into(), "application/json".into())],
+        // Serializing a map of strings cannot fail.
+        body: serde_json::to_vec(&Value::Object(body)).unwrap_or_default(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostEntry {
+    pub id: String,
+    pub name: String,
+    pub online: bool,
+    /// Decimal strings, as in the relay frames.
+    pub access_epoch: String,
+    pub runtime_generation: String,
+    pub workspaces: Vec<Workspace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceState {
+    Unregistered,
+    Registered { device_id: String },
+    Revoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionResponse {
+    pub account: Account,
+    /// End of the login session, Unix ms.
+    pub session_expires_at: u64,
+    pub relay: RelayToken,
+    pub hosts: Vec<HostEntry>,
+    pub device: DeviceState,
+    /// Mobile only: new access token and rotated refresh credential for the platform to store.
+    pub access_token: Option<RelayToken>,
+    pub refresh_credential: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    /// 401/403: sign in again.
+    Unauthorized,
+    /// Other non-200 status.
+    Http(u16),
+    TooLarge,
+    /// Not strict JSON or not the expected shape.
+    Malformed,
+}
+
+impl SessionError {
+    /// Worth repeating with backoff (server or gateway trouble), as opposed to fatal for this credential.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, SessionError::Http(408 | 425 | 429 | 500..=599))
+    }
+}
+
+type R<T> = Result<T, SessionError>;
+
+fn field<'a>(o: &'a Object, k: &str) -> R<&'a Value> {
+    o.get(k).ok_or(SessionError::Malformed)
+}
+fn string(o: &Object, k: &str) -> R<String> {
+    field(o, k)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or(SessionError::Malformed)
+}
+fn opt_string(o: &Object, k: &str) -> R<Option<String>> {
+    o.get(k)
+        .map(|v| v.as_str().map(str::to_owned).ok_or(SessionError::Malformed))
+        .transpose()
+}
+fn uint(o: &Object, k: &str) -> R<u64> {
+    field(o, k)?
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or(SessionError::Malformed)
+}
+fn object<'a>(o: &'a Object, k: &str) -> R<&'a Object> {
+    field(o, k)?.as_object().ok_or(SessionError::Malformed)
+}
+fn array<'a>(o: &'a Object, k: &str) -> R<&'a Vec<Value>> {
+    field(o, k)?.as_array().ok_or(SessionError::Malformed)
+}
+fn element(v: &Value) -> R<&Object> {
+    v.as_object().ok_or(SessionError::Malformed)
+}
+fn token(o: &Object) -> R<RelayToken> {
+    Ok(RelayToken {
+        token: string(o, "token")?,
+        expires_at: uint(o, "expiresAt")?,
+    })
+}
+
+pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
+    match status {
+        200 => {}
+        401 | 403 => return Err(SessionError::Unauthorized),
+        s => return Err(SessionError::Http(s)),
+    }
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(SessionError::TooLarge);
+    }
+    let text = std::str::from_utf8(body).map_err(|_| SessionError::Malformed)?;
+    let Value::Object(root) = json::parse(text).map_err(|_| SessionError::Malformed)? else {
+        return Err(SessionError::Malformed);
+    };
+    let account = object(&root, "account")?;
+    let device = object(&root, "device")?;
+    let hosts = array(&root, "hosts")?
+        .iter()
+        .map(|h| {
+            let h = element(h)?;
+            Ok(HostEntry {
+                id: string(h, "hostId")?,
+                name: string(h, "name")?,
+                online: field(h, "online")?
+                    .as_bool()
+                    .ok_or(SessionError::Malformed)?,
+                access_epoch: string(h, "accessEpoch")?,
+                runtime_generation: string(h, "runtimeGeneration")?,
+                workspaces: array(h, "workspaces")?
+                    .iter()
+                    .map(|w| {
+                        let w = element(w)?;
+                        Ok(Workspace {
+                            id: string(w, "workspaceId")?,
+                            name: string(w, "name")?,
+                        })
+                    })
+                    .collect::<R<_>>()?,
+            })
+        })
+        .collect::<R<_>>()?;
+    Ok(SessionResponse {
+        account: Account {
+            id: string(account, "id")?,
+            email: opt_string(account, "email")?,
+        },
+        session_expires_at: uint(&root, "sessionExpiresAt")?,
+        relay: token(object(&root, "relay")?)?,
+        hosts,
+        device: match string(device, "state")?.as_str() {
+            "unregistered" => DeviceState::Unregistered,
+            "registered" => DeviceState::Registered {
+                device_id: string(device, "deviceId")?,
+            },
+            "revoked" => DeviceState::Revoked,
+            _ => return Err(SessionError::Malformed),
+        },
+        access_token: root
+            .get("accessToken")
+            .map(|v| token(element(v)?))
+            .transpose()?,
+        refresh_credential: opt_string(&root, "refreshCredential")?,
+    })
+}

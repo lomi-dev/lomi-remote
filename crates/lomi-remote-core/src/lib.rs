@@ -1,30 +1,22 @@
-//! Shared Lomi Remote client core. Pure logic only: no sockets, clocks or files.
-//! Skeleton for the P2.2 cross-target build proof.
+//! Shared Lomi Remote client core. Pure logic only: no sockets, threads or clocks.
+//!
+//! * [`frame`]: relay link frame codec, pinned by `test-vectors/relay-frames.v1.json`.
+//! * [`link`]: link client state machine for role `device` (sans-I/O).
+//! * [`session`]: the `POST /remote/session` startup request and response.
+
+pub mod frame;
+pub mod json;
+pub mod link;
+pub mod session;
 
 /// Core version, identical to the crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Encodes one frame: `kind` (1 byte), big-endian `u16` length, payload.
-pub fn encode_frame(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
-    let len = u16::try_from(payload.len()).ok()?;
-    let mut out = Vec::with_capacity(3 + payload.len());
-    out.push(kind);
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(payload);
-    Some(out)
-}
-
-/// Decodes exactly one frame; trailing or missing bytes yield `None`.
-pub fn decode_frame(bytes: &[u8]) -> Option<(u8, &[u8])> {
-    let (&kind, rest) = bytes.split_first()?;
-    let (len, payload) = rest.split_first_chunk::<2>()?;
-    (payload.len() == usize::from(u16::from_be_bytes(*len))).then_some((kind, payload))
-}
-
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser {
+    use crate::frame::{Direction, MAX_FRAME_BYTES, decode_frame, encode_frame};
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(js_name = coreVersion)]
@@ -32,24 +24,19 @@ mod browser {
         super::version().to_owned()
     }
 
-    #[wasm_bindgen(js_name = encodeFrame)]
-    pub fn encode_frame(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
-        super::encode_frame(kind, payload)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_roundtrip_and_version() {
-        assert!(!version().is_empty());
-        let f = encode_frame(7, b"hi").unwrap();
-        assert_eq!(f, [7, 0, 2, b'h', b'i']);
-        assert_eq!(decode_frame(&f), Some((7, &b"hi"[..])));
-        assert_eq!(decode_frame(&f[..4]), None);
-        assert_eq!(decode_frame(&[f.as_slice(), &[0]].concat()), None);
-        assert!(encode_frame(0, &vec![0; 70_000]).is_none());
+    /// Decodes a relay link frame and returns its canonical encoding (`None` when rejected).
+    /// `from_relay` is the sender: true for READY/EVENT/REPLY, false for AUTH/CALL.
+    #[wasm_bindgen(js_name = canonicalFrame)]
+    pub fn canonical_frame(bytes: &[u8], from_relay: bool) -> Option<Vec<u8>> {
+        let from = if from_relay {
+            Direction::Relay
+        } else {
+            Direction::Client
+        };
+        encode_frame(
+            &decode_frame(bytes, from, MAX_FRAME_BYTES).ok()?,
+            MAX_FRAME_BYTES,
+        )
+        .ok()
     }
 }
