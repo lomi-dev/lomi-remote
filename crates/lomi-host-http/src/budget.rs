@@ -493,10 +493,12 @@ mod tests {
     #[test]
     fn socket_wait_stays_precise_at_utility_qos_and_wakes_on_data() {
         std::thread::spawn(|| {
+            // Thread-level darwinbg coalesces timers like the daemon's
+            // process clamp (a per-thread QoS class alone does not).
             #[cfg(target_os = "macos")]
-            // SAFETY: changes only this test thread's QoS class.
+            // SAFETY: changes only this test thread's scheduling tier.
             unsafe {
-                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+                libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG);
             }
             let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
             let started = Instant::now();

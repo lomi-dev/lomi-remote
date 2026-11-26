@@ -1731,26 +1731,53 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(25));
     }
 
-    /// Short actor waits use poll(2) even with no relay socket: at the
-    /// daemon's utility QoS a 20 ms `recv_timeout` is coalesced to ~150 ms.
+    /// Actor waits use poll(2), also with no relay socket and for the idle
+    /// wait: at the daemon's utility QoS a 20 ms `recv_timeout` is coalesced
+    /// to ~150 ms and a 250 ms one to ~395 ms.
     #[cfg(unix)]
     #[test]
-    fn short_actor_wait_stays_precise_at_utility_qos() {
-        use crate::unix::auth::wait_readable;
+    fn actor_waits_stay_precise_at_utility_qos() {
+        use crate::unix::auth::{WakeGuard, wait_for_command_or_frame};
         std::thread::spawn(|| {
+            // Thread-level darwinbg coalesces timers like the daemon's
+            // process clamp (a per-thread QoS class alone does not).
             #[cfg(target_os = "macos")]
-            // SAFETY: changes only this test thread's QoS class.
+            // SAFETY: changes only this test thread's scheduling tier.
             unsafe {
-                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+                libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG);
             }
-            let wait = remote_ingress::ESTABLISHED_ACTOR_WAIT;
-            let started = Instant::now();
-            for _ in 0..5 {
-                assert!(!wait_readable(&[], wait));
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let ingress =
+                remote_ingress::Registry::with_coordinator(&cancelled, std::sync::Weak::new());
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let mut guard = WakeGuard::default();
+            for (wait, rounds) in [
+                (remote_ingress::ESTABLISHED_ACTOR_WAIT, 5),
+                (remote_ingress::actor_wait_duration(false), 2),
+            ] {
+                let started = Instant::now();
+                for _ in 0..rounds {
+                    assert!(
+                        wait_for_command_or_frame(&receiver, &ingress, wait, &mut guard).is_err()
+                    );
+                }
+                let average = started.elapsed() / rounds;
+                assert!(average >= wait, "returned before the bound: {average:?}");
+                assert!(
+                    average < wait + Duration::from_millis(20),
+                    "stretched: {average:?}"
+                );
             }
-            let average = started.elapsed() / 5;
-            assert!(average >= wait, "returned before the bound: {average:?}");
-            assert!(average < wait * 2, "stretched: {average:?}");
+            sender.send(super::Command::Configure).unwrap();
+            assert!(matches!(
+                wait_for_command_or_frame(
+                    &receiver,
+                    &ingress,
+                    remote_ingress::actor_wait_duration(false),
+                    &mut guard
+                ),
+                Ok(super::Command::Configure)
+            ));
         })
         .join()
         .unwrap();
@@ -2761,13 +2788,16 @@ impl<'a, 'operation> RuntimeWithOperation<'a, 'operation> {
         self.check()?;
         // Busy retains the same turn and original operation. Commands are left
         // queued so Configure/Logout dispatch follows dropping attempt and IO.
-        std::thread::park_timeout(
-            Duration::from_millis(10).min(
-                self.operation
-                    .deadline()
-                    .saturating_duration_since(Instant::now()),
-            ),
+        let wait = Duration::from_millis(10).min(
+            self.operation
+                .deadline()
+                .saturating_duration_since(Instant::now()),
         );
+        // poll(2) keeps 10 ms at utility QoS, where park_timeout takes ~50-80 ms.
+        #[cfg(unix)]
+        wait_readable(&[], wait);
+        #[cfg(not(unix))]
+        std::thread::park_timeout(wait);
         self.check()
     }
 }
@@ -3630,10 +3660,10 @@ impl<'a> WorkerOperationUnits<'a> {
 /// Sleep for at most `wait`, but return as soon as a command arrives or a
 /// relay socket becomes readable. A command that lands during the socket wait
 /// is picked up after at most `wait` (20-50 ms while a channel is set up or
-/// established). Short waits always use poll(2), also with no relay socket
-/// and when the guard asks for a plain sleep: the Host daemon runs at utility
-/// QoS, where macOS coalesces a 20 ms `recv_timeout` to ~150 ms, while a poll
-/// timeout stays precise.
+/// established, 250 ms when idle). Every timed wait uses poll(2), also with no
+/// relay socket and when the guard asks for a plain sleep: the Host daemon
+/// runs at utility QoS, where macOS coalesces a 20 ms `recv_timeout` to
+/// ~150 ms and a 250 ms one to ~395 ms, while a poll timeout stays precise.
 fn wait_for_command_or_frame(
     receiver: &mpsc::Receiver<Command>,
     ingress: &remote_ingress::Registry<'_>,
@@ -3641,7 +3671,7 @@ fn wait_for_command_or_frame(
     guard: &mut WakeGuard,
 ) -> Result<Command, mpsc::RecvTimeoutError> {
     #[cfg(unix)]
-    if !wait.is_zero() && wait <= remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT {
+    if !wait.is_zero() {
         if let Ok(command) = receiver.try_recv() {
             return Ok(command);
         }
