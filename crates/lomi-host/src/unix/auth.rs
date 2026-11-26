@@ -1561,6 +1561,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn restart_keeps_sleep_that_happened_before_it() {
+        use super::{base_after_suspend, projected_base};
+        // Thread started at wall 1_000 with 0 suspended. Host sleeps 3 days,
+        // a network failure restarts the attempt before any pass saw it.
+        let slept = Duration::from_secs(3 * 86_400);
+        let base = projected_base(1_000, Duration::from_secs(60), slept);
+        assert_eq!(base, 1_000 + 60 + 3 * 86_400);
+        // The inner loop starts counting from the same reading: no double count.
+        let mut seen = slept;
+        assert_eq!(base_after_suspend(base, &mut seen, slept), base);
+        // Sleep after the restart is still added once.
+        assert_eq!(
+            base_after_suspend(base, &mut seen, slept + Duration::from_secs(100)),
+            base + 100
+        );
+    }
+
+    #[test]
+    fn corrected_base_rejects_expired_access_grant_and_channel_deadline() {
+        use super::{base_after_suspend, project};
+        let anchor = Instant::now();
+        let base = 10_000;
+        let expires = base + 600; // access/grant/context expiry in wall seconds
+        assert!(project(base, anchor) < expires, "valid before the sleep");
+        let mut seen = Duration::ZERO;
+        let corrected = base_after_suspend(base, &mut seen, Duration::from_secs(900));
+        assert!(project(corrected, anchor) >= expires, "expired after sleep");
+        // Channel deadline = anchor + (expires - base) must not be offered
+        // with a base that predates the sleep: the corrected base is later,
+        // so the same expiry yields an earlier deadline or is refused.
+        let old = crate::unix::auth::channel::channel_deadline(anchor, base, expires);
+        let new = crate::unix::auth::channel::channel_deadline(anchor, corrected, expires);
+        assert!(old.is_some());
+        assert!(new.is_none(), "expiry already in the past is refused");
+        assert!(
+            crate::unix::auth::channel::channel_deadline(anchor, base + 500, expires).unwrap()
+                < old.unwrap()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn readable_but_unread_socket_does_not_spin() {
@@ -2093,6 +2134,9 @@ fn start_inner(
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        // Thread-level: every outer restart recomputes base from these, so
+        // sleep that happened before a restart is never lost.
+        let suspended_at_start = suspended_total();
         let mut explicit_retry = false;
         while !stopping.load(Ordering::Acquire) {
             if explicit_retry && !await_explicit_retry(&receiver, &stopping, &retry_requested) {
@@ -2129,7 +2173,11 @@ fn start_inner(
                 retry_requested: &retry_requested,
                 gate: &gate,
                 paused: &paused,
-                base: wall.saturating_add(anchor.elapsed().as_secs()),
+                base: projected_base(
+                    wall,
+                    anchor.elapsed(),
+                    suspended_total().saturating_sub(suspended_at_start),
+                ),
                 anchor: Instant::now(),
             };
             let base = match observed(runtime) {
@@ -2586,7 +2634,7 @@ impl<'a, 'operation> RuntimeWithOperation<'a, 'operation> {
     }
 
     fn projected_time(self) -> u64 {
-        self.base.saturating_add(self.anchor.elapsed().as_secs())
+        project(self.base, self.anchor)
     }
     fn with_clock_floor(self, floor: u64) -> Self {
         if floor <= self.projected_time() {
@@ -3582,6 +3630,12 @@ fn suspended_total() -> Duration {
         Duration::ZERO
     }
 }
+/// Base for a (re)started worker attempt: wall at thread start plus awake
+/// time plus suspended time since thread start.
+fn projected_base(wall: u64, awake: Duration, suspended: Duration) -> u64 {
+    wall.saturating_add(awake.as_secs())
+        .saturating_add(suspended.as_secs())
+}
 /// Moves the projection base forward by sleep not yet counted. Forward only.
 fn base_after_suspend(base: u64, seen: &mut Duration, total: Duration) -> u64 {
     let slept = total.saturating_sub(*seen);
@@ -3676,6 +3730,28 @@ fn run_with_apis_inner(
     let mut suspended_seen = suspended_total();
     let mut fast_wakes = 0u32;
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
+        // Every pass: if the system slept, end the unit exactly like a
+        // deadline settlement (nothing retained crosses the jump, the gate
+        // closes and must be reopened by a real Ready resume), then move the
+        // projection forward. Retained continuations keep their (base, anchor)
+        // pair, so correcting only at settlement could take a very long time.
+        // Deferred while a Git writer is finishing; it ends within one turn.
+        let suspended_now = suspended_total();
+        if suspended_now.saturating_sub(suspended_seen) >= Duration::from_secs(1)
+            && !stopping.load(Ordering::Acquire)
+            && !ingress.has_active_git_writer()
+        {
+            cloud.finish_operation();
+            peer.discard_retained_operation();
+            channel.discard_retained_operation();
+            idle.reset_reservation();
+            publication_barrier.reset();
+            ingress.discard();
+            gate.store(true, Ordering::Release);
+            base = base_after_suspend(base, &mut suspended_seen, suspended_now);
+            units.admit_after_settlement(stopping);
+            continue;
+        }
         let scheduling_time = Instant::now();
         let retained = worker_unit_retained(
             cloud.has_retained_operation(),
@@ -3698,11 +3774,6 @@ fn run_with_apis_inner(
         // against the other connections' still-retained peer scopes.
         let retained = retained || (units.started && !settled_at_message_boundary);
         units.started = true;
-        if !retained {
-            // Held continuations keep their admission projection; sleep is
-            // counted at the first pass without one.
-            base = base_after_suspend(base, &mut suspended_seen, suspended_total());
-        }
         let mut runtime =
             initial_runtime.with_operation_at(units.operation(), units.aborted(), base, anchor);
         if settled_at_message_boundary {
@@ -4767,6 +4838,9 @@ fn run_with_apis_inner(
             }
         }
     }
+}
+fn project(base: u64, anchor: Instant) -> u64 {
+    base.saturating_add(anchor.elapsed().as_secs())
 }
 fn presentation_expired(expires_at: u64) -> bool {
     std::time::SystemTime::now()

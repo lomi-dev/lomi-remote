@@ -1039,16 +1039,9 @@ impl Worker {
         }
         // All parsing/allocation and the absolute expiry conversion precede the
         // write. Never create a new budget from the post-ACK completion time.
-        let channel_deadline = runtime
-            .anchor
-            .checked_add(Duration::from_secs(
-                prepared
-                    .context()
-                    .expires_at
-                    .checked_sub(runtime.base)
-                    .ok_or(PeerError::Invalid)?,
-            ))
-            .ok_or(PeerError::Invalid)?;
+        let channel_deadline =
+            channel_deadline(runtime.anchor, runtime.base, prepared.context().expires_at)
+                .ok_or(PeerError::Invalid)?;
         let handoff = AdmittedChannelHandoff {
             signed_grant: crypt(SignedGrantV3::from_wire(&work.inputs.grant))?,
             admission: crypt(SignedChannelAdmissionV3::from_wire(admission))?,
@@ -1436,3 +1429,10 @@ fn verify_expired(
 #[cfg(test)]
 #[path = "channel_tests.rs"]
 pub(super) mod tests;
+
+/// Monotonic deadline for a wall-clock expiry under one (base, anchor) pair.
+/// A base that already includes slept time yields an earlier deadline, or
+/// None when the expiry has passed.
+pub(super) fn channel_deadline(anchor: Instant, base: u64, expires_at: u64) -> Option<Instant> {
+    anchor.checked_add(Duration::from_secs(expires_at.checked_sub(base)?))
+}
