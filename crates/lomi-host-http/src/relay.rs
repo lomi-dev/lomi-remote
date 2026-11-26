@@ -42,6 +42,10 @@ impl RelayTransport {
     pub fn new(endpoint: LocalRelayEndpoint) -> Result<Self> {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        #[cfg(debug_assertions)]
+        for der in super::dev_ca::extra_roots()?.unwrap_or_default() {
+            roots.add(der).map_err(|_| Error::InvalidConfig)?;
+        }
         Self::with_roots(endpoint, roots)
     }
     fn with_roots(endpoint: LocalRelayEndpoint, roots: rustls::RootCertStore) -> Result<Self> {
@@ -466,6 +470,14 @@ impl Drop for RelaySocket {
 #[cfg(test)]
 mod tests {
     use super::{RelayStatus, relay_status};
+
+    #[test]
+    fn loopback_relay_endpoints_with_explicit_ports_are_canonical() {
+        for host in ["localhost", "127.0.0.1"] {
+            let endpoint = format!("wss://{host}:8445/v2/relay");
+            assert!(super::LocalRelayEndpoint::try_from(endpoint).is_ok());
+        }
+    }
 
     #[test]
     fn relay_status_accepts_only_exact_authenticated_and_ready() {
