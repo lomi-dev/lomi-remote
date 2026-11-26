@@ -1,0 +1,9 @@
+{
+  "name": "@lomi/remote-core-wasm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bash ../../scripts/build-remote-core.sh"
+  }
+}

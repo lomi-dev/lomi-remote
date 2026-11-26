@@ -2297,6 +2297,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lomi-remote-core"
+version = "0.0.0"
+dependencies = [
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "lomi-remote-crypto"
 version = "0.1.0"
 dependencies = [
