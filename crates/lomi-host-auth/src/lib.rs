@@ -1982,6 +1982,15 @@ mod self_retirement_tests {
         .unwrap()
     }
 
+    #[test]
+    fn loopback_origins_with_explicit_ports_are_canonical() {
+        for origin in ["https://localhost:8443", "https://127.0.0.1:8443"] {
+            let mut config = test_config();
+            config.origin = origin.to_owned();
+            assert!(config.validate().is_ok(), "{origin}");
+        }
+    }
+
     fn ready_storage(config: &Config) -> MemoryStorage {
         ready_storage_expiring(config, NOW + 300)
     }

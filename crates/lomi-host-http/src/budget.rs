@@ -180,10 +180,14 @@ pub(crate) fn pooled_agent() -> Result<ureq::Agent> {
         );
         Error::ResolverUnavailable
     })?;
+    if let Some(agent) = POOLED.get() {
+        return Ok(agent.clone());
+    }
+    let tls = super::tls_config()?;
     Ok(POOLED
         .get_or_init(|| {
             ureq::Agent::with_parts(
-                super::agent_config(super::tls_config(), true),
+                super::agent_config(tls, true),
                 BudgetConnector,
                 super::resolver::BudgetResolver,
             )

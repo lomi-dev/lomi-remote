@@ -161,7 +161,7 @@ pub struct DataTransport {
 }
 impl DataTransport {
     pub fn new(origin: RemoteApiOrigin) -> Result<Self> {
-        Self::with_tls(origin, tls_config())
+        Self::with_tls(origin, tls_config()?)
     }
 
     pub(super) fn with_tls(origin: RemoteApiOrigin, tls: ureq::tls::TlsConfig) -> Result<Self> {
@@ -488,4 +488,15 @@ pub(super) fn data_failure(status: u16, bytes: &[u8], scope: Scope) -> Error {
         return Error::HttpStatus;
     }
     Error::DataRemote(failure)
+}
+
+#[cfg(test)]
+mod loopback_origin_tests {
+    use super::validate_remote_origin;
+
+    #[test]
+    fn loopback_origins_with_explicit_ports_are_canonical() {
+        assert!(validate_remote_origin("https://localhost:8444").is_ok());
+        assert!(validate_remote_origin("https://127.0.0.1:8444").is_ok());
+    }
 }

@@ -12,6 +12,8 @@ use std::{
 use zeroize::Zeroizing;
 mod budget;
 mod data;
+#[cfg(debug_assertions)]
+mod dev_ca;
 pub use budget::BudgetStop;
 pub use budget_api::{BudgetDataTransport, BudgetTransport};
 mod budget_api;
@@ -135,7 +137,7 @@ pub struct Transport {
 }
 impl Transport {
     pub fn new(config: &Config) -> Result<Self> {
-        Self::with_tls(config, tls_config())
+        Self::with_tls(config, tls_config()?)
     }
 
     fn with_tls(config: &Config, tls: ureq::tls::TlsConfig) -> Result<Self> {
@@ -355,11 +357,23 @@ fn agent_config(tls: ureq::tls::TlsConfig, pooled: bool) -> ureq::config::Config
         .tls_config(tls)
         .build()
 }
-fn tls_config() -> ureq::tls::TlsConfig {
-    ureq::tls::TlsConfig::builder()
+fn tls_config() -> Result<ureq::tls::TlsConfig> {
+    let builder = ureq::tls::TlsConfig::builder()
         .provider(ureq::tls::TlsProvider::Rustls)
-        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .build()
+        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()));
+    // Debug builds only: trust the dev CA instead of the built-in roots.
+    // shortcut: ureq cannot mix WebPki with extra roots, so the dev CA is exclusive here.
+    #[cfg(debug_assertions)]
+    let builder = match dev_ca::extra_roots()? {
+        Some(certs) => builder.root_certs(ureq::tls::RootCerts::new_with_certs(
+            &certs
+                .iter()
+                .map(|der| ureq::tls::Certificate::from_der(der).to_owned())
+                .collect::<Vec<_>>(),
+        )),
+        None => builder,
+    };
+    Ok(builder.build())
 }
 fn network_error(error: ureq::Error) -> Error {
     diagnostics::transport_error(&error);
