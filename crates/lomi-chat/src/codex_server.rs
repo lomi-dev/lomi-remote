@@ -78,7 +78,9 @@ impl Params {
         p
     }
 
-    pub fn turn_params(&self, thread_id: &str) -> Value {
+    /// `turn/start`. Read-only turns run in plan mode, the only mode in which Codex asks the
+    /// user questions (`requestUserInput`); plan mode needs a model, `model` is the thread's.
+    pub fn turn_params(&self, thread_id: &str, model: Option<&str>) -> Value {
         let mut input = vec![json!({"type": "text", "text": self.prompt})];
         input.extend(
             self.images
@@ -88,6 +90,13 @@ impl Params {
         let mut p = json!({"threadId": thread_id, "input": input});
         if let Some(e) = &self.effort {
             p["effort"] = json!(e);
+        }
+        let model = self.model.as_deref().or(model);
+        if let (Permissions::ReadOnly, Some(m)) = (self.permissions, model) {
+            // `developer_instructions: null` keeps the built-in plan-mode instructions.
+            p["collaborationMode"] = json!({"mode": "plan", "settings": {
+                "model": m, "reasoning_effort": self.effort, "developer_instructions": null,
+            }});
         }
         p
     }
@@ -529,6 +538,8 @@ pub struct CodexSession {
     pending: Mutex<HashMap<String, Pending>>,
     next: AtomicU64,
     thread: Mutex<Option<String>>,
+    /// The model the thread runs, as `thread/start` or `thread/resume` reported it.
+    model: Mutex<Option<String>>,
     /// Prefix of the request ids shown to the UI: a stale answer cannot hit a later process.
     generation: u64,
 }
@@ -562,6 +573,7 @@ impl CodexSession {
             pending: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             thread: Mutex::new(None),
+            model: Mutex::new(None),
             generation: next_generation(),
         }))
     }
@@ -580,6 +592,11 @@ impl CodexSession {
     /// The native thread id once the handshake succeeded.
     pub fn thread(&self) -> Option<String> {
         self.thread.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// The thread's model once the handshake succeeded.
+    pub fn model(&self) -> Option<String> {
+        self.model.lock().ok().and_then(|m| m.clone())
     }
 
     pub fn interrupt(&self, thread_id: &str, turn_id: &str) {
@@ -744,7 +761,11 @@ pub async fn start(
     p: &Params,
     native: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
-    let info = json!({"clientInfo": {"name": "lomi", "title": "Lomi", "version": env!("CARGO_PKG_VERSION")}});
+    // `experimentalApi` enables plan mode (`collaborationMode`) and its questions.
+    let info = json!({
+        "clientInfo": {"name": "lomi", "title": "Lomi", "version": env!("CARGO_PKG_VERSION")},
+        "capabilities": {"experimentalApi": true},
+    });
     call(s, rx, "initialize", info).await?;
     s.write(notification_line("initialized"))?;
     let mut reset = None;
@@ -765,6 +786,9 @@ pub async fn start(
     let id = cli::str_at(&result, &["thread", "id"]).ok_or("Codex returned no thread.")?;
     if let Ok(mut t) = s.thread.lock() {
         *t = Some(id.into());
+    }
+    if let (Ok(mut m), Some(model)) = (s.model.lock(), cli::str_at(&result, &["model"])) {
+        *m = Some(model.into());
     }
     Ok((id.into(), reset))
 }
@@ -817,8 +841,23 @@ mod tests {
             json!({"cwd":"/w","approvalPolicy":"never","sandbox":"danger-full-access"})
         );
         assert_eq!(
-            edit.turn_params("T"),
+            edit.turn_params("T", Some("gpt-y")),
             json!({"threadId":"T","input":[{"type":"text","text":"hi"},{"type":"localImage","path":"/a/p.png"}],"effort":"high"})
+        );
+        // Read-only runs in plan mode, with the thread's model when none was chosen.
+        let read = Params {
+            model: None,
+            images: vec![],
+            ..params(Permissions::ReadOnly)
+        };
+        assert_eq!(
+            read.turn_params("T", Some("gpt-y"))["collaborationMode"],
+            json!({"mode":"plan","settings":{"model":"gpt-y","reasoning_effort":"high","developer_instructions":null}})
+        );
+        assert!(
+            read.turn_params("T", None)
+                .get("collaborationMode")
+                .is_none()
         );
         assert_eq!(
             v(&request_line(3, "turn/interrupt", json!({"a":1}))),

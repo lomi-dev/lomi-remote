@@ -372,6 +372,8 @@ pub fn claude_session_argv(i: &Invocation) -> Vec<String> {
         "stream-json",
         "--permission-prompt-tool",
         "stdio",
+        // Tells whether a steering line joined the running turn or queued a new one.
+        "--replay-user-messages",
     ];
     args.splice(1..1, extra.map(String::from));
     args

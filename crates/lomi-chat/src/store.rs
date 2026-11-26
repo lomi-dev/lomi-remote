@@ -160,7 +160,7 @@ pub struct Question {
 }
 
 /// A slash command the CLI offers; sent as plain message text.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCommand {
     pub name: String,
@@ -600,6 +600,11 @@ pub fn valid_title(title: &str) -> Result<String, String> {
     Ok(title.to_string())
 }
 
+/// Commands depend on the agent and on the project (its skills and command files).
+fn command_key(instance_id: &str, project: &str) -> String {
+    format!("{instance_id}\n{project}")
+}
+
 fn get_thread(db: &Connection, id: &str) -> Result<ThreadSummary, String> {
     db.query_row(
         &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE id=?1"),
@@ -882,6 +887,7 @@ impl Store {
                name TEXT NOT NULL, mime TEXT NOT NULL, kind TEXT NOT NULL,
                size INTEGER NOT NULL, created_ms INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
+             CREATE TABLE IF NOT EXISTS command_cache(key TEXT PRIMARY KEY, list TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tombstones(operation_id TEXT PRIMARY KEY,
                request_hash TEXT NOT NULL, created_ms INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS threads_workspace ON threads(project, workspace_id, updated_ms DESC);",
@@ -949,6 +955,42 @@ impl Store {
             .ok_or_else(|| "Unknown attachment.".to_string())
     }
 
+    /// Copies attachments already sent in `thread_id` into fresh unsent ones,
+    /// so a failed turn can be sent again. All copies or none.
+    pub fn attachment_copy(
+        &self,
+        thread_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<Attachment>, String> {
+        let mut copies: Vec<Attachment> = Vec::new();
+        let copy = |id: &String| -> Result<Attachment, String> {
+            let original = self
+                .db
+                .query_row(
+                    "SELECT a.id,a.name,a.mime,a.kind,a.size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1 AND m.thread_id=?2",
+                    [id, thread_id],
+                    attachment_row,
+                )
+                .optional()
+                .map_err(db_err)?
+                .ok_or("Unknown attachment.")?;
+            let data = attachments::read(&self.attachments_dir(), &original)?;
+            self.attachment_import(&original.name, &data)
+        };
+        for id in ids {
+            match copy(id) {
+                Ok(a) => copies.push(a),
+                Err(e) => {
+                    for a in &copies {
+                        let _ = self.attachment_discard(&a.id);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(copies)
+    }
+
     /// Deletes an attachment that no message uses yet.
     pub fn attachment_discard(&self, id: &str) -> Result<(), String> {
         let attachment = self.attachment(id)?;
@@ -981,6 +1023,40 @@ impl Store {
 
     pub fn thread(&self, id: &str) -> Result<ThreadSummary, String> {
         get_thread(&self.db, id)
+    }
+
+    /// Slash commands last reported for the agent in the project, so the list is known
+    /// before a thread's own session starts.
+    pub fn cached_commands(
+        &self,
+        instance_id: &str,
+        project: &str,
+    ) -> Result<Vec<ThreadCommand>, String> {
+        let list: Option<String> = self
+            .db
+            .query_row(
+                "SELECT list FROM command_cache WHERE key=?1",
+                [command_key(instance_id, project)],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        Ok(list
+            .and_then(|l| serde_json::from_str(&l).ok())
+            .unwrap_or_default())
+    }
+
+    pub fn cache_commands(&self, thread_id: &str, list: &[ThreadCommand]) -> Result<(), String> {
+        let t = self.thread(thread_id)?;
+        let list = serde_json::to_string(list).map_err(|e| e.to_string())?;
+        self.db
+            .execute(
+                "INSERT INTO command_cache(key, list) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET list=excluded.list",
+                rusqlite::params![command_key(&t.instance_id, &t.project), list],
+            )
+            .map_err(db_err)?;
+        Ok(())
     }
 
     /// Threads owned by one workspace, newest first (legacy threads without an owner are not included).
@@ -2049,6 +2125,21 @@ mod tests {
     }
 
     #[test]
+    fn commands_are_shared_by_threads_of_one_agent_and_project() {
+        let (_d, mut s) = open();
+        let a = s.create(&create_req("a"), "A", ThreadKind::Cli).unwrap();
+        let b = s.create(&create_req("b"), "B", ThreadKind::Cli).unwrap();
+        assert!(s.cached_commands("openai", "/p").unwrap().is_empty());
+        let list = vec![ThreadCommand {
+            name: "review".into(),
+            description: "Review".into(),
+            argument_hint: String::new(),
+        }];
+        s.cache_commands(&a.thread_id, &list).unwrap();
+        assert_eq!(s.cached_commands(&b.instance_id, &b.project).unwrap(), list);
+    }
+
+    #[test]
     fn receipts_hold_no_text_and_follow_the_thread() {
         let (_d, mut s) = open();
         let t = s.create(&create_req("c"), "T", ThreadKind::Api).unwrap();
@@ -2545,6 +2636,46 @@ mod tests {
     fn count(s: &Store, table: &str) -> i64 {
         s.db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn attachment_copy_makes_unsent_duplicates() {
+        let (_d, mut s) = open();
+        let t = s.create(&create_req("c"), "T", ThreadKind::Api).unwrap();
+        let other = s.create(&create_req("o"), "O", ThreadKind::Api).unwrap();
+        let img = s.attachment_import("pic.png", PNG).unwrap();
+        let mut req = send_req("s1", &t, "hi");
+        req.attachments = vec![img.id.clone()];
+        s.send_begin(&req, 0, |_| Ok(())).unwrap();
+        let copies = s
+            .attachment_copy(&t.thread_id, std::slice::from_ref(&img.id))
+            .unwrap();
+        assert_eq!(copies.len(), 1);
+        let c = &copies[0];
+        assert_ne!(c.id, img.id);
+        assert_eq!((&c.name, &c.mime, c.size), (&img.name, &img.mime, img.size));
+        // The copy is unsent; the original stays bound to its message.
+        let bound = |id: &str| -> Option<String> {
+            s.db.query_row(
+                "SELECT message_id FROM attachments WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(bound(&c.id).is_none());
+        assert!(bound(&img.id).is_some());
+        assert!(
+            s.attachment_copy(&other.thread_id, std::slice::from_ref(&img.id))
+                .is_err()
+        );
+        // A failing id leaves no stray copies behind.
+        let before = count(&s, "attachments");
+        assert!(
+            s.attachment_copy(&t.thread_id, &[img.id.clone(), "nope".into()])
+                .is_err()
+        );
+        assert_eq!(count(&s, "attachments"), before);
     }
 
     #[test]

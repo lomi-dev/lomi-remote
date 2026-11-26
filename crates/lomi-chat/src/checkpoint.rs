@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 const REF_PREFIX: &str = "refs/lomi/chat/";
 const MAX_FILES: usize = 2000;
@@ -18,6 +19,53 @@ const MAX_ERR_CHARS: usize = 500;
 const COMMIT_MESSAGE: &str = "Lomi chat checkpoint";
 const IDENTITY_NAME: &str = "Lomi";
 const IDENTITY_EMAIL: &str = "lomi@localhost";
+/// Shadow repositories refuse folders with more candidate files than this.
+const MAX_SHADOW_FILES: usize = 20_000;
+/// Total size above which a folder without Git gets no undo snapshot.
+const MAX_SHADOW_BYTES: u64 = 200 * 1024 * 1024;
+/// Kept out of shadow snapshots: bulky, regenerable, or noise.
+const SHADOW_EXCLUDES: &str = "# Bulky or regenerable paths; snapshots would be slow and huge.\nnode_modules/\n.DS_Store\ntarget/\n.venv/\n__pycache__/\n.next/\n.cache/\n";
+
+static SHADOW_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Enables checkpoints in folders that are not git repositories: they get a
+/// private git dir under `root`. The first call wins.
+pub fn set_shadow_root(root: PathBuf) {
+    let _ = SHADOW_ROOT.set(root);
+}
+
+#[cfg(not(test))]
+fn shadow_root() -> Option<PathBuf> {
+    SHADOW_ROOT.get().cloned()
+}
+
+#[cfg(not(test))]
+fn shadow_limit() -> usize {
+    MAX_SHADOW_FILES
+}
+
+// Tests configure these per thread so they never fight over the global.
+#[cfg(test)]
+thread_local! {
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_SHADOW_FILES) };
+}
+
+#[cfg(test)]
+fn shadow_root() -> Option<PathBuf> {
+    TEST_ROOT.with(|r| r.borrow().clone())
+}
+
+#[cfg(test)]
+fn shadow_limit() -> usize {
+    TEST_LIMIT.with(|l| l.get())
+}
+
+/// A work tree plus, for non-git folders, the shadow git dir that tracks it.
+struct Repo {
+    top: PathBuf,
+    git_dir: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,12 +141,20 @@ fn ok(c: &mut Command) -> Result<Vec<u8>, String> {
     Err(format!("git failed ({}): {msg}", out.status))
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    ok(command(dir).args(args))
+fn cmd(repo: &Repo) -> Command {
+    let mut c = command(&repo.top);
+    if let Some(git_dir) = &repo.git_dir {
+        c.env("GIT_DIR", git_dir).env("GIT_WORK_TREE", &repo.top);
+    }
+    c
 }
 
-fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git(dir, args)?;
+fn git(repo: &Repo, args: &[&str]) -> Result<Vec<u8>, String> {
+    ok(cmd(repo).args(args))
+}
+
+fn git_text(repo: &Repo, args: &[&str]) -> Result<String, String> {
+    let out = git(repo, args)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
@@ -112,8 +168,43 @@ fn toplevel(cwd: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(PathBuf::from(s.trim_end_matches(['\n', '\r']))))
 }
 
-fn require_toplevel(cwd: &Path) -> Result<PathBuf, String> {
-    toplevel(cwd)?.ok_or_else(|| "not inside a git work tree".to_string())
+/// The git work tree containing `cwd`, else the shadow repo of `cwd` (created
+/// only when `create`). `None` when neither applies.
+fn resolve(cwd: &Path, create: bool) -> Result<Option<Repo>, String> {
+    if let Some(top) = toplevel(cwd)? {
+        return Ok(Some(Repo { top, git_dir: None }));
+    }
+    let Some(root) = shadow_root() else {
+        return Ok(None);
+    };
+    let top = cwd
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve the folder: {e}"))?;
+    let hash = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(top.to_string_lossy().as_bytes()))
+    };
+    let git_dir = root.join("checkpoints").join(format!("{hash}.git"));
+    if !git_dir.join("HEAD").exists() {
+        if !create {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(&git_dir)
+            .map_err(|e| format!("failed to create the checkpoint store: {e}"))?;
+        ok(command(&git_dir).args(["init", "-q", "--bare"]))?;
+        ok(command(&git_dir).args(["config", "core.bare", "false"]))?;
+        std::fs::create_dir_all(git_dir.join("info"))
+            .and_then(|()| std::fs::write(git_dir.join("info/exclude"), SHADOW_EXCLUDES))
+            .map_err(|e| format!("failed to write the checkpoint excludes: {e}"))?;
+    }
+    Ok(Some(Repo {
+        top,
+        git_dir: Some(git_dir),
+    }))
+}
+
+fn require_repo(cwd: &Path) -> Result<Repo, String> {
+    resolve(cwd, false)?.ok_or_else(|| "no checkpoints for this folder".to_string())
 }
 
 fn validate_ref(r: &str) -> Result<(), String> {
@@ -156,8 +247,8 @@ fn validate_rel(path: &str) -> Result<(), String> {
 /// agent's sandbox, and an agent with write access to the repository could have
 /// planted it in `.git/config`, so Lomi then takes no checkpoints. Global and
 /// system filters (e.g. Git LFS) belong to the user and stay allowed.
-fn has_filters(top: &Path) -> Result<bool, String> {
-    let out = exec(command(top).args([
+fn has_filters(top: &Repo) -> Result<bool, String> {
+    let out = exec(cmd(top).args([
         "config",
         "--local",
         "--includes",
@@ -173,22 +264,49 @@ fn has_filters(top: &Path) -> Result<bool, String> {
 
 /// Builds a tree of the full working state (tracked + untracked, minus
 /// ignored) using a private index. Returns `(tree, head)`.
-fn write_tree(top: &Path) -> Result<(String, Option<String>), String> {
+fn write_tree(top: &Repo) -> Result<(String, Option<String>), String> {
     let git_dir = git_text(top, &["rev-parse", "--absolute-git-dir"])?;
     let tmp = tempfile::tempdir_in(&git_dir)
         .or_else(|_| tempfile::tempdir())
         .map_err(|e| format!("failed to create temporary index: {e}"))?;
     // A not-yet-existing path: git treats a 0-byte index file as corrupt.
     let index = tmp.path().join("index");
-    let with_index = |args: &[&str]| ok(command(top).args(args).env("GIT_INDEX_FILE", &index));
+    let with_index = |args: &[&str]| ok(cmd(top).args(args).env("GIT_INDEX_FILE", &index));
 
-    let head = exec(command(top).args(["rev-parse", "--verify", "-q", "HEAD^{commit}"]))?;
+    let head = exec(cmd(top).args(["rev-parse", "--verify", "-q", "HEAD^{commit}"]))?;
     let head = head
         .status
         .success()
         .then(|| String::from_utf8_lossy(&head.stdout).trim().to_string());
     if head.is_some() {
         with_index(&["read-tree", "HEAD"])?;
+    }
+    if top.git_dir.is_some() {
+        let listing = with_index(&[
+            "ls-files",
+            "--others",
+            "--cached",
+            "--exclude-standard",
+            "-z",
+        ])?;
+        if listing.iter().filter(|b| **b == 0).count() > shadow_limit() {
+            return Err(
+                "This folder is too large to snapshot for undo (over 20,000 files).".to_string(),
+            );
+        }
+        // Every snapshot copies new content into the private store: refuse big media folders.
+        let bytes: u64 = listing
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .filter_map(|p| {
+                std::fs::symlink_metadata(top.top.join(String::from_utf8_lossy(p).as_ref())).ok()
+            })
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum();
+        if bytes > MAX_SHADOW_BYTES {
+            return Err("This folder is too large to snapshot for undo (over 200 MB).".to_string());
+        }
     }
     with_index(&["add", "-A"])?;
     let tree = String::from_utf8_lossy(&with_index(&["write-tree"])?)
@@ -201,14 +319,14 @@ fn write_tree(top: &Path) -> Result<(String, Option<String>), String> {
 /// (must be under `refs/lomi/chat/`). `None` when not in a git work tree.
 pub fn capture(cwd: &Path, reference: &str) -> Result<Option<String>, String> {
     validate_ref(reference)?;
-    let Some(top) = toplevel(cwd)? else {
+    let Some(top) = resolve(cwd, true)? else {
         return Ok(None);
     };
     if has_filters(&top)? {
         return Ok(None);
     }
     let (tree, head) = write_tree(&top)?;
-    let mut c = command(&top);
+    let mut c = cmd(&top);
     c.args(["commit-tree", &tree]);
     if let Some(h) = &head {
         c.args(["-p", h]);
@@ -225,14 +343,14 @@ pub fn capture(cwd: &Path, reference: &str) -> Result<Option<String>, String> {
 
 /// Like `capture` but only returns the tree sha (no commit, no ref).
 pub fn snapshot_tree(cwd: &Path) -> Result<Option<String>, String> {
-    match toplevel(cwd)? {
+    match resolve(cwd, true)? {
         Some(top) if !has_filters(&top)? => Ok(Some(write_tree(&top)?.0)),
         _ => Ok(None),
     }
 }
 
 /// All changed paths between two trees (rename detection off), uncapped.
-fn name_status(top: &Path, from: &str, to: &str) -> Result<Vec<(String, ChangeStatus)>, String> {
+fn name_status(top: &Repo, from: &str, to: &str) -> Result<Vec<(String, ChangeStatus)>, String> {
     validate_ish(from)?;
     validate_ish(to)?;
     let out = git(
@@ -265,7 +383,7 @@ fn name_status(top: &Path, from: &str, to: &str) -> Result<Vec<(String, ChangeSt
 
 /// Per-file changes between two commit/tree ishes, capped at 2000 files.
 pub fn changes(cwd: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, String> {
-    let top = require_toplevel(cwd)?;
+    let top = require_repo(cwd)?;
     let statuses = name_status(&top, from, to)?;
     let out = git(
         &top,
@@ -315,8 +433,8 @@ pub fn file_diff(cwd: &Path, from: &str, to: &str, path: &str) -> Result<String,
     validate_ish(from)?;
     validate_ish(to)?;
     validate_rel(path)?;
-    let top = require_toplevel(cwd)?;
-    let mut child = command(&top)
+    let top = require_repo(cwd)?;
+    let mut child = cmd(&top)
         .args([
             "diff",
             "--no-ext-diff",
@@ -362,7 +480,7 @@ pub fn file_diff(cwd: &Path, from: &str, to: &str, path: &str) -> Result<String,
 }
 
 /// Blob entry (`mode`, `sha`) of `path` in `ish`; `None` if absent or a directory.
-fn tree_entry(top: &Path, ish: &str, path: &str) -> Result<Option<(String, String)>, String> {
+fn tree_entry(top: &Repo, ish: &str, path: &str) -> Result<Option<(String, String)>, String> {
     let out = git(top, &["ls-tree", "-z", "--full-tree", ish, "--", path])?;
     let text = String::from_utf8_lossy(&out);
     let Some(rec) = text.split('\0').find(|r| !r.is_empty()) else {
@@ -386,18 +504,18 @@ enum Current {
     Unsafe,
 }
 
-fn current_state(top: &Path, path: &str) -> Result<Current, String> {
+fn current_state(top: &Repo, path: &str) -> Result<Current, String> {
     let mut dir = PathBuf::new();
     let parts: Vec<_> = Path::new(path).components().collect();
     for part in &parts[..parts.len() - 1] {
         dir.push(part);
-        if let Ok(m) = std::fs::symlink_metadata(top.join(&dir))
+        if let Ok(m) = std::fs::symlink_metadata(top.top.join(&dir))
             && m.file_type().is_symlink()
         {
             return Ok(Current::Unsafe);
         }
     }
-    match std::fs::symlink_metadata(top.join(path)) {
+    match std::fs::symlink_metadata(top.top.join(path)) {
         Err(_) => Ok(Current::Absent),
         Ok(m) if m.is_file() => Ok(Current::Blob(git_text(top, &["hash-object", "--", path])?)),
         Ok(_) => Ok(Current::Unsafe),
@@ -407,9 +525,10 @@ fn current_state(top: &Path, path: &str) -> Result<Current, String> {
 /// Flags the files whose path appears in `edited` (paths from the turn's edit
 /// activities, absolute or relative to `cwd`) as the agent's own changes.
 pub fn mark_agent(cwd: &Path, files: &mut [FileChange], edited: &[String]) {
-    let Ok(Some(top)) = toplevel(cwd) else {
+    let Ok(Some(top)) = resolve(cwd, false) else {
         return;
     };
+    let top = top.top;
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let (top_c, cwd_c) = (canon(&top), canon(cwd));
     let rel: std::collections::HashSet<String> = edited
@@ -449,7 +568,7 @@ pub fn undo(
     after: &str,
     only: Option<&[String]>,
 ) -> Result<UndoReport, String> {
-    let top = require_toplevel(cwd)?;
+    let top = require_repo(cwd)?;
     // `hash-object` would run a configured clean filter; see `has_filters`.
     if has_filters(&top)? {
         return Err("the repository defines content filters; undo is unavailable".into());
@@ -528,7 +647,8 @@ fn case_collisions(paths: &[&String]) -> std::collections::BTreeSet<String> {
     clash
 }
 
-fn remove_path(top: &Path, path: &str) -> Result<(), String> {
+fn remove_path(top: &Repo, path: &str) -> Result<(), String> {
+    let top = &top.top;
     let full = top.join(path);
     std::fs::remove_file(&full).map_err(|e| format!("failed to delete {path}: {e}"))?;
     let mut parent = full.parent();
@@ -541,8 +661,8 @@ fn remove_path(top: &Path, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_path(top: &Path, path: &str, mode: &str, sha: &str) -> Result<(), String> {
-    let full = top.join(path);
+fn restore_path(top: &Repo, path: &str, mode: &str, sha: &str) -> Result<(), String> {
+    let full = top.top.join(path);
     let blob = git(top, &["cat-file", "blob", sha])?;
     let fail = |e: std::io::Error| format!("failed to restore {path}: {e}");
     if let Some(parent) = full.parent() {
@@ -569,7 +689,7 @@ fn restore_path(top: &Path, path: &str, mode: &str, sha: &str) -> Result<(), Str
 pub fn remove_refs(cwd: &Path, prefix: &str) -> Result<(), String> {
     let prefix = prefix.trim_end_matches('/');
     validate_ref(prefix)?;
-    let Some(top) = toplevel(cwd)? else {
+    let Some(top) = resolve(cwd, false)? else {
         return Ok(());
     };
     let listing = git_text(
@@ -907,5 +1027,91 @@ mod tests {
             left.lines().collect::<Vec<_>>(),
             vec!["refs/lomi/chat/t10/1-before", "refs/lomi/chat/t2/1-before"]
         );
+    }
+
+    fn plain(limit: usize) -> (tempfile::TempDir, tempfile::TempDir) {
+        let (dir, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        TEST_ROOT.with(|r| *r.borrow_mut() = Some(root.path().to_path_buf()));
+        TEST_LIMIT.with(|l| l.set(limit));
+        (dir, root)
+    }
+
+    #[test]
+    fn shadow_repo_captures_and_undoes_in_plain_folder() {
+        if !have_git() {
+            return;
+        }
+        let (dir, root) = plain(MAX_SHADOW_FILES);
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "one\n").unwrap();
+        fs::write(p.join("b.txt"), "b\n").unwrap();
+        fs::create_dir_all(p.join("node_modules")).unwrap();
+        fs::write(p.join("node_modules/x.js"), "x\n").unwrap();
+        let before = capture(p, R1).unwrap().unwrap();
+        fs::write(p.join("a.txt"), "two\n").unwrap();
+        fs::remove_file(p.join("b.txt")).unwrap();
+        fs::write(p.join("c.txt"), "c\n").unwrap();
+        fs::write(p.join("node_modules/y.js"), "y\n").unwrap();
+        let after = capture(p, R2).unwrap().unwrap();
+        let mut list: Vec<_> = changes(p, &before, &after)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.path, c.status))
+            .collect();
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            list,
+            vec![
+                ("a.txt".to_string(), ChangeStatus::Modified),
+                ("b.txt".to_string(), ChangeStatus::Deleted),
+                ("c.txt".to_string(), ChangeStatus::Added),
+            ]
+        );
+        let report = undo(p, &before, &after, None).unwrap();
+        assert_eq!(report.restored, vec!["a.txt", "b.txt", "c.txt"]);
+        assert!(report.skipped.is_empty());
+        assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "b\n");
+        assert!(!p.join("c.txt").exists());
+        assert!(!p.join(".git").exists());
+        let shadow = fs::read_dir(root.path().join("checkpoints"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let files = g(&shadow, &["ls-tree", "-r", "--name-only", &after]);
+        assert!(files.contains("c.txt") && !files.contains("node_modules"));
+        remove_refs(p, "refs/lomi/chat/t1/").unwrap();
+        assert!(
+            g(&shadow, &["for-each-ref", "refs/lomi/"])
+                .trim()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shadow_repo_size_guard() {
+        if !have_git() {
+            return;
+        }
+        let (dir, _root) = plain(2);
+        for n in ["a", "b", "c"] {
+            fs::write(dir.path().join(n), n).unwrap();
+        }
+        let err = capture(dir.path(), R1).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        assert!(snapshot_tree(dir.path()).is_err());
+    }
+
+    #[test]
+    fn real_repos_do_not_use_the_shadow() {
+        if !have_git() {
+            return;
+        }
+        let (_plain, root) = plain(MAX_SHADOW_FILES);
+        let dir = repo(true);
+        assert!(capture(dir.path(), R1).unwrap().is_some());
+        assert!(!root.path().join("checkpoints").exists());
     }
 }

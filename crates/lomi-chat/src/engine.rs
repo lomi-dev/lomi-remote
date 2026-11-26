@@ -64,8 +64,9 @@ pub const STEER_UNSUPPORTED: &str = "steer_unsupported";
 pub const STEER_UNKNOWN: &str = "steer_unknown";
 /// How long a steer waits for the turn loop to deliver it.
 const STEER_WAIT: Duration = Duration::from_secs(10);
-/// After a Claude `result`, how long a steered turn waits for the queued turn's `init`.
-const STEER_GRACE: Duration = Duration::from_millis(1500);
+/// After a Claude `result` with a steer not yet replayed, how long the turn waits for the
+/// queued turn's `init` before giving up on the process.
+const STEER_GRACE: Duration = Duration::from_secs(5);
 
 /// A message for the running turn, delivered by the turn loop.
 struct SteerReq {
@@ -179,6 +180,7 @@ impl Engine {
     }
 
     fn build(root: PathBuf, hooks: Hooks, restricted: bool) -> Self {
+        checkpoint::set_shadow_root(root.clone());
         Self(Arc::new(Shared {
             root,
             restricted,
@@ -289,19 +291,33 @@ impl Engine {
         }
     }
 
-    /// Slash commands the thread's CLI reported; empty before its session started.
-    pub fn commands(&self, thread_id: &str) -> Vec<ThreadCommand> {
-        self.0
-            .commands
-            .lock()
-            .ok()
-            .and_then(|m| m.get(thread_id).cloned())
-            .unwrap_or_default()
+    /// Slash commands the thread's CLI reported; before its session started (or before
+    /// the thread exists), the ones last reported for the agent `instance_id` in `project`.
+    /// Blocking: call from `spawn_blocking`.
+    pub fn commands(
+        &self,
+        thread_id: Option<&str>,
+        instance_id: &str,
+        project: &str,
+    ) -> Vec<ThreadCommand> {
+        let live =
+            thread_id.and_then(|id| self.0.commands.lock().ok().and_then(|m| m.get(id).cloned()));
+        live.unwrap_or_else(|| {
+            self.with(|i| i.store.cached_commands(instance_id, project))
+                .unwrap_or_default()
+        })
     }
 
     fn keep_commands(&self, thread_id: &str, list: Vec<ThreadCommand>) {
-        if let Ok(mut m) = self.0.commands.lock() {
-            m.insert(thread_id.into(), list);
+        let changed = self.0.commands.lock().is_ok_and(|mut m| {
+            let changed = m.get(thread_id) != Some(&list);
+            m.insert(thread_id.into(), list.clone());
+            changed
+        });
+        if changed && !list.is_empty() {
+            // Off the caller's thread: turn loops and stream readers must not wait on storage.
+            let (chat, id) = (self.clone(), thread_id.to_string());
+            std::thread::spawn(move || chat.with(|i| i.store.cache_commands(&id, &list)));
         }
     }
 
@@ -2050,15 +2066,16 @@ async fn run_live(
     // The process produced no output at all: it never started (e.g. `--resume` was refused).
     let mut heard = false;
     let mut steers = steer_rx(job);
-    // Steering lines sent whose turn has not been seen to end. A line folded into the
-    // running turn yields no `result` of its own, a queued one starts a turn with an `init`.
-    let mut steered = 0u32;
-    // Set at a `result` with `steered > 0`: the wait for that queued turn's `init`.
+    // Steering lines sent but not yet replayed (`--replay-user-messages`). The CLI replays a
+    // line when it takes it in: before the `result` when folded into the running turn,
+    // after it when queued as a turn of its own, which then starts with an `init`.
+    let mut unreplayed: Vec<String> = Vec::new();
+    // Set at a `result` with unreplayed steers: the wait for that queued turn's `init`.
     let mut grace: Option<tokio::time::Instant> = None;
     loop {
         let line = tokio::select! {
             _ = &mut stopped, if deadline.is_none() => {
-                (steered, grace) = (0, None);
+                (unreplayed, grace) = (Vec::new(), None);
                 session.deny_pending();
                 acc.settle(&job.message_id, sink, |_| true, ApprovalState::Expired);
                 session.interrupt();
@@ -2080,16 +2097,15 @@ async fn run_live(
                 let sent = session.send_user(&req.text).map_err(|_| STEER_UNSUPPORTED.to_string());
                 if sent.is_ok() {
                     req.sent.store(true, Ordering::SeqCst);
-                    steered += 1;
+                    unreplayed.push(req.text.clone());
                     acc.steered(&job.message_id, sink, &req.text);
                 }
                 let _ = req.reply.send(sent);
                 continue;
             }
             _ = tokio::time::sleep_until(grace.unwrap_or_else(tokio::time::Instant::now)), if grace.is_some() => {
-                // Folded into the ended turn or queued as one that has not started: the CLI does
-                // not say which, and a late turn would leak into the next reply. Not reusing
-                // the process costs a resume on the next send.
+                // A steer was neither replayed nor started a turn: a late turn would leak into
+                // the next reply. Not reusing the process costs a resume on the next send.
                 chat.drop_session(&job.thread_id, &session);
                 break;
             }
@@ -2135,9 +2151,18 @@ async fn run_live(
             }
             _ => {}
         }
+        if v["type"] == "user" && v["isReplay"] == true {
+            if let Some(i) = v["message"]["content"]
+                .as_str()
+                .and_then(|t| unreplayed.iter().position(|s| s == t))
+            {
+                unreplayed.remove(i);
+            }
+            continue;
+        }
         if grace.is_some() && v["type"] == "system" && v["subtype"] == "init" {
             // The queued steering turn started; its text continues the reply.
-            (grace, steered) = (None, steered.saturating_sub(1));
+            grace = None;
             // `push` already separates text that follows an activity at the end.
             if !acc.content.is_empty() && acc.activity.last().is_none_or(|a| a.at != acc.utf16) {
                 oversized |= !acc.push(&job.message_id, sink, "\n\n".into());
@@ -2164,7 +2189,7 @@ async fn run_live(
             return acc.oversized();
         }
         if v["type"] == "result" {
-            if steered == 0 {
+            if unreplayed.is_empty() {
                 break;
             }
             grace = Some(tokio::time::Instant::now() + STEER_GRACE);
@@ -2284,7 +2309,10 @@ async fn run_codex(
     let started = if p.compact {
         session.request("thread/compact/start", json!({"threadId": thread}))
     } else {
-        session.request("turn/start", p.turn_params(&thread))
+        session.request(
+            "turn/start",
+            p.turn_params(&thread, session.model().as_deref()),
+        )
     };
     let turn_req = match started {
         Ok(id) => id,
@@ -4577,6 +4605,9 @@ result() {
 init() {
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"0b3e8a1c-2d4f-4a6b-9c7d-1e2f3a4b5c6d"}'
 }
+replay() {
+  printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$1\"}}"
+}
 "#;
 
     /// Claude fake: one steering line arrives mid-turn; `$1` is what the CLI prints after it.
@@ -4593,7 +4624,7 @@ init() {
     #[tokio::test]
     async fn steer_folded_into_the_turn_is_shown_and_reaches_attached_sinks() {
         let dir = tempfile::tempdir().unwrap();
-        let body = claude_steer("delta two\nresult");
+        let body = claude_steer("replay more\ndelta two\nresult");
         let (engine, thread) = setup(&body, dir.path(), false);
         let tid = thread.thread_id.clone();
         let (_, mut rx) = send(&engine, &thread).await;
@@ -4650,7 +4681,23 @@ init() {
             engine.steer(&tid, "late".into()).await.unwrap_err(),
             STEER_UNSUPPORTED
         );
-        // The grace ended with the steer unaccounted for: the process is not reused.
+        // The steer was replayed before the `result`: the process stays for the next send.
+        assert_eq!(engine.sessions().unwrap().len(), 1);
+        engine.kill_cli_groups();
+    }
+
+    #[tokio::test]
+    async fn steer_never_replayed_drops_the_process_after_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = claude_steer("delta two\nresult");
+        let (engine, thread) = setup(&body, dir.path(), false);
+        let tid = thread.thread_id.clone();
+        let (_, mut rx) = send(&engine, &thread).await;
+        wait_delta(&mut rx).await;
+        engine.steer(&tid, "more".into()).await.unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(message.content, "one\n\ntwo");
+        // A late turn could leak into the next reply, so the process is not reused.
         assert!(engine.sessions().unwrap().is_empty());
         engine.kill_cli_groups();
     }
@@ -4689,7 +4736,7 @@ init() {
     #[tokio::test]
     async fn steer_queued_by_the_cli_continues_the_reply_in_a_second_turn() {
         let dir = tempfile::tempdir().unwrap();
-        let body = claude_steer("result\ninit\ndelta two\nresult");
+        let body = claude_steer("result\ninit\nreplay more\ndelta two\nresult");
         let (engine, thread) = setup(&body, dir.path(), false);
         let tid = thread.thread_id.clone();
         let (_, mut rx) = send(&engine, &thread).await;
@@ -4703,6 +4750,7 @@ init() {
             started.elapsed() < STEER_GRACE,
             "no grace wait after the last result"
         );
+        assert_eq!(engine.sessions().unwrap().len(), 1, "the process is reused");
         engine.kill_cli_groups();
     }
 
@@ -4800,7 +4848,7 @@ read -r never
         assert_eq!(item.options[1].label, "Green");
         assert_eq!(engine.run_state(&tid), RunState::Waiting);
         assert_eq!(
-            engine.commands(&tid),
+            engine.commands(Some(&tid), "", ""),
             vec![ThreadCommand {
                 name: "hello".into(),
                 description: "Say hello".into(),
@@ -4960,7 +5008,7 @@ read -r never
             sent,
             serde_json::json!({"id":0,"result":{"answers":{"color":{"answers":["Green"]},"pin":{"answers":["1234"]}}}})
         );
-        assert_eq!(engine.commands(&tid)[0].name, "compact");
+        assert_eq!(engine.commands(Some(&tid), "", "")[0].name, "compact");
         engine.kill_cli_groups();
     }
 
@@ -5111,6 +5159,142 @@ read -r never
             message.error
         );
         assert!(message.content.contains("Green"), "{}", message.content);
+        engine.forget_session(&tid);
+    }
+
+    /// Engine on the installed CLI `cli`, with a thread in `dir`.
+    fn real_engine(cli: &str, dir: &Path, permissions: Permissions) -> (Engine, ThreadSummary) {
+        let bin = which(cli).expect("CLI on PATH");
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = Engine::new(dir.join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: cli.into(),
+                        cli: cli.into(),
+                        label: cli.into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.to_string_lossy().into_owned(),
+                        instance_id: cli.into(),
+                        model: cli::DEFAULT_MODEL.into(),
+                        title: "T".into(),
+                        cwd: Some(dir.to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        (engine, thread)
+    }
+
+    async fn real_send(
+        engine: &Engine,
+        thread: &ThreadSummary,
+        model: &str,
+        text: &str,
+    ) -> UnboundedReceiver<ThreadStreamEvent> {
+        let (tx, rx) = unbounded_channel();
+        engine
+            .send(
+                ThreadSend {
+                    operation_id: "s1".into(),
+                    thread_id: thread.thread_id.clone(),
+                    expected_revision: thread.revision,
+                    instance_id: thread.instance_id.clone(),
+                    model: model.into(),
+                    text: text.into(),
+                    attachments: vec![],
+                },
+                Arc::new(Recorder(tx)),
+            )
+            .await
+            .unwrap();
+        rx
+    }
+
+    /// `cargo test -p lomi-chat real_claude -- --ignored`: a steer during a tool call joins
+    /// the turn and the process stays warm.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code account"]
+    async fn real_claude_steer_keeps_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = real_engine("claude", dir.path(), Permissions::Full);
+        let tid = thread.thread_id.clone();
+        let mut rx = real_send(
+            &engine,
+            &thread,
+            "haiku",
+            "Run the shell command `sleep 4` with Bash, then reply with exactly: DONE1",
+        )
+        .await;
+        while !matches!(rx.recv().await, Some(ThreadStreamEvent::Activity { .. })) {}
+        engine
+            .steer(&tid, "Also append the word STEERED at the end.".into())
+            .await
+            .unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(message.content.contains("STEERED"), "{}", message.content);
+        assert_eq!(engine.sessions().unwrap().len(), 1, "the process is reused");
+        engine.forget_session(&tid);
+    }
+
+    /// `cargo test -p lomi-chat real_codex -- --ignored`: a read-only (plan mode) turn asks
+    /// a question through `requestUserInput`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Codex account"]
+    async fn real_codex_read_only_question_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = real_engine("codex", dir.path(), Permissions::ReadOnly);
+        let tid = thread.thread_id.clone();
+        let mut rx = real_send(
+            &engine,
+            &thread,
+            cli::DEFAULT_MODEL,
+            "Before anything else, ask me which language I prefer with your request_user_input tool, options Python and Rust. After I answer, reply with exactly: YOU PICKED <language>",
+        )
+        .await;
+        let (_, q) = pending_question(&mut rx).await;
+        let id = q.items[0].id.clone();
+        let pick = q.items[0]
+            .options
+            .iter()
+            .find(|o| o.label.contains("Rust"))
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| "Rust".into());
+        engine
+            .answer(&tid, &q.request_id, Some(HashMap::from([(id, vec![pick])])))
+            .unwrap();
+        let (_, message) = final_of(&mut rx).await;
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(message.content.contains("Rust"), "{}", message.content);
         engine.forget_session(&tid);
     }
 }
