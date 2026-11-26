@@ -14,6 +14,12 @@ use std::{
 use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
 use zeroize::Zeroizing;
 
+/// Running total of bytes read from any relay socket: lets the actor tell
+/// "readable and being consumed" from "readable and left unread".
+static BYTES_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn relay_bytes_read() -> u64 {
+    BYTES_READ.load(std::sync::atomic::Ordering::Relaxed)
+}
 const QUANTUM: Duration = Duration::from_millis(10);
 const READY_LIMIT: usize = 125;
 const ADMISSION_LIMIT: usize = lomi_remote_protocol::admission::WSS_ADMISSION_MAX_BYTES;
@@ -423,6 +429,9 @@ impl Read for RelaySocket {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 result => {
                     self.current()?;
+                    if let Ok(n) = &result {
+                        BYTES_READ.fetch_add(*n as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
                     return result;
                 }
             }

@@ -19,7 +19,7 @@ pub mod diagnostics;
 mod relay;
 mod resolver;
 pub use data::{DataFailure, DataTransport, RemoteApiOrigin};
-pub use relay::{RelayConnection, RelayTransport};
+pub use relay::{RelayConnection, RelayTransport, relay_bytes_read};
 
 const REQUEST_LIMIT: usize = 16 * 1024;
 const RESPONSE_LIMIT: usize = 32 * 1024;

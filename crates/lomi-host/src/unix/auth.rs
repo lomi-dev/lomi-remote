@@ -1605,18 +1605,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn readable_but_unread_socket_does_not_spin() {
-        use crate::unix::auth::socket_wait;
+        use crate::unix::auth::{WakeGuard, socket_wait};
         use std::io::Write;
         use std::os::fd::AsRawFd;
         let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
         tx.write_all(b"x").unwrap(); // never read: stays readable
         let fds = [rx.as_raw_fd()];
         let wait = Duration::from_millis(20);
-        let (mut fast, mut passes) = (0u32, 0u32);
+        let (mut fast, mut passes) = (WakeGuard::default(), 0u32);
         let started = Instant::now();
         while started.elapsed() < Duration::from_millis(200) {
             passes += 1;
-            if !socket_wait(&fds, wait, &mut fast) {
+            if !socket_wait(&fds, wait, &mut fast, 0) {
                 std::thread::sleep(wait);
             }
         }
@@ -1624,15 +1624,51 @@ mod tests {
         assert!(passes <= 40, "passes = {passes}");
         // A hung-up peer is the same: it must not spin either.
         drop(tx);
-        let (mut fast, mut passes) = (0u32, 0u32);
+        let (mut fast, mut passes) = (WakeGuard::default(), 0u32);
         let started = Instant::now();
         while started.elapsed() < Duration::from_millis(200) {
             passes += 1;
-            if !socket_wait(&fds, wait, &mut fast) {
+            if !socket_wait(&fds, wait, &mut fast, 0) {
                 std::thread::sleep(wait);
             }
         }
         assert!(passes <= 40, "passes = {passes}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn consumed_stream_never_stalls_the_wait() {
+        use crate::unix::auth::{WakeGuard, socket_wait};
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        let (mut tx, mut rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        rx.set_nonblocking(true).unwrap();
+        let fds = [rx.as_raw_fd()];
+        let producer = std::thread::spawn(move || {
+            let end = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < end {
+                tx.write_all(&[7u8; 64]).unwrap();
+                std::thread::sleep(Duration::from_micros(100));
+            }
+        });
+        let (mut guard, mut total, mut slept) = (WakeGuard::default(), 0u64, 0u32);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            if !socket_wait(&fds, Duration::from_millis(20), &mut guard, total) {
+                slept += 1;
+            }
+            // The actor reads what is there, like ingress.poll does.
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = rx.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+            }
+        }
+        producer.join().unwrap();
+        assert!(total > 0);
+        assert_eq!(slept, 0, "a consumed stream must never trip the guard");
     }
 
     #[test]
@@ -3556,7 +3592,7 @@ fn wait_for_command_or_frame(
     receiver: &mpsc::Receiver<Command>,
     ingress: &remote_ingress::Registry<'_>,
     wait: Duration,
-    fast_wakes: &mut u32,
+    guard: &mut WakeGuard,
 ) -> Result<Command, mpsc::RecvTimeoutError> {
     #[cfg(unix)]
     if !wait.is_zero() && wait <= remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT {
@@ -3565,33 +3601,52 @@ fn wait_for_command_or_frame(
             if let Ok(command) = receiver.try_recv() {
                 return Ok(command);
             }
-            if socket_wait(&fds, wait, fast_wakes) {
+            if socket_wait(&fds, wait, guard, lomi_host_http::relay_bytes_read()) {
                 return receiver
                     .try_recv()
                     .map_err(|_| mpsc::RecvTimeoutError::Timeout);
             }
         }
     }
-    let _ = (ingress, &fast_wakes);
+    let _ = (ingress, &guard);
     receiver.recv_timeout(wait)
+}
+
+#[derive(Default)]
+struct WakeGuard {
+    fast: u32,
+    bytes: u64,
 }
 
 /// Poll the sockets once. Returns false when the caller must sleep itself:
 /// poll(2) is level-triggered, so a socket that is readable (or hung up) but
 /// deliberately not read this pass (git flow control, owner busy) would return
-/// at once forever. Two wakes in a row under 1 ms trip the guard for one wait.
+/// at once forever. A fast wake only counts when the previous pass consumed no
+/// bytes from any relay socket (`bytes_read` is the running total), so a busy
+/// stream that is being read never trips the guard. Two uncounted-progress
+/// fast wakes in a row sleep one wait; a hung-up socket the actor does read
+/// is dropped by the ingress and leaves the wait set.
 #[cfg(unix)]
-fn socket_wait(fds: &[std::os::fd::RawFd], wait: Duration, fast_wakes: &mut u32) -> bool {
-    if *fast_wakes >= 2 {
-        *fast_wakes = 0;
+fn socket_wait(
+    fds: &[std::os::fd::RawFd],
+    wait: Duration,
+    guard: &mut WakeGuard,
+    bytes_read: u64,
+) -> bool {
+    if bytes_read != guard.bytes {
+        guard.bytes = bytes_read;
+        guard.fast = 0;
+    }
+    if guard.fast >= 2 {
+        guard.fast = 0;
         return false;
     }
     let started = Instant::now();
     let event = wait_readable(fds, wait);
     if event && started.elapsed() < Duration::from_millis(1) {
-        *fast_wakes += 1;
+        guard.fast += 1;
     } else {
-        *fast_wakes = 0;
+        guard.fast = 0;
     }
     true
 }
@@ -3728,7 +3783,7 @@ fn run_with_apis_inner(
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
     let mut suspended_seen = suspended_total();
-    let mut fast_wakes = 0u32;
+    let mut wake_guard = WakeGuard::default();
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
         // Every pass: if the system slept, end the unit exactly like a
         // deadline settlement (nothing retained crosses the jump, the gate
@@ -3801,7 +3856,7 @@ fn run_with_apis_inner(
                 remote_ingress::ESTABLISHED_ACTOR_WAIT
             });
         }
-        match wait_for_command_or_frame(receiver, &ingress, wait, &mut fast_wakes) {
+        match wait_for_command_or_frame(receiver, &ingress, wait, &mut wake_guard) {
             Ok(Command::Wake(id)) => {
                 let _ = id;
             }
