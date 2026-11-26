@@ -21,7 +21,7 @@
 //! the old key survived somewhere.
 
 use crate::json::{self, Object};
-use crate::session::{DeviceState, HostEntry, SessionResponse, Workspace, parse_host};
+use crate::session::{DeviceState, HostEntry, SessionResponse, parse_host};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde_json::{Map, Value};
@@ -92,9 +92,18 @@ pub enum Effect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    pub id: String,
+    /// Known only from the Host; kept across server snapshots, which carry no names.
+    pub name: Option<String>,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
     pub id: String,
-    pub name: String,
+    /// Known only from the Host; kept across server snapshots, which carry no names.
+    pub name: Option<String>,
     pub online: bool,
     pub access_epoch: u64,
     pub runtime_generation: u64,
@@ -128,14 +137,35 @@ fn str_of<'a>(o: &'a Object, k: &str) -> Result<&'a str, Error> {
     o.get(k).and_then(Value::as_str).ok_or(Error::Malformed)
 }
 
+fn opt_str(o: &Object, k: &str) -> Result<Option<String>, Error> {
+    o.get(k)
+        .map(|v| v.as_str().map(str::to_owned).ok_or(Error::Malformed))
+        .transpose()
+}
+
 fn to_host(e: HostEntry) -> Result<Host, Error> {
+    let mut ids = std::collections::BTreeSet::new();
+    let workspaces = e
+        .workspaces
+        .into_iter()
+        .map(|w| {
+            if !ids.insert(w.id.clone()) {
+                return Err(Error::Malformed);
+            }
+            Ok(Workspace {
+                epoch: dec(&w.epoch)?,
+                id: w.id,
+                name: w.name,
+            })
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Host {
         access_epoch: dec(&e.access_epoch)?,
         runtime_generation: dec(&e.runtime_generation)?,
         id: e.id,
         name: e.name,
         online: e.online,
-        workspaces: e.workspaces,
+        workspaces,
     })
 }
 
@@ -179,7 +209,7 @@ impl Directory {
         }
     }
 
-    fn upsert(&mut self, h: Host) -> bool {
+    fn upsert(&mut self, mut h: Host) -> bool {
         if self
             .revoked
             .get(&h.id)
@@ -187,14 +217,55 @@ impl Directory {
         {
             return false;
         }
-        match self.hosts.get(&h.id) {
-            Some(old) if h.stamp() < old.stamp() || *old == h => false,
-            _ => {
-                self.revoked.remove(&h.id);
-                self.hosts.insert(h.id.clone(), h);
-                true
+        let old = self.hosts.get(&h.id);
+        if let Some(old) = old {
+            if h.stamp() < old.stamp() {
+                return false;
+            }
+            h.name = h.name.or_else(|| old.name.clone());
+            if !h.online {
+                // The server lists no workspaces for an offline Host: keep the last known ones.
+                h.workspaces = old.workspaces.clone();
+            } else {
+                for w in &mut h.workspaces {
+                    if let Some(o) = old.workspaces.iter().find(|o| o.id == w.id) {
+                        w.name = w.name.take().or_else(|| o.name.clone());
+                        if o.epoch > w.epoch {
+                            *w = o.clone(); // older snapshot of this workspace
+                        }
+                    }
+                }
+            }
+            if *old == h {
+                return false;
             }
         }
+        self.revoked.remove(&h.id);
+        self.hosts.insert(h.id.clone(), h);
+        true
+    }
+
+    /// Sets names learned from the Host (the server has none). Returns whether anything changed.
+    pub fn set_host_name(&mut self, host_id: &str, name: &str) -> bool {
+        self.live().is_ok()
+            && self.hosts.get_mut(host_id).is_some_and(|h| {
+                let c = h.name.as_deref() != Some(name);
+                h.name = Some(name.to_owned());
+                c
+            })
+    }
+
+    pub fn set_workspace_name(&mut self, host_id: &str, workspace_id: &str, name: &str) -> bool {
+        self.live().is_ok()
+            && self
+                .hosts
+                .get_mut(host_id)
+                .and_then(|h| h.workspaces.iter_mut().find(|w| w.id == workspace_id))
+                .is_some_and(|w| {
+                    let c = w.name.as_deref() != Some(name);
+                    w.name = Some(name.to_owned());
+                    c
+                })
     }
 
     /// Server snapshot: entries are merged monotonically, Hosts missing from it are removed.
@@ -309,14 +380,19 @@ impl Directory {
         let hosts = self.hosts.values().map(|h| {
             let mut o = Map::new();
             o.insert("id".into(), h.id.clone().into());
-            o.insert("name".into(), h.name.clone().into());
+            if let Some(n) = &h.name {
+                o.insert("name".into(), n.clone().into());
+            }
             o.insert("online".into(), h.online.into());
             o.insert("epoch".into(), h.access_epoch.to_string().into());
             o.insert("generation".into(), h.runtime_generation.to_string().into());
             let ws = h.workspaces.iter().map(|w| {
                 let mut o = Map::new();
                 o.insert("id".into(), w.id.clone().into());
-                o.insert("name".into(), w.name.clone().into());
+                if let Some(n) = &w.name {
+                    o.insert("name".into(), n.clone().into());
+                }
+                o.insert("epoch".into(), w.epoch.to_string().into());
                 Value::Object(o)
             });
             o.insert("workspaces".into(), ws.collect::<Vec<_>>().into());
@@ -352,7 +428,7 @@ impl Directory {
         for h in list(&root, "hosts")? {
             let host = Host {
                 id: str_of(&h, "id")?.to_owned(),
-                name: str_of(&h, "name")?.to_owned(),
+                name: opt_str(&h, "name")?,
                 online: h
                     .get("online")
                     .and_then(Value::as_bool)
@@ -364,7 +440,8 @@ impl Directory {
                     .map(|w| {
                         Ok(Workspace {
                             id: str_of(w, "id")?.to_owned(),
-                            name: str_of(w, "name")?.to_owned(),
+                            name: opt_str(w, "name")?,
+                            epoch: dec(str_of(w, "epoch")?)?,
                         })
                     })
                     .collect::<Result<_, Error>>()?,

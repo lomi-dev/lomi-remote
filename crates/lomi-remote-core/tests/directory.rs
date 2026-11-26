@@ -16,10 +16,10 @@ fn key(id: u32, b: u8) -> Key {
 fn host(id: &str, epoch: u64, generation: u64, online: bool, ws: &[&str]) -> String {
     let ws: Vec<String> = ws
         .iter()
-        .map(|w| format!(r#"{{"workspaceId":"{w}","name":"ws {w}"}}"#))
+        .map(|w| format!(r#"{{"workspaceId":"{w}","workspaceEpoch":"1"}}"#))
         .collect();
     format!(
-        r#"{{"hostId":"{id}","name":"Host {id}","online":{online},"accessEpoch":"{epoch}","runtimeGeneration":"{generation}","workspaces":[{}]}}"#,
+        r#"{{"hostId":"{id}","online":{online},"accessEpoch":"{epoch}","runtimeGeneration":"{generation}","workspaces":[{}]}}"#,
         ws.join(",")
     )
 }
@@ -274,4 +274,75 @@ fn revoke_events_and_revoked_device_wipe() {
         Ok(Effect::Revoked)
     );
     assert!(d.is_wiped() && d.hosts().next().is_none());
+}
+
+#[test]
+fn names_survive_snapshots_and_offline_hosts_keep_workspaces() {
+    let mut d = loaded();
+    assert!(
+        d.set_host_name("h1", "Mac")
+            && !d.set_host_name("h1", "Mac")
+            && !d.set_host_name("zz", "x")
+    );
+    assert!(d.set_workspace_name("h1", "a", "lomi") && !d.set_workspace_name("h1", "nope", "x"));
+    // A nameless snapshot (what the server sends) keeps names; h1 goes offline with no workspaces listed.
+    let r = session(
+        ACC,
+        DEV,
+        &[
+            host("h2", 3, 5, true, &["w1"]),
+            host("h1", 1, 2, false, &[]),
+        ],
+    );
+    assert_eq!(d.apply_session(&r), Ok(Effect::Changed));
+    let h1 = d.host("h1").unwrap();
+    assert_eq!(h1.name.as_deref(), Some("Mac"));
+    assert!(!h1.online && h1.workspaces.len() == 2);
+    assert_eq!(h1.workspaces[0].name.as_deref(), Some("lomi"));
+    // Back online with workspace "a" gone and "c" new: the online list is authoritative.
+    d.apply_session(&session(
+        ACC,
+        DEV,
+        &[
+            host("h2", 3, 5, true, &["w1"]),
+            host("h1", 1, 3, true, &["b", "c"]),
+        ],
+    ))
+    .unwrap();
+    let ids: Vec<_> = d
+        .host("h1")
+        .unwrap()
+        .workspaces
+        .iter()
+        .map(|w| w.id.as_str())
+        .collect();
+    assert_eq!(ids, ["b", "c"]);
+    // Names and epochs round-trip through the sealed blob.
+    let k = key(1, 9);
+    let back = Directory::open(&d.seal(&k, N).unwrap(), ACC, DEV, &[key(1, 9)], 0).unwrap();
+    assert_eq!(back, d);
+    assert_eq!(back.host("h1").unwrap().name.as_deref(), Some("Mac"));
+}
+
+#[test]
+fn workspace_epoch_is_monotonic() {
+    let ws = |epoch: u64| {
+        format!(
+            r#"{{"hostId":"h1","online":true,"accessEpoch":"1","runtimeGeneration":"1","workspaces":[{{"workspaceId":"w","workspaceEpoch":"{epoch}"}}]}}"#
+        )
+    };
+    let mut d = Directory::new(ACC, DEV);
+    d.apply_session(&session(ACC, DEV, &[ws(5)])).unwrap();
+    d.set_workspace_name("h1", "w", "keep");
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[ws(4)])),
+        Ok(Effect::Unchanged)
+    );
+    assert_eq!(d.host("h1").unwrap().workspaces[0].epoch, 5);
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[ws(6)])),
+        Ok(Effect::Changed)
+    );
+    let w = &d.host("h1").unwrap().workspaces[0];
+    assert_eq!((w.epoch, w.name.as_deref()), (6, Some("keep")));
 }

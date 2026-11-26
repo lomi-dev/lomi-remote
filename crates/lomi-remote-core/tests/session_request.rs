@@ -7,9 +7,9 @@ fn body() -> serde_json::Value {
         "sessionExpiresAt": 1795000000000u64,
         "relay": {"token": "TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-", "expiresAt": 1794003600000u64},
         "hosts": [{
-            "hostId": "11111111-1111-4111-8111-111111111111", "name": "Mac", "online": true,
+            "hostId": "11111111-1111-4111-8111-111111111111", "online": true,
             "accessEpoch": "3", "runtimeGeneration": "7",
-            "workspaces": [{"workspaceId": "22222222-2222-4222-8222-222222222222", "name": "lomi"}]
+            "workspaces": [{"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "4"}]
         }],
         "device": {"state": "registered", "deviceId": "dev-1"},
         "futureField": {"ignored": true}
@@ -39,7 +39,9 @@ fn parses_one_response() {
         }
     );
     assert_eq!(r.relay.expires_at, 1794003600000);
-    assert_eq!(r.hosts[0].workspaces[0].name, "lomi");
+    assert_eq!(r.hosts[0].name, None);
+    assert_eq!(r.hosts[0].workspaces[0].name, None);
+    assert_eq!(r.hosts[0].workspaces[0].epoch, "4");
     assert!(r.hosts[0].online && r.hosts[0].access_epoch == "3");
     assert_eq!(
         r.device,
@@ -87,5 +89,85 @@ fn rejects_bad_status_and_shapes() {
     assert_eq!(
         parse_session_response(200, &vec![b' '; (1 << 20) + 1]),
         Err(SessionError::TooLarge)
+    );
+}
+
+// Exactly the keys the server emits (auth-app session.ts): no names, no email, workspaceEpoch,
+// device always `registered`; the mobile variant adds accessToken and the opaque refreshCredential.
+fn server_body() -> serde_json::Value {
+    json!({
+        "account": {"id": "3f1c6a52-9b1e-4c1e-8f55-0a1b2c3d4e5f"},
+        "sessionExpiresAt": 1795000000000u64,
+        "relay": {"token": "eyJ2IjoxfQ.c2ln", "expiresAt": 1794003600000u64},
+        "hosts": [
+            {"hostId": "11111111-1111-4111-8111-111111111111", "online": true,
+             "accessEpoch": "3", "runtimeGeneration": "18446744073709551615",
+             "workspaces": [
+                {"workspaceId": "22222222-2222-4222-8222-222222222222", "workspaceEpoch": "1"},
+                {"workspaceId": "33333333-3333-4333-8333-333333333333", "workspaceEpoch": "0"}]},
+            {"hostId": "44444444-4444-4444-8444-444444444444", "online": false,
+             "accessEpoch": "1", "runtimeGeneration": "2", "workspaces": []}
+        ],
+        "device": {"state": "registered", "deviceId": "55555555-5555-4555-8555-555555555555"}
+    })
+}
+
+#[test]
+fn parses_server_shaped_session_without_names() {
+    let r = parse(200, &server_body()).unwrap();
+    assert_eq!(r.account.email, None);
+    assert!(r.hosts[0].name.is_none() && r.hosts[0].workspaces[1].name.is_none());
+    assert_eq!(r.hosts[0].runtime_generation, "18446744073709551615");
+    assert!(!r.hosts[1].online && r.hosts[1].workspaces.is_empty());
+    let mut v = server_body();
+    v["accessToken"] = json!({"token": "at", "expiresAt": 1794000900000u64});
+    v["refreshCredential"] = json!("sess_1-a.bm90LWluc3BlY3RlZA");
+    let r = parse(200, &v).unwrap();
+    assert_eq!(r.access_token.unwrap().expires_at, 1794000900000);
+    assert_eq!(
+        r.refresh_credential.as_deref(),
+        Some("sess_1-a.bm90LWluc3BlY3RlZA")
+    );
+    // Names, when a future server or Host stream sends them, are still read; null counts as absent.
+    let mut v = server_body();
+    v["hosts"][0]["name"] = json!("Mac");
+    v["hosts"][0]["workspaces"][0]["name"] = json!(null);
+    let r = parse(200, &v).unwrap();
+    assert_eq!(r.hosts[0].name.as_deref(), Some("Mac"));
+    assert_eq!(r.hosts[0].workspaces[0].name, None);
+    // P3a states stay parseable.
+    let mut v = server_body();
+    v["device"] = json!({"state": "unregistered"});
+    assert_eq!(parse(200, &v).unwrap().device, DeviceState::Unregistered);
+    v["device"] = json!({"state": "revoked"});
+    assert_eq!(parse(200, &v).unwrap().device, DeviceState::Revoked);
+    // workspaceEpoch is required.
+    let mut v = server_body();
+    v["hosts"][0]["workspaces"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("workspaceEpoch");
+    assert_eq!(parse(200, &v), Err(SessionError::Malformed));
+}
+
+#[test]
+fn conflicts_are_told_apart() {
+    let err = |code: &str| json!({"code": code, "message": "m", "retryable": false, "effect": "none", "details": {}});
+    assert_eq!(
+        parse(409, &err("UPDATE_REQUIRED")),
+        Err(SessionError::UpdateRequired)
+    );
+    assert_eq!(
+        parse(409, &err("OUTCOME_UNKNOWN")),
+        Err(SessionError::OutcomeUnknown)
+    );
+    assert_eq!(parse(409, &err("SOMETHING")), Err(SessionError::Http(409)));
+    assert_eq!(
+        parse_session_response(409, b"not json"),
+        Err(SessionError::Http(409))
+    );
+    assert!(
+        !SessionError::UpdateRequired.is_retryable()
+            && !SessionError::OutcomeUnknown.is_retryable()
     );
 }

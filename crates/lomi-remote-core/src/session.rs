@@ -3,9 +3,10 @@
 //! token, the Host list and the device state. The platform performs the HTTP
 //! call; the core builds the request and parses the response.
 //!
-//! The server side does not exist yet (P2.x in auth-app), so the JSON field names
-//! below are this core's proposal; the server must match them. Unknown fields in
-//! the response are ignored; missing or mistyped ones are an error.
+//! Shapes follow the server (`auth-app` `src/remote/api/session.ts`). The server
+//! knows no Host or workspace names (they come from the Host), so names are
+//! optional. Times are Unix ms; epochs and generations are decimal strings.
+//! Unknown fields in the response are ignored; missing or mistyped ones are an error.
 
 use crate::json::{self, Object};
 use serde_json::Value;
@@ -66,13 +67,17 @@ pub struct Account {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub id: String,
-    pub name: String,
+    /// Not sent by the server; known only from the Host.
+    pub name: Option<String>,
+    /// Decimal string.
+    pub epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostEntry {
     pub id: String,
-    pub name: String,
+    /// Not sent by the server; known only from the Host.
+    pub name: Option<String>,
     pub online: bool,
     /// Decimal strings, as in the relay frames.
     pub access_epoch: String,
@@ -97,6 +102,7 @@ pub struct SessionResponse {
     pub device: DeviceState,
     /// Mobile only: new access token and rotated refresh credential for the platform to store.
     pub access_token: Option<RelayToken>,
+    /// Opaque (`<sessionId>.<refreshToken>`): store and send back as is.
     pub refresh_credential: Option<String>,
 }
 
@@ -104,6 +110,11 @@ pub struct SessionResponse {
 pub enum SessionError {
     /// 401/403: sign in again.
     Unauthorized,
+    /// 409 `UPDATE_REQUIRED`: client and server contracts differ; update before any data.
+    UpdateRequired,
+    /// 409 `OUTCOME_UNKNOWN`: the mobile refresh credential may have rotated and the
+    /// response was lost. Re-authenticate (sign in again); do not retry the same credential.
+    OutcomeUnknown,
     /// Other non-200 status.
     Http(u16),
     TooLarge,
@@ -131,6 +142,7 @@ fn string(o: &Object, k: &str) -> R<String> {
 }
 fn opt_string(o: &Object, k: &str) -> R<Option<String>> {
     o.get(k)
+        .filter(|v| !v.is_null())
         .map(|v| v.as_str().map(str::to_owned).ok_or(SessionError::Malformed))
         .transpose()
 }
@@ -160,7 +172,7 @@ fn token(o: &Object) -> R<RelayToken> {
 pub(crate) fn parse_host(h: &Object) -> R<HostEntry> {
     Ok(HostEntry {
         id: string(h, "hostId")?,
-        name: string(h, "name")?,
+        name: opt_string(h, "name")?,
         online: field(h, "online")?
             .as_bool()
             .ok_or(SessionError::Malformed)?,
@@ -172,17 +184,32 @@ pub(crate) fn parse_host(h: &Object) -> R<HostEntry> {
                 let w = element(w)?;
                 Ok(Workspace {
                     id: string(w, "workspaceId")?,
-                    name: string(w, "name")?,
+                    name: opt_string(w, "name")?,
+                    epoch: string(w, "workspaceEpoch")?,
                 })
             })
             .collect::<R<_>>()?,
     })
 }
 
+fn conflict(body: &[u8]) -> SessionError {
+    let code = (body.len() <= MAX_RESPONSE_BYTES)
+        .then(|| std::str::from_utf8(body).ok())
+        .flatten()
+        .and_then(|t| json::parse(t).ok())
+        .and_then(|v| v.get("code").and_then(Value::as_str).map(str::to_owned));
+    match code.as_deref() {
+        Some("UPDATE_REQUIRED") => SessionError::UpdateRequired,
+        Some("OUTCOME_UNKNOWN") => SessionError::OutcomeUnknown,
+        _ => SessionError::Http(409),
+    }
+}
+
 pub fn parse_session_response(status: u16, body: &[u8]) -> R<SessionResponse> {
     match status {
         200 => {}
         401 | 403 => return Err(SessionError::Unauthorized),
+        409 => return Err(conflict(body)),
         s => return Err(SessionError::Http(s)),
     }
     if body.len() > MAX_RESPONSE_BYTES {
