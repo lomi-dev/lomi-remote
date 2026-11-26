@@ -287,10 +287,42 @@ fn pending_connect(error: &io::Error) -> bool {
     #[allow(unreachable_code)]
     false
 }
-fn pause(state: &State, deadline: Instant) -> std::result::Result<(), ureq::Error> {
+fn pause(
+    state: &State,
+    deadline: Instant,
+    socket: &impl AsSocket,
+    write: bool,
+) -> std::result::Result<(), ureq::Error> {
     state.io_check(deadline)?;
-    std::thread::sleep(QUANTUM.min(deadline.saturating_duration_since(Instant::now())));
+    wait_ready(
+        socket,
+        write,
+        QUANTUM.min(deadline.saturating_duration_since(Instant::now())),
+    );
     state.io_check(deadline)
+}
+#[cfg(unix)]
+pub(crate) use std::os::fd::AsRawFd as AsSocket;
+#[cfg(windows)]
+pub(crate) use std::os::windows::io::AsRawSocket as AsSocket;
+/// Waits at most `limit`, returning early once `socket` is readable (or
+/// writable). poll(2), not a sleep: at the Host daemon's utility QoS macOS
+/// coalesces a 10 ms sleep to 50-80 ms, which every TLS/HTTP round trip paid;
+/// a poll timeout stays precise and the wait ends when the bytes arrive.
+#[cfg(unix)]
+pub(crate) fn wait_ready(socket: &impl AsSocket, write: bool, limit: Duration) {
+    let mut poll = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: if write { libc::POLLOUT } else { libc::POLLIN },
+        revents: 0,
+    };
+    let ms = limit.as_micros().div_ceil(1000).min(i32::MAX as u128) as libc::c_int;
+    // SAFETY: one live, correctly sized pollfd.
+    unsafe { libc::poll(&mut poll, 1, ms) };
+}
+#[cfg(windows)]
+pub(crate) fn wait_ready(_socket: &impl AsSocket, _write: bool, limit: Duration) {
+    std::thread::sleep(limit);
 }
 pub(crate) fn connect_socket(
     address: SocketAddr,
@@ -306,7 +338,7 @@ pub(crate) fn connect_socket(
     socket.set_nonblocking(true)?;
     match socket.connect(&address.into()) {
         Ok(()) => {}
-        Err(error) if pending_connect(&error) => await_connected(state, deadline, || {
+        Err(error) if pending_connect(&error) => await_connected(state, deadline, &socket, || {
             if let Some(error) = socket.take_error()? {
                 return Err(error);
             }
@@ -324,10 +356,12 @@ pub(crate) fn connect_socket(
 fn await_connected(
     state: &State,
     deadline: Instant,
+    socket: &impl AsSocket,
     mut ready: impl FnMut() -> io::Result<bool>,
 ) -> std::result::Result<(), ureq::Error> {
     loop {
-        pause(state, deadline)?;
+        // A connect completes (or fails) by becoming writable.
+        pause(state, deadline, socket, true)?;
         let connected = ready()?;
         state.io_check(deadline)?;
         if connected {
@@ -382,7 +416,7 @@ impl BudgetTcp {
 // Explicit partial-write cursor: a prefix accepted by the kernel is never sent
 // again. The same absolute deadline is checked before and after every progress.
 fn write_until(
-    writer: &mut impl Write,
+    writer: &mut TcpStream,
     bytes: &[u8],
     state: &State,
     deadline: Instant,
@@ -393,7 +427,9 @@ fn write_until(
         match writer.write(&bytes[offset..]) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
             Ok(amount) => offset += amount,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(state, deadline)?,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                pause(state, deadline, writer, true)?
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
         }
@@ -430,7 +466,9 @@ impl Transport for BudgetTcp {
                     self.buffers.input_appended(amount);
                     return Ok(amount > 0);
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(&state, deadline)?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    pause(&state, deadline, &self.stream, false)?
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.into()),
             }
@@ -448,6 +486,39 @@ impl Transport for BudgetTcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Host daemon runs at utility QoS. There macOS coalesces a 10 ms
+    /// sleep to 50-80 ms; the socket wait must keep its bound and wake on data.
+    #[cfg(unix)]
+    #[test]
+    fn socket_wait_stays_precise_at_utility_qos_and_wakes_on_data() {
+        std::thread::spawn(|| {
+            #[cfg(target_os = "macos")]
+            // SAFETY: changes only this test thread's QoS class.
+            unsafe {
+                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+            }
+            let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+            let started = Instant::now();
+            for _ in 0..10 {
+                wait_ready(&rx, false, QUANTUM);
+            }
+            let average = started.elapsed() / 10;
+            assert!(average >= QUANTUM, "returned before the bound: {average:?}");
+            assert!(average < Duration::from_millis(25), "stretched: {average:?}");
+            let writer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                tx.write_all(b"x").unwrap();
+                tx
+            });
+            let started = Instant::now();
+            wait_ready(&rx, false, Duration::from_secs(5));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            drop(writer.join().unwrap());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn pooled_io_sees_only_the_operation_bound_on_this_thread() {

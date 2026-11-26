@@ -1718,6 +1718,31 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(25));
     }
 
+    /// Short actor waits use poll(2) even with no relay socket: at the
+    /// daemon's utility QoS a 20 ms `recv_timeout` is coalesced to ~150 ms.
+    #[cfg(unix)]
+    #[test]
+    fn short_actor_wait_stays_precise_at_utility_qos() {
+        use crate::unix::auth::wait_readable;
+        std::thread::spawn(|| {
+            #[cfg(target_os = "macos")]
+            // SAFETY: changes only this test thread's QoS class.
+            unsafe {
+                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+            }
+            let wait = remote_ingress::ESTABLISHED_ACTOR_WAIT;
+            let started = Instant::now();
+            for _ in 0..5 {
+                assert!(!wait_readable(&[], wait));
+            }
+            let average = started.elapsed() / 5;
+            assert!(average >= wait, "returned before the bound: {average:?}");
+            assert!(average < wait * 2, "stretched: {average:?}");
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn actor_wait_tracks_cloud_and_reserved_stage_progress() {
         use cloud::StepOutcome;
@@ -3591,7 +3616,11 @@ impl<'a> WorkerOperationUnits<'a> {
 
 /// Sleep for at most `wait`, but return as soon as a command arrives or a
 /// relay socket becomes readable. A command that lands during the socket wait
-/// is picked up after at most `wait` (20-50 ms while a channel is established).
+/// is picked up after at most `wait` (20-50 ms while a channel is set up or
+/// established). Short waits always use poll(2), also with no relay socket
+/// and when the guard asks for a plain sleep: the Host daemon runs at utility
+/// QoS, where macOS coalesces a 20 ms `recv_timeout` to ~150 ms, while a poll
+/// timeout stays precise.
 fn wait_for_command_or_frame(
     receiver: &mpsc::Receiver<Command>,
     ingress: &remote_ingress::Registry<'_>,
@@ -3600,17 +3629,16 @@ fn wait_for_command_or_frame(
 ) -> Result<Command, mpsc::RecvTimeoutError> {
     #[cfg(unix)]
     if !wait.is_zero() && wait <= remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT {
-        let fds = ingress.relay_wait_fds();
-        if !fds.is_empty() {
-            if let Ok(command) = receiver.try_recv() {
-                return Ok(command);
-            }
-            if socket_wait(&fds, wait, guard, lomi_host_http::relay_bytes_read()) {
-                return receiver
-                    .try_recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Timeout);
-            }
+        if let Ok(command) = receiver.try_recv() {
+            return Ok(command);
         }
+        let fds = ingress.relay_wait_fds();
+        if !socket_wait(&fds, wait, guard, lomi_host_http::relay_bytes_read()) {
+            wait_readable(&[], wait);
+        }
+        return receiver
+            .try_recv()
+            .map_err(|_| mpsc::RecvTimeoutError::Timeout);
     }
     let _ = (ingress, &guard);
     receiver.recv_timeout(wait)

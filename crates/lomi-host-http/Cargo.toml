@@ -20,3 +20,6 @@ webpki-roots = "=1.0.9"
 # Same product policy as lomi-terminal-state; frames/upgrade requests must never
 # reach a logger, including standalone host-http builds and debug profiles.
 log = { version = "=0.4.34", features = ["max_level_off", "release_max_level_off"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"

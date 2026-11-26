@@ -407,12 +407,12 @@ impl RelaySocket {
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
         Ok(state)
     }
-    fn pause(&self) -> io::Result<()> {
+    fn pause(&self, write: bool) -> io::Result<()> {
         let remaining = self
             .current()?
             .check()
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
-        std::thread::sleep(QUANTUM.min(remaining));
+        budget::wait_ready(&self.tcp, write, QUANTUM.min(remaining));
         self.current()?;
         Ok(())
     }
@@ -425,7 +425,7 @@ impl Read for RelaySocket {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock && self.polling => {
                     return Err(error);
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.pause()?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.pause(false)?,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 result => {
                     self.current()?;
@@ -443,7 +443,7 @@ impl Write for RelaySocket {
         loop {
             self.current()?;
             match self.write_tcp(bytes) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.pause()?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.pause(true)?,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 result => {
                     self.current()?;

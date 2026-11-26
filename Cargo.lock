@@ -2197,6 +2197,7 @@ dependencies = [
 name = "lomi-host-http"
 version = "0.1.10"
 dependencies = [
+ "libc",
  "log",
  "lomi-host-auth",
  "lomi-remote-protocol",
