@@ -177,12 +177,17 @@ impl DataTransport {
         host: HostId,
         access: &HostAccessCredential,
     ) -> Result<HostRuntimeGetResult> {
-        self.data_get(
+        if let Some(result) = crate::uplink::runtime_get(host) {
+            return Ok(result);
+        }
+        let result: HostRuntimeGetResult = self.data_get(
             &format!("/v2/remote/hosts/{}/runtime", String::from(host)),
             access,
             RESPONSE_LIMIT,
             Scope::Runtime,
-        )
+        )?;
+        crate::uplink::note_runtime_get(&result);
+        Ok(result)
     }
     pub fn runtime_claim(
         &self,
@@ -206,7 +211,11 @@ impl DataTransport {
         request: &HeartbeatParams,
         access: &HostAccessCredential,
     ) -> Result<HeartbeatResult> {
-        self.data_mutate(
+        // Uplink on and admitted for this exact runtime: no request (P2.14).
+        if let Some(result) = crate::uplink::heartbeat(host, &request.runtime, access) {
+            return Ok(result);
+        }
+        let result = self.data_mutate(
             "POST",
             &format!("/v2/remote/hosts/{}/heartbeat", String::from(host)),
             request,
@@ -214,7 +223,11 @@ impl DataTransport {
             LARGE,
             RESPONSE_LIMIT,
             Scope::Runtime,
-        )
+        );
+        if result.is_ok() {
+            crate::uplink::note_http_heartbeat();
+        }
+        result
     }
     pub fn publication(
         &self,
@@ -222,6 +235,9 @@ impl DataTransport {
         request: &PublicationParams,
         access: &HostAccessCredential,
     ) -> Result<PublicationResult> {
+        if let Some(result) = crate::uplink::publication(host, request, self.budget.as_deref()) {
+            return result;
+        }
         self.data_mutate(
             "PUT",
             &format!("/v2/remote/hosts/{}/publication", String::from(host)),
@@ -238,12 +254,24 @@ impl DataTransport {
         host: HostId,
         access: &HostAccessCredential,
     ) -> Result<PairingPendingResult> {
-        self.data_get(
+        use crate::uplink::{Gate, Pending};
+        let gate = crate::uplink::pending_gate(Pending::Pairings);
+        if gate == Gate::Skip {
+            return Ok(PairingPendingResult {
+                pairings: PendingPairings::try_from(Vec::new()).map_err(|_| Error::Request)?,
+            });
+        }
+        let result: Result<PairingPendingResult> = self.data_get(
             &format!("/v2/remote/hosts/{}/pairings/pending", String::from(host)),
             access,
             LARGE,
             Scope::Peer,
-        )
+        );
+        if gate == Gate::Fetch {
+            let empty = matches!(&result, Ok(r) if r.pairings.as_slice().is_empty());
+            crate::uplink::pending_done(Pending::Pairings, empty);
+        }
+        result
     }
     /// Reconcile an exact retained decision; callers recheck current authority.
     /// A read can commit expiry tombstones; failure does not imply no effect.
@@ -281,12 +309,24 @@ impl DataTransport {
         host: HostId,
         access: &HostAccessCredential,
     ) -> Result<ChannelPendingResult> {
-        self.data_get(
+        use crate::uplink::{Gate, Pending};
+        let gate = crate::uplink::pending_gate(Pending::Channels);
+        if gate == Gate::Skip {
+            return Ok(ChannelPendingResult {
+                channels: PendingChannels::try_from(Vec::new()).map_err(|_| Error::Request)?,
+            });
+        }
+        let result: Result<ChannelPendingResult> = self.data_get(
             &format!("/v2/remote/hosts/{}/channels/pending", String::from(host)),
             access,
             LARGE,
             Scope::Peer,
-        )
+        );
+        if gate == Gate::Fetch {
+            let empty = matches!(&result, Ok(r) if r.channels.as_slice().is_empty());
+            crate::uplink::pending_done(Pending::Channels, empty);
+        }
+        result
     }
     /// Reconcile retained admission without issuing a replacement ticket.
     /// Callers verify exact context and fresh authority before accepting it.
@@ -346,6 +386,9 @@ impl DataTransport {
         limit: usize,
         scope: Scope,
     ) -> Result<R> {
+        if matches!(scope, Scope::Peer) {
+            crate::uplink::note_peer_http();
+        }
         let bearer = Zeroizing::new(format!("Bearer {}", access.expose_wire()));
         let builder = self
             .agent
@@ -373,6 +416,9 @@ impl DataTransport {
         response_limit: usize,
         scope: Scope,
     ) -> Result<R> {
+        if matches!(scope, Scope::Peer) {
+            crate::uplink::note_peer_http();
+        }
         let body = encode_bounded(request, request_limit)?;
         let bearer = Zeroizing::new(format!("Bearer {}", access.expose_wire()));
         let url = format!("{}{path}", self.origin.0);

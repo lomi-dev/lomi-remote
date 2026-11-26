@@ -341,6 +341,16 @@ impl Worker {
             self.finish_operation();
             self.scope = Some(snapshot.scope.clone());
             self.action = Action::Get;
+            // Uplink (off unless LOMI_REMOTE_UPLINK is set): the relay this scope pins.
+            if lomi_host_http::uplink::enabled()
+                && let Some(endpoint) = runtime
+                    .owner
+                    .auth_selection(runtime.operation)?
+                    .configuration
+                    .and_then(|c| c.relay_endpoint)
+            {
+                lomi_host_http::uplink::set_endpoint(&endpoint);
+            }
         }
         if self.transport.is_none() {
             // TLS/client construction is outside Domain/Store. The cached client
