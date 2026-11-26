@@ -3152,7 +3152,13 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
                 if !matches!(self.request.as_ref(), Some(WorkerReadyRequest::Rotate(original))
                     if original == &request) { return Err(WorkerReadyError::Stale); }
                 self.provider_accept_started = true;
-                self.attempt.auth.accept_rotation(response, floor)
+                self.attempt.auth.accept_rotation(response, floor).inspect(|()| {
+                    // P2.15: hand the new access token to the uplink (token.update on the
+                    // live link; a no-op while the uplink is off).
+                    if let Ok(access) = self.attempt.auth.access_credential(floor) {
+                        lomi_host_http::uplink::offer_token(&access);
+                    }
+                })
             }
         }.map_err(WorkerReadyError::Provider)?;
         self.check_boundary()?;
