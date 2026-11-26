@@ -122,6 +122,24 @@ socket plus a wake pipe (publication job, token hand-off); no `sleep` or
 reset after a link that lived 10 s. Other HTTP paths keep their single-attempt
 rule; only this thread retries.
 
+## Windows (P2.16)
+
+The module has no Windows-only code: the wake pipe and `poll(2)` are
+`cfg(unix)`; elsewhere the thread waits in 10 ms slices (as `wait_ready`
+already does on Windows). `ring` needs a C toolchain, which a Mac does not
+have for MSVC, but its build script can be stubbed for a type check:
+
+```sh
+cargo check -p lomi-host-http --target x86_64-pc-windows-msvc \
+  --config 'target.x86_64-pc-windows-msvc.ring_core_0_17_14_.rustc-link-search=[]'
+```
+
+`lomi-host` (which holds the actor-side hooks in `unix/cloud.rs` and
+`unix/shared_owner.rs`, compiled on Windows too) cannot be checked this way:
+`wasmtime-internal-fiber` compiles `windows.c` against `<windows.h>`. Those two
+edits only call `uplink::enabled`, `set_endpoint` and `offer_token`; the full
+check stays with desktop CI.
+
 ## Not changed / not covered
 
 - Channels, tickets and admission stay HTTP and relay data channels (P3).
