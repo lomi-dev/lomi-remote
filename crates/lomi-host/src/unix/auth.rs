@@ -1561,6 +1561,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn projection_counts_system_sleep_once_and_only_forward() {
+        use super::{base_after_suspend, suspended_total};
+        let mut seen = Duration::from_secs(10);
+        // 3 days asleep since the last pass: the clock jumps by exactly that.
+        let total = Duration::from_secs(10 + 3 * 86_400);
+        assert_eq!(base_after_suspend(1_000, &mut seen, total), 1_000 + 3 * 86_400);
+        assert_eq!(seen, total);
+        // Nothing new: no movement. A smaller reading never moves it back.
+        assert_eq!(base_after_suspend(5_000, &mut seen, total), 5_000);
+        assert_eq!(base_after_suspend(5_000, &mut seen, Duration::ZERO), 5_000);
+        assert_eq!(seen, total);
+        let first = suspended_total();
+        assert!(suspended_total() >= first);
+    }
+
     #[cfg(unix)]
     #[test]
     fn wait_readable_wakes_on_incoming_bytes_not_on_timeout() {
@@ -3473,6 +3489,47 @@ fn wait_for_command_or_frame(
     receiver.recv_timeout(wait)
 }
 
+/// Total time this process was suspended (system sleep). `Instant` skips it
+/// on macOS (CLOCK_UPTIME_RAW) and Linux (CLOCK_MONOTONIC), so the worker's
+/// projected clock fell behind wall time by every sleep: enrollment codes
+/// were stamped in the lagging clock and judged expired against wall time
+/// (`presentation_expired`) forever, while the worker still saw them valid.
+/// Both clocks are monotonic, so this cannot be moved by editing the date.
+fn suspended_total() -> Duration {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+    {
+        #[cfg(target_os = "macos")]
+        const PAIR: (libc::clockid_t, libc::clockid_t) =
+            (libc::CLOCK_MONOTONIC, libc::CLOCK_UPTIME_RAW);
+        #[cfg(not(target_os = "macos"))]
+        const PAIR: (libc::clockid_t, libc::clockid_t) =
+            (libc::CLOCK_BOOTTIME, libc::CLOCK_MONOTONIC);
+        let read = |id| {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: ts is a valid out-pointer for the call.
+            (unsafe { libc::clock_gettime(id, &mut ts) } == 0)
+                .then(|| Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+        };
+        match (read(PAIR.0), read(PAIR.1)) {
+            (Some(with_sleep), Some(awake)) => with_sleep.saturating_sub(awake),
+            _ => Duration::ZERO,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+    {
+        Duration::ZERO
+    }
+}
+/// Moves the projection base forward by sleep not yet counted. Forward only.
+fn base_after_suspend(base: u64, seen: &mut Duration, total: Duration) -> u64 {
+    let slept = total.saturating_sub(*seen);
+    *seen = (*seen).max(total);
+    base.saturating_add(slept.as_secs())
+}
+
 /// Returns when any descriptor is readable/hung up or `wait` elapsed.
 #[cfg(unix)]
 fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) {
@@ -3552,6 +3609,7 @@ fn run_with_apis_inner(
     let initial_runtime = runtime;
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
+    let mut suspended_seen = suspended_total();
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
         let scheduling_time = Instant::now();
         let retained = worker_unit_retained(
@@ -3575,6 +3633,11 @@ fn run_with_apis_inner(
         // against the other connections' still-retained peer scopes.
         let retained = retained || (units.started && !settled_at_message_boundary);
         units.started = true;
+        if !retained {
+            // Held continuations keep their admission projection; sleep is
+            // counted at the first pass without one.
+            base = base_after_suspend(base, &mut suspended_seen, suspended_total());
+        }
         let mut runtime =
             initial_runtime.with_operation_at(units.operation(), units.aborted(), base, anchor);
         if settled_at_message_boundary {
