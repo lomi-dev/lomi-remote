@@ -38,12 +38,23 @@ impl Role {
     }
 }
 
+/// Host runtime claim carried in AUTH (same fields as the HTTP claim body).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeClaim {
+    pub host_id: String,
+    pub runtime_id: String,
+    /// Canonical decimal string, at most `i64::MAX`.
+    pub expected_generation: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyErrorCode {
     AuthFailed,
     UpdateRequired,
     Unavailable,
     Busy,
+    HostBusy,
+    StaleEpoch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +70,8 @@ pub enum Frame {
         role: Role,
         token: String,
         contract_hash: String,
+        /// Host only.
+        claim: Option<RuntimeClaim>,
     },
     ReadyOk {
         role: Role,
@@ -141,6 +154,25 @@ fn is_token(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && s != "00000000-0000-0000-0000-000000000000"
+        && b.iter().enumerate().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit() || (b'a'..=b'f').contains(c)
+            }
+        })
+}
+
+fn is_counter(s: &str) -> bool {
+    s.parse::<i64>().is_ok()
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && (s == "0" || !s.starts_with('0'))
+}
+
 fn is_hash(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -201,15 +233,39 @@ pub fn decode_frame(bytes: &[u8], from: Direction, max_bytes: usize) -> Result<F
     let bad = FrameError::BadShape;
     match kind {
         TYPE_AUTH => {
-            exact(&o, &["role", "token", "contractHash"], &[])?;
+            exact(&o, &["role", "token", "contractHash"], &["claim"])?;
             let (token, hash) = (text(o.get("token"))?, text(o.get("contractHash"))?);
             if !is_token(token) || !is_hash(hash) {
                 return Err(bad);
             }
+            let role = Role::parse(o.get("role"))?;
+            let claim = match o.get("claim") {
+                None => None,
+                // Only a host claims a runtime.
+                Some(c) if role == Role::Host => {
+                    let c = obj(Some(c))?;
+                    exact(&c, &["hostId", "runtimeId", "expectedGeneration"], &[])?;
+                    let (h, r, g) = (
+                        text(c.get("hostId"))?,
+                        text(c.get("runtimeId"))?,
+                        text(c.get("expectedGeneration"))?,
+                    );
+                    if !is_uuid(h) || !is_uuid(r) || !is_counter(g) {
+                        return Err(bad);
+                    }
+                    Some(RuntimeClaim {
+                        host_id: h.to_owned(),
+                        runtime_id: r.to_owned(),
+                        expected_generation: g.to_owned(),
+                    })
+                }
+                Some(_) => return Err(bad),
+            };
             Ok(Frame::Auth {
-                role: Role::parse(o.get("role"))?,
+                role,
                 token: token.to_owned(),
                 contract_hash: hash.to_owned(),
+                claim,
             })
         }
         TYPE_CALL => {
@@ -252,6 +308,8 @@ pub fn decode_frame(bytes: &[u8], from: Direction, max_bytes: usize) -> Result<F
                 "UPDATE_REQUIRED" => ReadyErrorCode::UpdateRequired,
                 "UNAVAILABLE" => ReadyErrorCode::Unavailable,
                 "BUSY" => ReadyErrorCode::Busy,
+                "HOST_BUSY" => ReadyErrorCode::HostBusy,
+                "STALE_EPOCH" => ReadyErrorCode::StaleEpoch,
                 _ => return Err(bad),
             };
             let older = match e.get("older") {
@@ -307,14 +365,24 @@ pub fn encode_frame(frame: &Frame, max_bytes: usize) -> Result<Vec<u8>, FrameErr
             role,
             token,
             contract_hash,
-        } => (
-            TYPE_AUTH,
-            map(vec![
+            claim,
+        } => {
+            let mut b = map(vec![
                 ("role", s(role.as_str())),
                 ("token", s(token)),
                 ("contractHash", s(contract_hash)),
-            ]),
-        ),
+            ]);
+            if let Some(c) = claim {
+                // `claim` is always the last key.
+                let c = map(vec![
+                    ("hostId", s(&c.host_id)),
+                    ("runtimeId", s(&c.runtime_id)),
+                    ("expectedGeneration", s(&c.expected_generation)),
+                ]);
+                b.insert("claim".into(), Value::Object(c));
+            }
+            (TYPE_AUTH, b)
+        }
         Frame::Call {
             call_id,
             name,
@@ -353,6 +421,8 @@ pub fn encode_frame(frame: &Frame, max_bytes: usize) -> Result<Vec<u8>, FrameErr
                 ReadyErrorCode::UpdateRequired => "UPDATE_REQUIRED",
                 ReadyErrorCode::Unavailable => "UNAVAILABLE",
                 ReadyErrorCode::Busy => "BUSY",
+                ReadyErrorCode::HostBusy => "HOST_BUSY",
+                ReadyErrorCode::StaleEpoch => "STALE_EPOCH",
             };
             let mut e = map(vec![("code", s(code))]);
             if let Some(o) = older {

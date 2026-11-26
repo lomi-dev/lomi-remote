@@ -503,6 +503,7 @@ fn malformed_frames_drop_the_socket_and_retry() {
             role: Role::Device,
             token: "T".repeat(24),
             contract_hash: HASH.into(),
+            claim: None,
         }), // client frame from the relay
         vec![0x05, b'[', b']'],
     ] {

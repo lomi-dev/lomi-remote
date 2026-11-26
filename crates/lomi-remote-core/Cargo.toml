@@ -16,3 +16,6 @@ browser = ["dep:wasm-bindgen"]
 # preserve_order: nested args/data keep insertion order so canonical vectors re-encode byte for byte.
 serde_json = { version = "=1.0.151", default-features = false, features = ["std", "preserve_order"] }
 wasm-bindgen = { version = "=0.2.126", optional = true }
+
+[dev-dependencies]
+sha2 = "=0.10.9"

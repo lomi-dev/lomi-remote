@@ -233,6 +233,7 @@ impl Link {
             role: Role::Device,
             token: token.token.clone(),
             contract_hash: self.cfg.contract_hash.clone(),
+            claim: None,
         };
         match frame::encode_frame(&auth, frame::MAX_FRAME_BYTES) {
             Ok(bytes) => {
@@ -302,6 +303,10 @@ impl Link {
                 ReadyErrorCode::Busy => {
                     out.push(Output::Close);
                     self.disconnect(DisconnectCause::Busy, now, &mut out);
+                }
+                // Host-only outcomes; a device never gets them.
+                ReadyErrorCode::HostBusy | ReadyErrorCode::StaleEpoch => {
+                    return self.violation(now, out);
                 }
             },
             (State::Ready, Frame::Event { name, data }) => {

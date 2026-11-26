@@ -31,7 +31,15 @@ fn to_value(f: &Frame) -> Value {
             role: r,
             token,
             contract_hash,
-        } => json!({"type":"AUTH","role":role(*r),"token":token,"contractHash":contract_hash}),
+            claim,
+        } => {
+            let mut v =
+                json!({"type":"AUTH","role":role(*r),"token":token,"contractHash":contract_hash});
+            if let Some(c) = claim {
+                v["claim"] = json!({"hostId":c.host_id,"runtimeId":c.runtime_id,"expectedGeneration":c.expected_generation});
+            }
+            v
+        }
         Frame::ReadyOk {
             role: r,
             expires_at,
@@ -43,6 +51,8 @@ fn to_value(f: &Frame) -> Value {
                 ReadyErrorCode::UpdateRequired => "UPDATE_REQUIRED",
                 ReadyErrorCode::Unavailable => "UNAVAILABLE",
                 ReadyErrorCode::Busy => "BUSY",
+                ReadyErrorCode::HostBusy => "HOST_BUSY",
+                ReadyErrorCode::StaleEpoch => "STALE_EPOCH",
             };
             let mut e = json!({ "code": code });
             if let Some(o) = older {
@@ -93,7 +103,7 @@ fn limits_and_types_match() {
 fn valid_vectors_decode_and_canonical_ones_reencode() {
     let d: Value = serde_json::from_str(VECTORS).unwrap();
     let valid = d["valid"].as_array().unwrap();
-    assert!(valid.len() >= 22);
+    assert!(valid.len() >= 26);
     for v in valid {
         let name = v["name"].as_str().unwrap();
         let bytes = hex(v["hex"].as_str().unwrap());
@@ -134,7 +144,7 @@ fn class(e: FrameError) -> &'static str {
 fn invalid_vectors_are_rejected() {
     let d: Value = serde_json::from_str(VECTORS).unwrap();
     let invalid = d["invalid"].as_array().unwrap();
-    assert!(invalid.len() >= 46);
+    assert!(invalid.len() >= 55);
     for v in invalid {
         let name = v["name"].as_str().unwrap();
         let err = decode_frame(&hex(v["hex"].as_str().unwrap()), dir(v), MAX_FRAME_BYTES)
@@ -171,4 +181,39 @@ fn encode_refuses_what_a_peer_would_reject() {
         encode_frame(&bad, MAX_FRAME_BYTES),
         Err(FrameError::BadShape)
     );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The vendored copy must equal the hash in PROVENANCE.md, and the auth-app original when
+/// that checkout exists (`AUTH_APP_DIR`, default `../auth-app` of the repo root's parent).
+#[test]
+fn vendored_vectors_match_provenance_and_auth_app() {
+    let prov = include_str!("../test-vectors/PROVENANCE.md");
+    let want = prov
+        .split("SHA-256: `")
+        .nth(1)
+        .and_then(|r| r.split('`').next())
+        .expect("hash in PROVENANCE.md");
+    assert_eq!(
+        sha256_hex(VECTORS.as_bytes()),
+        want,
+        "vectors differ from PROVENANCE.md"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = std::env::var_os("AUTH_APP_DIR").map_or_else(|| root.join("../auth-app"), Into::into);
+    match std::fs::read(dir.join("test-vectors/relay-frames.v1.json")) {
+        Ok(orig) => assert_eq!(
+            orig,
+            VECTORS.as_bytes(),
+            "vectors differ from the auth-app original"
+        ),
+        Err(_) => eprintln!("auth-app checkout not found; compared with the recorded hash only"),
+    }
 }
