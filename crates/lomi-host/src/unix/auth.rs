@@ -1561,20 +1561,57 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn readable_but_unread_socket_does_not_spin() {
+        use crate::unix::auth::socket_wait;
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        tx.write_all(b"x").unwrap(); // never read: stays readable
+        let fds = [rx.as_raw_fd()];
+        let wait = Duration::from_millis(20);
+        let (mut fast, mut passes) = (0u32, 0u32);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(200) {
+            passes += 1;
+            if !socket_wait(&fds, wait, &mut fast) {
+                std::thread::sleep(wait);
+            }
+        }
+        // Spinning would be thousands of passes; the guard allows 3 per wait.
+        assert!(passes <= 40, "passes = {passes}");
+        // A hung-up peer is the same: it must not spin either.
+        drop(tx);
+        let (mut fast, mut passes) = (0u32, 0u32);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(200) {
+            passes += 1;
+            if !socket_wait(&fds, wait, &mut fast) {
+                std::thread::sleep(wait);
+            }
+        }
+        assert!(passes <= 40, "passes = {passes}");
+    }
+
     #[test]
     fn projection_counts_system_sleep_once_and_only_forward() {
         use super::{base_after_suspend, suspended_total};
         let mut seen = Duration::from_secs(10);
         // 3 days asleep since the last pass: the clock jumps by exactly that.
         let total = Duration::from_secs(10 + 3 * 86_400);
-        assert_eq!(base_after_suspend(1_000, &mut seen, total), 1_000 + 3 * 86_400);
+        assert_eq!(
+            base_after_suspend(1_000, &mut seen, total),
+            1_000 + 3 * 86_400
+        );
         assert_eq!(seen, total);
         // Nothing new: no movement. A smaller reading never moves it back.
         assert_eq!(base_after_suspend(5_000, &mut seen, total), 5_000);
         assert_eq!(base_after_suspend(5_000, &mut seen, Duration::ZERO), 5_000);
         assert_eq!(seen, total);
         let first = suspended_total();
-        assert!(suspended_total() >= first);
+        // The two clocks are read a few ns apart, so allow that much jitter.
+        assert!(suspended_total() + Duration::from_millis(10) >= first);
     }
 
     #[cfg(unix)]
@@ -1591,7 +1628,7 @@ mod tests {
             tx.write_all(b"x").unwrap();
             tx
         });
-        wait_readable(&fds, Duration::from_secs(5));
+        assert!(wait_readable(&fds, Duration::from_secs(5)));
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(writer.join().unwrap());
         // Hangup also returns at once, and an idle socket waits the full bound.
@@ -3471,6 +3508,7 @@ fn wait_for_command_or_frame(
     receiver: &mpsc::Receiver<Command>,
     ingress: &remote_ingress::Registry<'_>,
     wait: Duration,
+    fast_wakes: &mut u32,
 ) -> Result<Command, mpsc::RecvTimeoutError> {
     #[cfg(unix)]
     if !wait.is_zero() && wait <= remote_ingress::ESTABLISHED_IDLE_ACTOR_WAIT {
@@ -3479,14 +3517,35 @@ fn wait_for_command_or_frame(
             if let Ok(command) = receiver.try_recv() {
                 return Ok(command);
             }
-            wait_readable(&fds, wait);
-            return receiver
-                .try_recv()
-                .map_err(|_| mpsc::RecvTimeoutError::Timeout);
+            if socket_wait(&fds, wait, fast_wakes) {
+                return receiver
+                    .try_recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Timeout);
+            }
         }
     }
-    let _ = ingress;
+    let _ = (ingress, &fast_wakes);
     receiver.recv_timeout(wait)
+}
+
+/// Poll the sockets once. Returns false when the caller must sleep itself:
+/// poll(2) is level-triggered, so a socket that is readable (or hung up) but
+/// deliberately not read this pass (git flow control, owner busy) would return
+/// at once forever. Two wakes in a row under 1 ms trip the guard for one wait.
+#[cfg(unix)]
+fn socket_wait(fds: &[std::os::fd::RawFd], wait: Duration, fast_wakes: &mut u32) -> bool {
+    if *fast_wakes >= 2 {
+        *fast_wakes = 0;
+        return false;
+    }
+    let started = Instant::now();
+    let event = wait_readable(fds, wait);
+    if event && started.elapsed() < Duration::from_millis(1) {
+        *fast_wakes += 1;
+    } else {
+        *fast_wakes = 0;
+    }
+    true
 }
 
 /// Total time this process was suspended (system sleep). `Instant` skips it
@@ -3530,9 +3589,10 @@ fn base_after_suspend(base: u64, seen: &mut Duration, total: Duration) -> u64 {
     base.saturating_add(slept.as_secs())
 }
 
-/// Returns when any descriptor is readable/hung up or `wait` elapsed.
+/// True when a descriptor reported readable, hung up, errored or invalid;
+/// false when `wait` elapsed.
 #[cfg(unix)]
-fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) {
+fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) -> bool {
     let mut polls: Vec<libc::pollfd> = fds
         .iter()
         .map(|&fd| libc::pollfd {
@@ -3544,7 +3604,11 @@ fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) {
     // Round up so a sub-millisecond remainder cannot become a spin.
     let ms = wait.as_millis().max(1).min(i32::MAX as u128) as libc::c_int;
     // SAFETY: polls is a live, correctly sized pollfd array.
-    unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, ms) };
+    let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, ms) };
+    ready > 0
+        && polls.iter().any(|p| {
+            p.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+        })
 }
 
 fn run_with_apis_and_coordinator(
@@ -3610,6 +3674,7 @@ fn run_with_apis_inner(
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
     let mut suspended_seen = suspended_total();
+    let mut fast_wakes = 0u32;
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
         let scheduling_time = Instant::now();
         let retained = worker_unit_retained(
@@ -3665,7 +3730,7 @@ fn run_with_apis_inner(
                 remote_ingress::ESTABLISHED_ACTOR_WAIT
             });
         }
-        match wait_for_command_or_frame(receiver, &ingress, wait) {
+        match wait_for_command_or_frame(receiver, &ingress, wait, &mut fast_wakes) {
             Ok(Command::Wake(id)) => {
                 let _ = id;
             }
