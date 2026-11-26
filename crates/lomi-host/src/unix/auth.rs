@@ -2197,6 +2197,9 @@ fn start_inner(
             let operation =
                 OwnerOperation::new(Instant::now() + Duration::from_secs(60), &stopping);
             let aborted = std::cell::Cell::new(false);
+            // The exact reading behind `base`; the inner loop counts sleep from
+            // here, so sleep during provider/keychain setup is not lost.
+            let suspended_reading = suspended_total();
             let runtime = Runtime {
                 aborted: &aborted,
                 owner: &owner,
@@ -2212,7 +2215,7 @@ fn start_inner(
                 base: projected_base(
                     wall,
                     anchor.elapsed(),
-                    suspended_total().saturating_sub(suspended_at_start),
+                    suspended_reading.saturating_sub(suspended_at_start),
                 ),
                 anchor: Instant::now(),
             };
@@ -2329,6 +2332,7 @@ fn start_inner(
                                         runtime,
                                         apis,
                                         coordinator.clone(),
+                                        suspended_reading,
                                     );
                                     explicit_retry = true;
                                 } else {
@@ -3720,6 +3724,7 @@ fn wait_readable(fds: &[std::os::fd::RawFd], wait: Duration) -> bool {
         })
 }
 
+#[allow(clippy::too_many_arguments)] // one reading more than the worker context
 fn run_with_apis_and_coordinator(
     auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
     transport: &dyn AuthTransport,
@@ -3728,6 +3733,7 @@ fn run_with_apis_and_coordinator(
     runtime: Runtime<'_>,
     apis: InjectedApis<'_>,
     coordinator: std::sync::Weak<super::Coordinator>,
+    suspended_reading: Duration,
 ) {
     run_with_apis_inner(
         auth,
@@ -3737,9 +3743,11 @@ fn run_with_apis_and_coordinator(
         runtime,
         apis,
         coordinator,
+        suspended_reading,
     );
 }
 
+#[allow(clippy::too_many_arguments)] // one reading more than the worker context
 fn run_with_apis_inner(
     auth: &mut HostAuth<'_, dyn SecretStorage + '_>,
     transport: &dyn AuthTransport,
@@ -3748,6 +3756,7 @@ fn run_with_apis_inner(
     runtime: Runtime<'_>,
     apis: InjectedApis<'_>,
     coordinator: std::sync::Weak<super::Coordinator>,
+    suspended_reading: Duration,
 ) {
     let mut ingress =
         remote_ingress::Registry::with_coordinator(runtime.stopping, coordinator.clone());
@@ -3782,31 +3791,39 @@ fn run_with_apis_inner(
     let initial_runtime = runtime;
     let mut units = WorkerOperationUnits::new(runtime.operation, runtime.aborted);
     let mut immediate_ingress_pass = false;
-    let mut suspended_seen = suspended_total();
+    let mut suspended_seen = suspended_reading;
     let mut wake_guard = WakeGuard::default();
+    // If the system slept, end the unit exactly like a deadline settlement
+    // (nothing retained crosses the jump, the gate closes and must be
+    // reopened by a real Ready resume), then move the projection forward.
+    // Run at the top of a pass and right after the wait, where sleep most
+    // often happens, before any frame is processed. Retained continuations
+    // keep their (base, anchor) pair, so waiting for a settlement could take
+    // minutes. Deferred while a Git writer is finishing (`active_valid`
+    // compensates). Any suspension of 1 s or more ends the unit, even when no
+    // expiry was crossed (e.g. a short DarkWake): channels reconnect.
+    macro_rules! settle_after_suspend {
+        () => {
+            let suspended_now = suspended_total();
+            if suspended_now.saturating_sub(suspended_seen) >= Duration::from_secs(1)
+                && !stopping.load(Ordering::Acquire)
+                && !ingress.has_active_git_writer()
+            {
+                cloud.finish_operation();
+                peer.discard_retained_operation();
+                channel.discard_retained_operation();
+                idle.reset_reservation();
+                publication_barrier.reset();
+                ingress.discard();
+                gate.store(true, Ordering::Release);
+                base = base_after_suspend(base, &mut suspended_seen, suspended_now);
+                units.admit_after_settlement(stopping);
+                continue;
+            }
+        };
+    }
     while !stopping.load(Ordering::Acquire) || ingress.has_active_git_writer() {
-        // Every pass: if the system slept, end the unit exactly like a
-        // deadline settlement (nothing retained crosses the jump, the gate
-        // closes and must be reopened by a real Ready resume), then move the
-        // projection forward. Retained continuations keep their (base, anchor)
-        // pair, so correcting only at settlement could take a very long time.
-        // Deferred while a Git writer is finishing; it ends within one turn.
-        let suspended_now = suspended_total();
-        if suspended_now.saturating_sub(suspended_seen) >= Duration::from_secs(1)
-            && !stopping.load(Ordering::Acquire)
-            && !ingress.has_active_git_writer()
-        {
-            cloud.finish_operation();
-            peer.discard_retained_operation();
-            channel.discard_retained_operation();
-            idle.reset_reservation();
-            publication_barrier.reset();
-            ingress.discard();
-            gate.store(true, Ordering::Release);
-            base = base_after_suspend(base, &mut suspended_seen, suspended_now);
-            units.admit_after_settlement(stopping);
-            continue;
-        }
+        settle_after_suspend!();
         let scheduling_time = Instant::now();
         let retained = worker_unit_retained(
             cloud.has_retained_operation(),
@@ -3862,6 +3879,7 @@ fn run_with_apis_inner(
             }
             Ok(Command::Logout | Command::Configure) | Err(_) => {}
         }
+        settle_after_suspend!();
         if stopping.load(Ordering::Acquire) {
             publication_barrier.reset();
             if ingress.has_active_git_writer() {
@@ -4001,6 +4019,10 @@ fn run_with_apis_inner(
                 continue;
             };
             let deadlines = auth.credential_deadlines().ok();
+            // Settlement is deferred while this writer finishes, so `now` may
+            // predate a sleep; judge validity at the corrected time.
+            let mut seen = suspended_seen;
+            let now = base_after_suspend(now, &mut seen, suspended_total());
             let active_valid = auth.status() == Status::Ready
                 && !fence.locked
                 && !fence.pending_cloud_revoke
