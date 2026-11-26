@@ -6,7 +6,7 @@
 //! (no shell) and must be run off the async runtime by the caller.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -83,6 +83,7 @@ fn shadow_limit() -> usize {
 }
 
 /// A work tree plus, for non-git folders, the shadow git dir that tracks it.
+#[derive(Clone)]
 struct Repo {
     top: PathBuf,
     git_dir: Option<PathBuf>,
@@ -123,11 +124,18 @@ pub struct UndoReport {
 }
 
 fn command(dir: &Path) -> Command {
+    command_with(dir, true)
+}
+
+/// `literal` off lets pathspec magic such as `:(exclude)` work.
+fn command_with(dir: &Path, literal: bool) -> Command {
     let mut c = Command::new("git");
+    if literal {
+        c.arg("--literal-pathspecs");
+    }
     c.args([
         "--no-pager",
         "--no-optional-locks",
-        "--literal-pathspecs",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -139,6 +147,7 @@ fn command(dir: &Path) -> Command {
     .arg(dir)
     .env("GIT_TERMINAL_PROMPT", "0")
     .env("LC_ALL", "C")
+    .env("GIT_LITERAL_PATHSPECS", if literal { "1" } else { "0" })
     .env_remove("GIT_INDEX_FILE")
     .env_remove("GIT_DIR")
     .env_remove("GIT_WORK_TREE")
@@ -163,7 +172,11 @@ fn ok(c: &mut Command) -> Result<Vec<u8>, String> {
 }
 
 fn cmd(repo: &Repo) -> Command {
-    let mut c = command(&repo.top);
+    cmd_with(repo, true)
+}
+
+fn cmd_with(repo: &Repo, literal: bool) -> Command {
+    let mut c = command_with(&repo.top, literal);
     if let Some(git_dir) = &repo.git_dir {
         c.env("GIT_DIR", git_dir).env("GIT_WORK_TREE", &repo.top);
     }
@@ -290,8 +303,10 @@ fn has_filters(top: &Repo) -> Result<bool, String> {
 }
 
 /// Builds a tree of the full working state (tracked + untracked, minus
-/// ignored) using a private index. Returns `(tree, head)`.
-fn write_tree(top: &Repo) -> Result<(String, Option<String>), String> {
+/// ignored) using a private index. `skip` lists nested repositories (paths
+/// relative to the top) that are left out; they have checkpoints of their own.
+/// Returns `(tree, head)`.
+fn write_tree(top: &Repo, skip: &[String]) -> Result<(String, Option<String>), String> {
     let git_dir = git_text(top, &["rev-parse", "--absolute-git-dir"])?;
     let tmp = tempfile::tempdir_in(&git_dir)
         .or_else(|_| tempfile::tempdir())
@@ -335,25 +350,33 @@ fn write_tree(top: &Repo) -> Result<(String, Option<String>), String> {
             return Err("This folder is too large to snapshot for undo (over 200 MB).".to_string());
         }
     }
-    with_index(&["add", "-A"])?;
+    if skip.is_empty() {
+        with_index(&["add", "-A"])?;
+    } else {
+        // `git add` aborts on an embedded repository without commits, so exclude them.
+        let specs: Vec<String> = skip
+            .iter()
+            .map(|k| format!(":(exclude,literal){k}"))
+            .collect();
+        ok(cmd_with(top, false)
+            .args(["add", "-A", "--", "."])
+            .args(&specs)
+            .env("GIT_INDEX_FILE", &index))?;
+    }
     let tree = String::from_utf8_lossy(&with_index(&["write-tree"])?)
         .trim()
         .to_string();
     Ok((tree, head))
 }
 
-/// Snapshots the working tree into a commit stored at `reference`
-/// (must be under `refs/lomi/chat/`). `None` when not in a git work tree.
-pub fn capture(cwd: &Path, reference: &str) -> Result<Option<String>, String> {
-    validate_ref(reference)?;
-    let Some(top) = resolve(cwd, true)? else {
-        return Ok(None);
-    };
-    if has_filters(&top)? {
+/// Commits the working state of one repository at `reference`; `None` when its
+/// config defines content filters.
+fn capture_repo(top: &Repo, reference: &str, skip: &[String]) -> Result<Option<String>, String> {
+    if has_filters(top)? {
         return Ok(None);
     }
-    let (tree, head) = write_tree(&top)?;
-    let mut c = cmd(&top);
+    let (tree, head) = write_tree(top, skip)?;
+    let mut c = cmd(top);
     c.args(["commit-tree", &tree]);
     if let Some(h) = &head {
         c.args(["-p", h]);
@@ -364,14 +387,169 @@ pub fn capture(cwd: &Path, reference: &str) -> Result<Option<String>, String> {
         .env("GIT_COMMITTER_NAME", IDENTITY_NAME)
         .env("GIT_COMMITTER_EMAIL", IDENTITY_EMAIL);
     let sha = String::from_utf8_lossy(&ok(&mut c)?).trim().to_string();
-    git(&top, &["update-ref", reference, &sha])?;
+    git(top, &["update-ref", reference, &sha])?;
     Ok(Some(sha))
+}
+
+const NESTED_MAX_DEPTH: usize = 4;
+const NESTED_MAX_ENTRIES: usize = 20_000;
+const NESTED_MAX_REPOS: usize = 32;
+
+/// Git repositories below `cwd` (breadth first), as paths relative to `top`,
+/// the primary repo's work tree. Nested repos are not searched themselves and
+/// symlinks are not followed. shortcut: bounded walk (depth, entries, count),
+/// so repos beyond those limits get no checkpoints of their own.
+fn nested_repos(top: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (top, start) = (canon(top), canon(cwd));
+    let mut found = Vec::new();
+    let mut visited = 0usize;
+    let mut queue = VecDeque::from([(start, 0usize)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > NESTED_MAX_ENTRIES {
+                return found;
+            }
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || SHADOW_EXCLUDES.contains(&format!("\n{name}/\n")) {
+                continue;
+            }
+            let path = entry.path();
+            if std::fs::symlink_metadata(path.join(".git")).is_ok() {
+                if let Ok(rel) = path.strip_prefix(&top) {
+                    found.push(rel.to_path_buf());
+                    if found.len() >= NESTED_MAX_REPOS {
+                        return found;
+                    }
+                }
+            } else if depth + 1 < NESTED_MAX_DEPTH {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+    found
+}
+
+/// `nested_repos` as "/"-joined keys; names that are not UTF-8 are dropped.
+fn nested_keys(top: &Path, cwd: &Path) -> Vec<String> {
+    nested_repos(top, cwd)
+        .iter()
+        .filter_map(|p| {
+            let parts: Option<Vec<&str>> = p.components().map(|c| c.as_os_str().to_str()).collect();
+            Some(parts?.join("/"))
+        })
+        .collect()
+}
+
+/// Checkpoint token: a plain sha (primary repo only) or, when nested repos
+/// exist, a JSON object `{"": primary, "app": sha, ...}` keyed by path.
+fn parse_token(token: &str) -> Result<BTreeMap<String, String>, String> {
+    let map = if token.starts_with('{') {
+        serde_json::from_str::<BTreeMap<String, String>>(token)
+            .map_err(|e| format!("invalid checkpoint token: {e}"))?
+    } else {
+        BTreeMap::from([(String::new(), token.to_string())])
+    };
+    for (key, sha) in &map {
+        if !key.is_empty() {
+            validate_rel(key)?;
+        }
+        validate_ish(sha)?;
+    }
+    if !map.contains_key("") {
+        return Err("checkpoint token has no primary repository".to_string());
+    }
+    Ok(map)
+}
+
+/// The repo for `key` ("" = primary). A nested repo must still be a real
+/// repository reached without symlinks, or git would fall back to the parent.
+fn sub_repo(top: &Repo, key: &str) -> Result<Repo, String> {
+    if key.is_empty() {
+        return Ok(top.clone());
+    }
+    let mut dir = top.top.clone();
+    for part in Path::new(key).components() {
+        dir.push(part);
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("nested repository moved: {key}"));
+        }
+    }
+    if std::fs::symlink_metadata(dir.join(".git")).is_err() {
+        return Err(format!("nested repository is gone: {key}"));
+    }
+    Ok(Repo {
+        top: dir,
+        git_dir: None,
+    })
+}
+
+/// Repos present in both tokens as `(key, from sha, to sha)`.
+fn common<'a>(
+    from: &'a BTreeMap<String, String>,
+    to: &'a BTreeMap<String, String>,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    from.iter()
+        .filter_map(|(k, f)| Some((k.as_str(), f.as_str(), to.get(k)?.as_str())))
+        .collect()
+}
+
+/// The repo owning `path` (longest key prefix) and the path inside it.
+fn route<'a>(
+    repos: &[(&'a str, &'a str, &'a str)],
+    path: &str,
+) -> Option<((&'a str, &'a str, &'a str), String)> {
+    let hit = repos
+        .iter()
+        .filter(|(k, ..)| k.is_empty() || path.starts_with(&format!("{k}/")))
+        .max_by_key(|(k, ..)| k.len())?;
+    let rel = path.get(hit.0.len() + usize::from(!hit.0.is_empty())..)?;
+    Some((*hit, rel.to_string()))
+}
+
+/// Snapshots the working tree into a commit stored at `reference`
+/// (must be under `refs/lomi/chat/`). `None` when not in a git work tree.
+/// Git repositories nested in the folder are captured too (see `parse_token`).
+pub fn capture(cwd: &Path, reference: &str) -> Result<Option<String>, String> {
+    validate_ref(reference)?;
+    let Some(top) = resolve(cwd, true)? else {
+        return Ok(None);
+    };
+    let keys = nested_keys(&top.top, cwd);
+    let Some(sha) = capture_repo(&top, reference, &keys)? else {
+        return Ok(None);
+    };
+    let mut map = BTreeMap::from([(String::new(), sha.clone())]);
+    for key in keys {
+        // A nested repo failing its own guards only loses its own undo.
+        if let Ok(sub) = sub_repo(&top, &key)
+            && let Ok(Some(s)) = capture_repo(&sub, reference, &[])
+        {
+            map.insert(key, s);
+        }
+    }
+    if map.len() == 1 {
+        return Ok(Some(sha));
+    }
+    serde_json::to_string(&map)
+        .map(Some)
+        .map_err(|e| format!("failed to encode the checkpoint: {e}"))
 }
 
 /// Like `capture` but only returns the tree sha (no commit, no ref).
 pub fn snapshot_tree(cwd: &Path) -> Result<Option<String>, String> {
     match resolve(cwd, true)? {
-        Some(top) if !has_filters(&top)? => Ok(Some(write_tree(&top)?.0)),
+        Some(top) if !has_filters(&top)? => {
+            Ok(Some(write_tree(&top, &nested_keys(&top.top, cwd))?.0))
+        }
         _ => Ok(None),
     }
 }
@@ -408,12 +586,34 @@ fn name_status(top: &Repo, from: &str, to: &str) -> Result<Vec<(String, ChangeSt
     Ok(result)
 }
 
-/// Per-file changes between two commit/tree ishes, capped at 2000 files.
+/// Per-file changes between two checkpoint tokens (or plain ishes), capped at
+/// 2000 files. Nested repos appear with their path prefixed; their gitlink
+/// entries in the primary repo are dropped.
 pub fn changes(cwd: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, String> {
+    let (from, to) = (parse_token(from)?, parse_token(to)?);
     let top = require_repo(cwd)?;
-    let statuses = name_status(&top, from, to)?;
+    let gitlinks: HashSet<&str> = from.keys().chain(to.keys()).map(String::as_str).collect();
+    let mut all = Vec::new();
+    for (key, f, t) in common(&from, &to) {
+        let mut list = changes_in(&sub_repo(&top, key)?, f, t)?;
+        if key.is_empty() {
+            list.retain(|c| !gitlinks.contains(c.path.as_str()));
+        }
+        for c in &mut list {
+            if !key.is_empty() {
+                c.path = format!("{key}/{}", c.path);
+            }
+        }
+        all.extend(list);
+    }
+    all.truncate(MAX_FILES);
+    Ok(all)
+}
+
+fn changes_in(top: &Repo, from: &str, to: &str) -> Result<Vec<FileChange>, String> {
+    let statuses = name_status(top, from, to)?;
     let out = git(
-        &top,
+        top,
         &[
             "diff",
             "--no-ext-diff",
@@ -457,10 +657,15 @@ pub fn changes(cwd: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, Stri
 
 /// Unified diff of one path between two ishes, capped at 512 KiB.
 pub fn file_diff(cwd: &Path, from: &str, to: &str, path: &str) -> Result<String, String> {
-    validate_ish(from)?;
-    validate_ish(to)?;
+    let (from, to) = (parse_token(from)?, parse_token(to)?);
     validate_rel(path)?;
     let top = require_repo(cwd)?;
+    let Some(((key, from, to), path)) = route(&common(&from, &to), path) else {
+        return Ok(String::new());
+    };
+    validate_rel(&path)?;
+    let top = sub_repo(&top, key)?;
+    let path = path.as_str();
     let mut child = cmd(&top)
         .args([
             "diff",
@@ -588,19 +793,71 @@ pub fn mark_agent(cwd: &Path, files: &mut [FileChange], edited: &[String]) {
 
 /// Reverts the turn `before` -> `after`, path by path, but only where the
 /// working tree still matches `after`; `only` limits it to those paths.
-/// The index is never touched.
+/// The index is never touched. Nested repos are reverted on their own, with
+/// reported paths prefixed by the repo path.
 pub fn undo(
     cwd: &Path,
     before: &str,
     after: &str,
     only: Option<&[String]>,
 ) -> Result<UndoReport, String> {
+    let (before, after) = (parse_token(before)?, parse_token(after)?);
     let top = require_repo(cwd)?;
+    let repos = common(&before, &after);
+    let gitlinks: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|k| !k.is_empty())
+        .cloned()
+        .collect();
+    let mut report = UndoReport::default();
+    for &(key, b, a) in &repos {
+        let sub_only: Option<Vec<String>> = only.map(|only| {
+            only.iter()
+                .filter_map(|p| route(&repos, p))
+                .filter(|((k, ..), _)| *k == key)
+                .map(|(_, rel)| rel)
+                .collect()
+        });
+        if sub_only.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        let prefix = |p: String| {
+            if key.is_empty() {
+                p
+            } else {
+                format!("{key}/{p}")
+            }
+        };
+        let sub =
+            sub_repo(&top, key).and_then(|r| undo_in(&r, b, a, sub_only.as_deref(), &gitlinks));
+        match sub {
+            Ok(r) => {
+                report.restored.extend(r.restored.into_iter().map(prefix));
+                report.skipped.extend(r.skipped.into_iter().map(prefix));
+            }
+            Err(e) if key.is_empty() => return Err(e),
+            Err(_) => report.skipped.push(key.to_string()),
+        }
+    }
+    report.restored.sort();
+    Ok(report)
+}
+
+fn undo_in(
+    top: &Repo,
+    before: &str,
+    after: &str,
+    only: Option<&[String]>,
+    gitlinks: &[String],
+) -> Result<UndoReport, String> {
+    let top = top.clone();
     // `hash-object` would run a configured clean filter; see `has_filters`.
     if has_filters(&top)? {
         return Err("the repository defines content filters; undo is unavailable".into());
     }
     let mut paths = name_status(&top, before, after)?;
+    paths.retain(|(p, _)| !gitlinks.contains(p));
     if let Some(only) = only {
         paths.retain(|(p, _)| only.contains(p));
     }
@@ -712,20 +969,21 @@ fn restore_path(top: &Repo, path: &str, mode: &str, sha: &str) -> Result<(), Str
     Ok(())
 }
 
-/// Deletes every ref under `prefix` (e.g. `refs/lomi/chat/<thread>/`).
+/// Deletes every ref under `prefix` (e.g. `refs/lomi/chat/<thread>/`) in the
+/// primary repo and in the nested repos currently found below `cwd`.
 pub fn remove_refs(cwd: &Path, prefix: &str) -> Result<(), String> {
     let prefix = prefix.trim_end_matches('/');
     validate_ref(prefix)?;
     let Some(top) = resolve(cwd, false)? else {
         return Ok(());
     };
-    let listing = git_text(
-        &top,
-        &["for-each-ref", "--format=%(refname)", &format!("{prefix}/")],
-    )?;
-    for r in listing.lines().filter(|l| !l.is_empty()) {
-        git(&top, &["update-ref", "-d", r])?;
+    for key in nested_keys(&top.top, cwd) {
+        if let Ok(sub) = sub_repo(&top, &key) {
+            // Best effort: one broken nested repo must not keep the rest.
+            let _ = remove_prefix_refs(&sub, prefix);
+        }
     }
+    remove_prefix_refs(&top, prefix)?;
     // A shadow only holds checkpoints: drop it when none is left, else free the
     // objects only the removed checkpoints used.
     if let Some(dir) = &top.git_dir {
@@ -736,6 +994,17 @@ pub fn remove_refs(cwd: &Path, prefix: &str) -> Result<(), String> {
         } else {
             git(&top, &["gc", "--prune=now", "--quiet"])?;
         }
+    }
+    Ok(())
+}
+
+fn remove_prefix_refs(top: &Repo, prefix: &str) -> Result<(), String> {
+    let listing = git_text(
+        top,
+        &["for-each-ref", "--format=%(refname)", &format!("{prefix}/")],
+    )?;
+    for r in listing.lines().filter(|l| !l.is_empty()) {
+        git(top, &["update-ref", "-d", r])?;
     }
     Ok(())
 }
@@ -1179,5 +1448,147 @@ mod tests {
         let dir = repo(true);
         assert!(capture(dir.path(), R1).unwrap().is_some());
         assert!(!root.path().join("checkpoints").exists());
+    }
+
+    fn init_at(p: &Path, file: Option<(&str, &str)>) {
+        fs::create_dir_all(p).unwrap();
+        g(p, &["init", "-q"]);
+        g(p, &["config", "user.name", "Tester"]);
+        g(p, &["config", "user.email", "t@example.com"]);
+        g(p, &["config", "commit.gpgsign", "false"]);
+        if let Some((n, c)) = file {
+            fs::write(p.join(n), c).unwrap();
+            g(p, &["add", "-A"]);
+            g(p, &["commit", "-q", "-m", "init"]);
+        }
+    }
+
+    /// Edits root, app/ (committed file) and server/x/ (fresh repo), then checks
+    /// prefixed changes, subset undo, full undo and ref cleanup.
+    fn nested_round_trip(p: &Path) {
+        init_at(&p.join("app"), Some(("lib.txt", "old\n")));
+        init_at(&p.join("server/x"), None);
+        fs::write(p.join("server/x/new.txt"), "fresh\n").unwrap();
+        fs::write(p.join("root.txt"), "root\n").unwrap();
+        let before = capture(p, R1).unwrap().unwrap();
+        assert!(before.starts_with('{'), "{before}");
+        fs::write(p.join("root.txt"), "root2\n").unwrap();
+        fs::write(p.join("app/lib.txt"), "new\n").unwrap();
+        fs::write(p.join("server/x/new.txt"), "fresh2\n").unwrap();
+        fs::write(p.join("server/x/extra.txt"), "e\n").unwrap();
+        let after = capture(p, R2).unwrap().unwrap();
+        let mut paths: Vec<_> = changes(p, &before, &after)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "app/lib.txt",
+                "root.txt",
+                "server/x/extra.txt",
+                "server/x/new.txt"
+            ]
+        );
+        assert!(
+            file_diff(p, &before, &after, "app/lib.txt")
+                .unwrap()
+                .contains("+new")
+        );
+        let mut files = changes(p, &before, &after).unwrap();
+        mark_agent(
+            p,
+            &mut files,
+            &[p.join("app/lib.txt").to_string_lossy().into_owned()],
+        );
+        assert!(files.iter().all(|f| f.agent == (f.path == "app/lib.txt")));
+
+        let only = ["app/lib.txt".to_string(), "root.txt".to_string()];
+        let r = undo(p, &before, &after, Some(&only)).unwrap();
+        assert_eq!(r.restored, ["app/lib.txt", "root.txt"]);
+        assert_eq!(fs::read_to_string(p.join("app/lib.txt")).unwrap(), "old\n");
+        assert_eq!(
+            fs::read_to_string(p.join("server/x/new.txt")).unwrap(),
+            "fresh2\n"
+        );
+        let r = undo(p, &before, &after, None).unwrap();
+        assert_eq!(r.restored, ["server/x/extra.txt", "server/x/new.txt"]);
+        assert_eq!(
+            fs::read_to_string(p.join("server/x/new.txt")).unwrap(),
+            "fresh\n"
+        );
+        assert!(!p.join("server/x/extra.txt").exists());
+
+        remove_refs(p, "refs/lomi/chat/t1/").unwrap();
+        for sub in ["app", "server/x"] {
+            assert!(
+                g(&p.join(sub), &["for-each-ref", "refs/lomi/"])
+                    .trim()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn nested_repos_in_plain_folder() {
+        if !have_git() {
+            return;
+        }
+        let (dir, root) = plain(MAX_SHADOW_FILES);
+        nested_round_trip(dir.path());
+        assert!(
+            !root
+                .path()
+                .join("checkpoints")
+                .read_dir()
+                .unwrap()
+                .any(|_| true)
+        );
+    }
+
+    #[test]
+    fn nested_repo_inside_git_work_tree() {
+        if !have_git() {
+            return;
+        }
+        let dir = repo(true);
+        let p = dir.path();
+        init_at(&p.join("emb"), Some(("e.txt", "e\n")));
+        g(p, &["add", "-A"]);
+        g(p, &["commit", "-q", "-m", "emb"]);
+        let before = capture(p, R1).unwrap().unwrap();
+        fs::write(p.join("emb/e.txt"), "e2\n").unwrap();
+        g(&p.join("emb"), &["commit", "-qam", "bump"]);
+        fs::write(p.join("a.txt"), "x\n").unwrap();
+        let after = capture(p, R2).unwrap().unwrap();
+        let mut paths: Vec<_> = changes(p, &before, &after)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["a.txt", "emb/e.txt"]);
+        undo(p, &before, &after, None).unwrap();
+        assert_eq!(fs::read_to_string(p.join("emb/e.txt")).unwrap(), "e\n");
+        assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn token_parsing() {
+        let sha = "a".repeat(40);
+        assert_eq!(parse_token(&sha).unwrap()[""], sha);
+        let ok = format!("{{\"\":\"{sha}\",\"app\":\"{sha}\"}}");
+        assert_eq!(parse_token(&ok).unwrap().len(), 2);
+        for bad in [
+            format!("{{\"\":\"{sha}\",\"../x\":\"{sha}\"}}"),
+            format!("{{\"\":\"{sha}\",\"/etc\":\"{sha}\"}}"),
+            format!("{{\"app\":\"{sha}\"}}"),
+            "{\"\":\"--x\"}".to_string(),
+            "{".to_string(),
+        ] {
+            assert!(parse_token(&bad).is_err(), "{bad}");
+        }
     }
 }
