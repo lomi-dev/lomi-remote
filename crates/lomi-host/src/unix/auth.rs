@@ -1672,6 +1672,19 @@ mod tests {
     }
 
     #[test]
+    fn suspended_total_does_not_grow_while_awake() {
+        use super::suspended_total;
+        // A delay between the two clock reads lowers one reading; the max of
+        // a few reads removes that jitter.
+        let read = || (0..20).map(|_| suspended_total()).max().unwrap();
+        let first = read();
+        std::thread::sleep(Duration::from_secs(3));
+        let grown = read().saturating_sub(first);
+        // A slewed clock in the pair drifts ~4 us/s (measured 13 us over 3 s).
+        assert!(grown < Duration::from_micros(5), "drifted {grown:?}");
+    }
+
+    #[test]
     fn projection_counts_system_sleep_once_and_only_forward() {
         use super::{base_after_suspend, suspended_total};
         let mut seen = Duration::from_secs(10);
@@ -3689,12 +3702,17 @@ fn socket_wait(
 /// were stamped in the lagging clock and judged expired against wall time
 /// (`presentation_expired`) forever, while the worker still saw them valid.
 /// Both clocks are monotonic, so this cannot be moved by editing the date.
+/// Each pair must tick at the same rate while awake: macOS CLOCK_MONOTONIC is
+/// NTP-slewed and CLOCK_UPTIME_RAW is not (~4 us/s drift, a false 1 s
+/// "suspension" every ~60 h), so use the raw sleep-counting clock. Linux
+/// BOOTTIME is MONOTONIC plus suspend with the same slewing, so its
+/// difference does not drift (BOOTTIME has no raw variant).
 fn suspended_total() -> Duration {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     {
         #[cfg(target_os = "macos")]
         const PAIR: (libc::clockid_t, libc::clockid_t) =
-            (libc::CLOCK_MONOTONIC, libc::CLOCK_UPTIME_RAW);
+            (libc::CLOCK_MONOTONIC_RAW, libc::CLOCK_UPTIME_RAW);
         #[cfg(not(target_os = "macos"))]
         const PAIR: (libc::clockid_t, libc::clockid_t) =
             (libc::CLOCK_BOOTTIME, libc::CLOCK_MONOTONIC);
