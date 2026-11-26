@@ -31,7 +31,28 @@ static SHADOW_ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// Enables checkpoints in folders that are not git repositories: they get a
 /// private git dir under `root`. The first call wins.
 pub fn set_shadow_root(root: PathBuf) {
-    let _ = SHADOW_ROOT.set(root);
+    if SHADOW_ROOT.set(root.clone()).is_ok() {
+        // Off the caller's thread: a scan of many shadows must not delay startup.
+        std::thread::spawn(move || prune_shadows(&root));
+    }
+}
+
+/// File in a shadow git dir naming the folder it tracks.
+const SHADOW_FOLDER_FILE: &str = "lomi-folder";
+
+/// Removes shadows whose recorded folder no longer exists; older shadows without
+/// a record are kept (thread deletion still removes them once empty).
+fn prune_shadows(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join("checkpoints")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let folder = std::fs::read_to_string(dir.join(SHADOW_FOLDER_FILE)).ok();
+        if folder.is_some_and(|f| !Path::new(f.trim_end()).is_dir()) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -195,6 +216,12 @@ fn resolve(cwd: &Path, create: bool) -> Result<Option<Repo>, String> {
         ok(command(&git_dir).args(["config", "core.bare", "false"]))?;
         std::fs::create_dir_all(git_dir.join("info"))
             .and_then(|()| std::fs::write(git_dir.join("info/exclude"), SHADOW_EXCLUDES))
+            .and_then(|()| {
+                std::fs::write(
+                    git_dir.join(SHADOW_FOLDER_FILE),
+                    top.to_string_lossy().as_bytes(),
+                )
+            })
             .map_err(|e| format!("failed to write the checkpoint excludes: {e}"))?;
     }
     Ok(Some(Repo {
@@ -699,6 +726,17 @@ pub fn remove_refs(cwd: &Path, prefix: &str) -> Result<(), String> {
     for r in listing.lines().filter(|l| !l.is_empty()) {
         git(&top, &["update-ref", "-d", r])?;
     }
+    // A shadow only holds checkpoints: drop it when none is left, else free the
+    // objects only the removed checkpoints used.
+    if let Some(dir) = &top.git_dir {
+        let left = git_text(&top, &["for-each-ref", "--count=1", REF_PREFIX])?;
+        if left.is_empty() {
+            std::fs::remove_dir_all(dir)
+                .map_err(|e| format!("failed to remove the checkpoint store: {e}"))?;
+        } else {
+            git(&top, &["gc", "--prune=now", "--quiet"])?;
+        }
+    }
     Ok(())
 }
 
@@ -1083,11 +1121,39 @@ mod tests {
         let files = g(&shadow, &["ls-tree", "-r", "--name-only", &after]);
         assert!(files.contains("c.txt") && !files.contains("node_modules"));
         remove_refs(p, "refs/lomi/chat/t1/").unwrap();
+        // No checkpoint left: the whole shadow is gone.
+        assert!(!shadow.exists());
+    }
+
+    #[test]
+    fn shadows_keep_other_threads_and_drop_vanished_folders() {
+        if !have_git() {
+            return;
+        }
+        let (dir, root) = plain(MAX_SHADOW_FILES);
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "a\n").unwrap();
+        capture(p, "refs/lomi/chat/t1/m/before").unwrap().unwrap();
+        capture(p, "refs/lomi/chat/t2/m/before").unwrap().unwrap();
+        let shadows = root.path().join("checkpoints");
+        remove_refs(p, "refs/lomi/chat/t1/").unwrap();
+        let shadow = fs::read_dir(&shadows)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         assert!(
-            g(&shadow, &["for-each-ref", "refs/lomi/"])
+            !g(&shadow, &["for-each-ref", "refs/lomi/chat/t2/"])
                 .trim()
                 .is_empty()
         );
+        // The folder still exists: kept; once it is gone, startup pruning removes the shadow.
+        prune_shadows(root.path());
+        assert!(shadow.exists());
+        drop(dir);
+        prune_shadows(root.path());
+        assert!(!shadow.exists());
     }
 
     #[test]
