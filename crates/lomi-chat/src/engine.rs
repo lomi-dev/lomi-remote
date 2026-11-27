@@ -3051,6 +3051,7 @@ fn on_control(
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::real_cli::{Recorder, final_of, pending_question};
     use super::*;
     use std::{os::unix::fs::PermissionsExt, path::Path};
 
@@ -3071,15 +3072,7 @@ mod tests {
         let text = replay_text(&many);
         assert!(text.len() < 62_000 && text.contains("m099") && !text.contains("m000"));
     }
-    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-
-    struct Recorder(UnboundedSender<ThreadStreamEvent>);
-
-    impl EventSink for Recorder {
-        fn send(&self, event: ThreadStreamEvent) {
-            let _ = self.0.send(event);
-        }
-    }
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     /// An engine whose "claude" is the shell script `body`, plus a CLI thread.
     /// `restricted` selects the one-shot path; otherwise the script is a persistent session.
@@ -3288,265 +3281,6 @@ turn
 reply again
 read -r third
 "#;
-
-    async fn final_of(
-        rx: &mut UnboundedReceiver<ThreadStreamEvent>,
-    ) -> (ThreadSummary, ThreadMessage) {
-        loop {
-            if let ThreadStreamEvent::Final { thread, message } = rx.recv().await.expect("final") {
-                return (thread, message);
-            }
-        }
-    }
-
-    /// Drives the installed `claude` (Claude Code): `cargo test -p lomi-chat real_claude -- --ignored`.
-    #[tokio::test]
-    #[ignore = "spends a few tokens of the local Claude Code account"]
-    async fn real_claude_session_approves_and_stays_warm() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = which("claude").expect("claude on PATH");
-        let hooks = Hooks {
-            api_key: Box::new(|_| Ok(None)),
-            threads_changed: Box::new(|_, _| {}),
-            resolve_cli: Box::new(move |_| Some(bin.clone())),
-        };
-        let engine = Engine::new(dir.path().join("data"), hooks);
-        let thread = engine
-            .with(|i| {
-                i.settings.mutate(&i.dir.clone(), None, |s| {
-                    s.cli_providers.push(CliProvider {
-                        instance_id: "claude".into(),
-                        cli: "claude".into(),
-                        label: "Claude".into(),
-                        enabled: true,
-                        models: vec![],
-                    });
-                    Ok(())
-                })?;
-                i.store.create(
-                    &ThreadCreate {
-                        operation_id: "c1".into(),
-                        project: dir.path().to_string_lossy().into_owned(),
-                        instance_id: "claude".into(),
-                        model: "haiku".into(),
-                        title: "T".into(),
-                        cwd: Some(dir.path().to_string_lossy().into_owned()),
-                        effort: None,
-                        workspace_id: None,
-                        permissions: Permissions::Edit,
-                        workspace: Workspace::default(),
-                    },
-                    "T",
-                    ThreadKind::Cli,
-                )
-            })
-            .unwrap();
-        let turn = |op: &'static str, revision: u64, text: &'static str| {
-            let engine = engine.clone();
-            let tid = thread.thread_id.clone();
-            async move {
-                let (tx, rx) = unbounded_channel();
-                engine
-                    .send(
-                        ThreadSend {
-                            operation_id: op.into(),
-                            thread_id: tid,
-                            expected_revision: revision,
-                            instance_id: "claude".into(),
-                            model: "haiku".into(),
-                            text: text.into(),
-                            attachments: vec![],
-                        },
-                        Arc::new(Recorder(tx)),
-                    )
-                    .await
-                    .unwrap();
-                rx
-            }
-        };
-        let mut rx = turn(
-            "s1",
-            thread.revision,
-            "Run exactly this shell command with the Bash tool: python3 -c \"open('made.txt','w').write('x')\" and then reply DONE.",
-        )
-        .await;
-        let (summary, message) = loop {
-            match rx.recv().await.expect("event") {
-                ThreadStreamEvent::Activity { activity, .. } => {
-                    if let Some(a) = activity
-                        .approval
-                        .filter(|a| a.state == ApprovalState::Pending)
-                    {
-                        engine
-                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
-                            .unwrap();
-                    }
-                }
-                ThreadStreamEvent::Final { thread, message } => break (thread, message),
-                _ => {}
-            }
-        };
-        assert_eq!(
-            message.state,
-            MessageState::Completed,
-            "{:?}",
-            message.error
-        );
-        assert!(dir.path().join("made.txt").exists());
-        assert!(message.activity.iter().any(|a| {
-            a.approval
-                .as_ref()
-                .is_some_and(|a| a.state == ApprovalState::Allowed)
-        }));
-        let first = engine.0.sessions.lock().unwrap()[&thread.thread_id].clone();
-        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
-        let message = loop {
-            if let ThreadStreamEvent::Final { message, .. } = rx.recv().await.expect("event") {
-                break message;
-            }
-        };
-        assert!(message.content.contains("AGAIN"), "{}", message.content);
-        let again = engine.0.sessions.lock().unwrap()[&thread.thread_id].clone();
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "the second turn reused the process"
-        );
-        engine.forget_session(&thread.thread_id);
-    }
-
-    fn which(name: &str) -> Option<PathBuf> {
-        // Windows installs CLIs as `.exe` (native) or `.cmd` (npm shims).
-        let names: &[String] = if cfg!(windows) {
-            &[format!("{name}.exe"), format!("{name}.cmd"), name.into()]
-        } else {
-            &[name.to_string()]
-        };
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .flat_map(|d| names.iter().map(move |n| d.join(n)))
-            .find(|p| p.is_file())
-    }
-
-    /// Rewinds a real CLI thread to its second user message and checks the agent
-    /// forgot that turn: `cargo test -p lomi-chat real_rewind -- --ignored`.
-    async fn real_rewind_forgets_the_later_turn(cli: &str, model: &str) {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = which(cli).unwrap_or_else(|| panic!("{cli} on PATH"));
-        let hooks = Hooks {
-            api_key: Box::new(|_| Ok(None)),
-            threads_changed: Box::new(|_, _| {}),
-            resolve_cli: Box::new(move |_| Some(bin.clone())),
-        };
-        let engine = Engine::new(dir.path().join("data"), hooks);
-        let thread = engine
-            .with(|i| {
-                i.settings.mutate(&i.dir.clone(), None, |s| {
-                    s.cli_providers.push(CliProvider {
-                        instance_id: cli.into(),
-                        cli: cli.into(),
-                        label: cli.into(),
-                        enabled: true,
-                        models: vec![],
-                    });
-                    Ok(())
-                })?;
-                i.store.create(
-                    &ThreadCreate {
-                        operation_id: "c1".into(),
-                        project: dir.path().to_string_lossy().into_owned(),
-                        instance_id: cli.into(),
-                        model: model.into(),
-                        title: "T".into(),
-                        cwd: Some(dir.path().to_string_lossy().into_owned()),
-                        effort: None,
-                        workspace_id: None,
-                        permissions: Permissions::Edit,
-                        workspace: Workspace::default(),
-                    },
-                    "T",
-                    ThreadKind::Cli,
-                )
-            })
-            .unwrap();
-        let turn = |op: &str, revision: u64, text: &str| {
-            let engine = engine.clone();
-            let send = ThreadSend {
-                operation_id: op.into(),
-                thread_id: thread.thread_id.clone(),
-                expected_revision: revision,
-                instance_id: cli.into(),
-                model: model.into(),
-                text: text.into(),
-                attachments: vec![],
-            };
-            async move {
-                let (tx, mut rx) = unbounded_channel();
-                engine.send(send, Arc::new(Recorder(tx))).await.unwrap();
-                let (summary, message) = final_of(&mut rx).await;
-                assert_eq!(
-                    message.state,
-                    MessageState::Completed,
-                    "{:?}",
-                    message.error
-                );
-                (summary, message)
-            }
-        };
-        let rule = "Do not use any tools. Reply with only the word OK.";
-        let (s, _) = turn(
-            "r1",
-            thread.revision,
-            &format!("Remember the secret word APPLE. {rule}"),
-        )
-        .await;
-        let (s, _) = turn(
-            "r2",
-            s.revision,
-            &format!("The secret word is now BANANA instead. {rule}"),
-        )
-        .await;
-        let second = engine
-            .with(|i| i.store.messages_page(&thread.thread_id, None, 50))
-            .unwrap()
-            .0
-            .into_iter()
-            .filter(|m| m.role == Role::User)
-            .nth(1)
-            .expect("second user message");
-        let report = engine
-            .rewind(&ThreadRewind {
-                thread_id: thread.thread_id.clone(),
-                message_id: second.message_id,
-                expected_revision: s.revision,
-                restore_files: false,
-            })
-            .unwrap();
-        assert_eq!(report.context, RewindContext::Native);
-        let (_, answer) = turn(
-            "r3",
-            report.thread.revision,
-            "What is the secret word? Do not use any tools. Reply with only the word.",
-        )
-        .await;
-        let text = answer.content.to_uppercase();
-        assert!(
-            text.contains("APPLE") && !text.contains("BANANA"),
-            "{}",
-            answer.content
-        );
-        engine.forget_session(&thread.thread_id);
-    }
-
-    #[tokio::test]
-    #[ignore = "spends a few tokens of the local Claude Code account"]
-    async fn real_rewind_claude() {
-        real_rewind_forgets_the_later_turn("claude", "haiku").await;
-    }
-
-    #[tokio::test]
-    #[ignore = "spends a few tokens of the local Codex account"]
-    async fn real_rewind_codex() {
-        real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL).await;
-    }
 
     #[tokio::test]
     async fn live_session_asks_permission_and_stays_warm() {
@@ -3805,120 +3539,6 @@ read -r never"#;
         let error = message.error.unwrap();
         assert!(error.contains("oops"), "{error}");
         assert!(engine.0.codex.lock().unwrap().is_empty());
-    }
-
-    /// Drives the installed `codex` app-server: `cargo test -p lomi-chat real_codex -- --ignored`.
-    #[tokio::test]
-    #[ignore = "spends a few tokens of the local Codex account"]
-    async fn real_codex_session_runs_a_command_and_stays_warm() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = which("codex").expect("codex on PATH");
-        let hooks = Hooks {
-            api_key: Box::new(|_| Ok(None)),
-            threads_changed: Box::new(|_, _| {}),
-            resolve_cli: Box::new(move |_| Some(bin.clone())),
-        };
-        let engine = Engine::new(dir.path().join("data"), hooks);
-        let thread = engine
-            .with(|i| {
-                i.settings.mutate(&i.dir.clone(), None, |s| {
-                    s.cli_providers.push(CliProvider {
-                        instance_id: "codex".into(),
-                        cli: "codex".into(),
-                        label: "Codex".into(),
-                        enabled: true,
-                        models: vec![],
-                    });
-                    Ok(())
-                })?;
-                i.store.create(
-                    &ThreadCreate {
-                        operation_id: "c1".into(),
-                        project: dir.path().to_string_lossy().into_owned(),
-                        instance_id: "codex".into(),
-                        model: cli::DEFAULT_MODEL.into(),
-                        title: "T".into(),
-                        cwd: Some(dir.path().to_string_lossy().into_owned()),
-                        effort: None,
-                        workspace_id: None,
-                        permissions: Permissions::Edit,
-                        workspace: Workspace::default(),
-                    },
-                    "T",
-                    ThreadKind::Cli,
-                )
-            })
-            .unwrap();
-        let turn = |op: &'static str, revision: u64, text: &'static str| {
-            let engine = engine.clone();
-            let tid = thread.thread_id.clone();
-            async move {
-                let (tx, rx) = unbounded_channel();
-                engine
-                    .send(
-                        ThreadSend {
-                            operation_id: op.into(),
-                            thread_id: tid,
-                            expected_revision: revision,
-                            instance_id: "codex".into(),
-                            model: cli::DEFAULT_MODEL.into(),
-                            text: text.into(),
-                            attachments: vec![],
-                        },
-                        Arc::new(Recorder(tx)),
-                    )
-                    .await
-                    .unwrap();
-                rx
-            }
-        };
-        let mut rx = turn(
-            "s1",
-            thread.revision,
-            "Run the shell command `echo lomi-check` and then reply DONE.",
-        )
-        .await;
-        let (summary, message) = loop {
-            match rx.recv().await.expect("event") {
-                ThreadStreamEvent::Activity { activity, .. } => {
-                    // Not expected in the workspace sandbox, but answer if it happens.
-                    if let Some(a) = activity
-                        .approval
-                        .filter(|a| a.state == ApprovalState::Pending)
-                    {
-                        engine
-                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
-                            .unwrap();
-                    }
-                }
-                ThreadStreamEvent::Final { thread, message } => break (thread, message),
-                _ => {}
-            }
-        };
-        assert_eq!(
-            message.state,
-            MessageState::Completed,
-            "{:?}",
-            message.error
-        );
-        assert!(message.content.contains("DONE"), "{}", message.content);
-        assert!(
-            message
-                .activity
-                .iter()
-                .any(|a| a.kind == ActivityKind::Execute && a.status == ActivityStatus::Completed)
-        );
-        assert!(message.usage.is_some());
-        let first = engine.0.codex.lock().unwrap()[&thread.thread_id].clone();
-        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
-        let (_, message) = final_of(&mut rx).await;
-        assert!(message.content.contains("AGAIN"), "{}", message.content);
-        let again = engine.0.codex.lock().unwrap()[&thread.thread_id].clone();
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "the second turn reused the process"
-        );
-        engine.forget_session(&thread.thread_id);
     }
 
     /// Handshake of the fake ACP agents below. The client's request ids are deterministic:
@@ -4348,109 +3968,6 @@ read -r never
             .expect("the stop must not wait for the checkpoint");
         assert_eq!(message.state, MessageState::Stopped);
         assert!(!marker.exists(), "the CLI must not start after a stop");
-    }
-
-    /// Drives the installed `agy` ACP agent: `cargo test -p lomi-chat real_agy -- --ignored`.
-    #[tokio::test]
-    #[ignore = "spends a few tokens of the local Antigravity account"]
-    async fn real_agy_session_answers_and_stays_warm() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = which("agy").expect("agy on PATH");
-        let hooks = Hooks {
-            api_key: Box::new(|_| Ok(None)),
-            threads_changed: Box::new(|_, _| {}),
-            resolve_cli: Box::new(move |_| Some(bin.clone())),
-        };
-        let engine = Engine::new(dir.path().join("data"), hooks);
-        let thread = engine
-            .with(|i| {
-                i.settings.mutate(&i.dir.clone(), None, |s| {
-                    s.cli_providers.push(CliProvider {
-                        instance_id: "agy".into(),
-                        cli: "agy".into(),
-                        label: "Antigravity".into(),
-                        enabled: true,
-                        models: vec![],
-                    });
-                    Ok(())
-                })?;
-                i.store.create(
-                    &ThreadCreate {
-                        operation_id: "c1".into(),
-                        project: dir.path().to_string_lossy().into_owned(),
-                        instance_id: "agy".into(),
-                        model: cli::DEFAULT_MODEL.into(),
-                        title: "T".into(),
-                        cwd: Some(dir.path().to_string_lossy().into_owned()),
-                        effort: None,
-                        workspace_id: None,
-                        permissions: Permissions::Edit,
-                        workspace: Workspace::default(),
-                    },
-                    "T",
-                    ThreadKind::Cli,
-                )
-            })
-            .unwrap();
-        let turn = |op: &'static str, revision: u64, text: &'static str| {
-            let engine = engine.clone();
-            let tid = thread.thread_id.clone();
-            async move {
-                let (tx, rx) = unbounded_channel();
-                engine
-                    .send(
-                        ThreadSend {
-                            operation_id: op.into(),
-                            thread_id: tid,
-                            expected_revision: revision,
-                            instance_id: "agy".into(),
-                            model: cli::DEFAULT_MODEL.into(),
-                            text: text.into(),
-                            attachments: vec![],
-                        },
-                        Arc::new(Recorder(tx)),
-                    )
-                    .await
-                    .unwrap();
-                rx
-            }
-        };
-        let mut rx = turn("s1", thread.revision, "Reply with the single word PONG.").await;
-        let (summary, message) = loop {
-            match rx.recv().await.expect("event") {
-                ThreadStreamEvent::Activity { activity, .. } => {
-                    // Not expected for a plain reply, but answer if it happens.
-                    if let Some(a) = activity
-                        .approval
-                        .filter(|a| a.state == ApprovalState::Pending)
-                    {
-                        engine
-                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
-                            .unwrap();
-                    }
-                }
-                ThreadStreamEvent::Final { thread, message } => break (thread, message),
-                _ => {}
-            }
-        };
-        assert_eq!(
-            message.state,
-            MessageState::Completed,
-            "{:?}",
-            message.error
-        );
-        assert!(message.content.contains("PONG"), "{}", message.content);
-        assert!(message.usage.is_some());
-        let first = engine.0.acp.lock().unwrap()[&thread.thread_id].clone();
-        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
-        let (_, message) = final_of(&mut rx).await;
-        assert!(message.content.contains("AGAIN"), "{}", message.content);
-        let again = engine.0.acp.lock().unwrap()[&thread.thread_id].clone();
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "the second turn reused the process"
-        );
-        engine.forget_session(&thread.thread_id);
     }
 
     #[test]
@@ -5132,24 +4649,6 @@ printf '%s\n' '{"type":"result","result":"x"}'
 read -r never
 "#;
 
-    async fn pending_question(
-        rx: &mut UnboundedReceiver<ThreadStreamEvent>,
-    ) -> (Activity, Question) {
-        loop {
-            match rx.recv().await.expect("stream ended before a question") {
-                ThreadStreamEvent::Activity { activity, .. } => {
-                    if let Some(q) = activity.question.clone().map(|q| *q) {
-                        return (activity, q);
-                    }
-                }
-                ThreadStreamEvent::Final { message, .. } => {
-                    panic!("turn ended before a question: {:?}", message.error)
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn color(answer: &str) -> Option<HashMap<String, Vec<String>>> {
         Some(HashMap::from([(
             "Which color do you prefer?".to_string(),
@@ -5452,32 +4951,523 @@ read -r never
         );
         engine.kill_cli_groups();
     }
-    /// `cargo test -p lomi-chat real_claude -- --ignored`: answers a real `AskUserQuestion`.
+}
+
+/// Tests that drive the installed agent CLIs (and their shared helpers); unlike
+/// `tests`, which fakes CLIs with shell scripts, they build on every platform.
+#[cfg(test)]
+mod real_cli {
+    use super::*;
+    use std::path::Path;
+
+    pub(super) struct Recorder(pub(super) UnboundedSender<ThreadStreamEvent>);
+
+    impl EventSink for Recorder {
+        fn send(&self, event: ThreadStreamEvent) {
+            let _ = self.0.send(event);
+        }
+    }
+
+    pub(super) async fn final_of(
+        rx: &mut UnboundedReceiver<ThreadStreamEvent>,
+    ) -> (ThreadSummary, ThreadMessage) {
+        loop {
+            if let ThreadStreamEvent::Final { thread, message } = rx.recv().await.expect("final") {
+                return (thread, message);
+            }
+        }
+    }
+
+    /// Drives the installed `claude` (Claude Code): `cargo test -p lomi-chat real_claude -- --ignored`.
     #[tokio::test]
     #[ignore = "spends a few tokens of the local Claude Code account"]
-    async fn real_claude_question_is_answered() {
+    async fn real_claude_session_approves_and_stays_warm() {
         let dir = tempfile::tempdir().unwrap();
         let bin = which("claude").expect("claude on PATH");
-        let (engine, thread) = setup_with(
-            "claude",
-            "",
-            dir.path(),
-            false,
-            Permissions::Edit,
-            dir.path(),
-        );
-        // Replace the fake binary resolution with the installed CLI.
         let hooks = Hooks {
             api_key: Box::new(|_| Ok(None)),
             threads_changed: Box::new(|_, _| {}),
             resolve_cli: Box::new(move |_| Some(bin.clone())),
         };
-        let engine = {
-            drop(engine);
-            let engine = Engine::new(dir.path().join("data"), hooks);
-            engine.with(|_| Ok(())).unwrap();
-            engine
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: "claude".into(),
+                        cli: "claude".into(),
+                        label: "Claude".into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: "claude".into(),
+                        model: "haiku".into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &'static str, revision: u64, text: &'static str| {
+            let engine = engine.clone();
+            let tid = thread.thread_id.clone();
+            async move {
+                let (tx, rx) = unbounded_channel();
+                engine
+                    .send(
+                        ThreadSend {
+                            operation_id: op.into(),
+                            thread_id: tid,
+                            expected_revision: revision,
+                            instance_id: "claude".into(),
+                            model: "haiku".into(),
+                            text: text.into(),
+                            attachments: vec![],
+                        },
+                        Arc::new(Recorder(tx)),
+                    )
+                    .await
+                    .unwrap();
+                rx
+            }
         };
+        let mut rx = turn(
+            "s1",
+            thread.revision,
+            "Run exactly this shell command with the Bash tool: python3 -c \"open('made.txt','w').write('x')\" and then reply DONE.",
+        )
+        .await;
+        let (summary, message) = loop {
+            match rx.recv().await.expect("event") {
+                ThreadStreamEvent::Activity { activity, .. } => {
+                    if let Some(a) = activity
+                        .approval
+                        .filter(|a| a.state == ApprovalState::Pending)
+                    {
+                        engine
+                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
+                            .unwrap();
+                    }
+                }
+                ThreadStreamEvent::Final { thread, message } => break (thread, message),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(dir.path().join("made.txt").exists());
+        assert!(message.activity.iter().any(|a| {
+            a.approval
+                .as_ref()
+                .is_some_and(|a| a.state == ApprovalState::Allowed)
+        }));
+        let first = engine.0.sessions.lock().unwrap()[&thread.thread_id].clone();
+        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
+        let message = loop {
+            if let ThreadStreamEvent::Final { message, .. } = rx.recv().await.expect("event") {
+                break message;
+            }
+        };
+        assert!(message.content.contains("AGAIN"), "{}", message.content);
+        let again = engine.0.sessions.lock().unwrap()[&thread.thread_id].clone();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the second turn reused the process"
+        );
+        engine.forget_session(&thread.thread_id);
+    }
+
+    fn which(name: &str) -> Option<PathBuf> {
+        // Windows installs CLIs as `.exe` (native) or `.cmd` (npm shims).
+        let names: &[String] = if cfg!(windows) {
+            &[format!("{name}.exe"), format!("{name}.cmd"), name.into()]
+        } else {
+            &[name.to_string()]
+        };
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .flat_map(|d| names.iter().map(move |n| d.join(n)))
+            .find(|p| p.is_file())
+    }
+
+    /// Rewinds a real CLI thread to its second user message and checks the agent
+    /// forgot that turn: `cargo test -p lomi-chat real_rewind -- --ignored`.
+    async fn real_rewind_forgets_the_later_turn(cli: &str, model: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = which(cli).unwrap_or_else(|| panic!("{cli} on PATH"));
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: cli.into(),
+                        cli: cli.into(),
+                        label: cli.into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: cli.into(),
+                        model: model.into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &str, revision: u64, text: &str| {
+            let engine = engine.clone();
+            let send = ThreadSend {
+                operation_id: op.into(),
+                thread_id: thread.thread_id.clone(),
+                expected_revision: revision,
+                instance_id: cli.into(),
+                model: model.into(),
+                text: text.into(),
+                attachments: vec![],
+            };
+            async move {
+                let (tx, mut rx) = unbounded_channel();
+                engine.send(send, Arc::new(Recorder(tx))).await.unwrap();
+                let (summary, message) = final_of(&mut rx).await;
+                assert_eq!(
+                    message.state,
+                    MessageState::Completed,
+                    "{:?}",
+                    message.error
+                );
+                (summary, message)
+            }
+        };
+        let rule = "Do not use any tools. Reply with only the word OK.";
+        let (s, _) = turn(
+            "r1",
+            thread.revision,
+            &format!("Remember the secret word APPLE. {rule}"),
+        )
+        .await;
+        let (s, _) = turn(
+            "r2",
+            s.revision,
+            &format!("The secret word is now BANANA instead. {rule}"),
+        )
+        .await;
+        let second = engine
+            .with(|i| i.store.messages_page(&thread.thread_id, None, 50))
+            .unwrap()
+            .0
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .nth(1)
+            .expect("second user message");
+        let report = engine
+            .rewind(&ThreadRewind {
+                thread_id: thread.thread_id.clone(),
+                message_id: second.message_id,
+                expected_revision: s.revision,
+                restore_files: false,
+            })
+            .unwrap();
+        assert_eq!(report.context, RewindContext::Native);
+        let (_, answer) = turn(
+            "r3",
+            report.thread.revision,
+            "What is the secret word? Do not use any tools. Reply with only the word.",
+        )
+        .await;
+        let text = answer.content.to_uppercase();
+        assert!(
+            text.contains("APPLE") && !text.contains("BANANA"),
+            "{}",
+            answer.content
+        );
+        engine.forget_session(&thread.thread_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code account"]
+    async fn real_rewind_claude() {
+        real_rewind_forgets_the_later_turn("claude", "haiku").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Codex account"]
+    async fn real_rewind_codex() {
+        real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL).await;
+    }
+
+    /// Drives the installed `codex` app-server: `cargo test -p lomi-chat real_codex -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Codex account"]
+    async fn real_codex_session_runs_a_command_and_stays_warm() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = which("codex").expect("codex on PATH");
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: "codex".into(),
+                        cli: "codex".into(),
+                        label: "Codex".into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: "codex".into(),
+                        model: cli::DEFAULT_MODEL.into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &'static str, revision: u64, text: &'static str| {
+            let engine = engine.clone();
+            let tid = thread.thread_id.clone();
+            async move {
+                let (tx, rx) = unbounded_channel();
+                engine
+                    .send(
+                        ThreadSend {
+                            operation_id: op.into(),
+                            thread_id: tid,
+                            expected_revision: revision,
+                            instance_id: "codex".into(),
+                            model: cli::DEFAULT_MODEL.into(),
+                            text: text.into(),
+                            attachments: vec![],
+                        },
+                        Arc::new(Recorder(tx)),
+                    )
+                    .await
+                    .unwrap();
+                rx
+            }
+        };
+        let mut rx = turn(
+            "s1",
+            thread.revision,
+            "Run the shell command `echo lomi-check` and then reply DONE.",
+        )
+        .await;
+        let (summary, message) = loop {
+            match rx.recv().await.expect("event") {
+                ThreadStreamEvent::Activity { activity, .. } => {
+                    // Not expected in the workspace sandbox, but answer if it happens.
+                    if let Some(a) = activity
+                        .approval
+                        .filter(|a| a.state == ApprovalState::Pending)
+                    {
+                        engine
+                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
+                            .unwrap();
+                    }
+                }
+                ThreadStreamEvent::Final { thread, message } => break (thread, message),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(message.content.contains("DONE"), "{}", message.content);
+        assert!(
+            message
+                .activity
+                .iter()
+                .any(|a| a.kind == ActivityKind::Execute && a.status == ActivityStatus::Completed)
+        );
+        assert!(message.usage.is_some());
+        let first = engine.0.codex.lock().unwrap()[&thread.thread_id].clone();
+        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
+        let (_, message) = final_of(&mut rx).await;
+        assert!(message.content.contains("AGAIN"), "{}", message.content);
+        let again = engine.0.codex.lock().unwrap()[&thread.thread_id].clone();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the second turn reused the process"
+        );
+        engine.forget_session(&thread.thread_id);
+    }
+
+    /// Drives the installed `agy` ACP agent: `cargo test -p lomi-chat real_agy -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Antigravity account"]
+    async fn real_agy_session_answers_and_stays_warm() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = which("agy").expect("agy on PATH");
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: "agy".into(),
+                        cli: "agy".into(),
+                        label: "Antigravity".into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: "agy".into(),
+                        model: cli::DEFAULT_MODEL.into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &'static str, revision: u64, text: &'static str| {
+            let engine = engine.clone();
+            let tid = thread.thread_id.clone();
+            async move {
+                let (tx, rx) = unbounded_channel();
+                engine
+                    .send(
+                        ThreadSend {
+                            operation_id: op.into(),
+                            thread_id: tid,
+                            expected_revision: revision,
+                            instance_id: "agy".into(),
+                            model: cli::DEFAULT_MODEL.into(),
+                            text: text.into(),
+                            attachments: vec![],
+                        },
+                        Arc::new(Recorder(tx)),
+                    )
+                    .await
+                    .unwrap();
+                rx
+            }
+        };
+        let mut rx = turn("s1", thread.revision, "Reply with the single word PONG.").await;
+        let (summary, message) = loop {
+            match rx.recv().await.expect("event") {
+                ThreadStreamEvent::Activity { activity, .. } => {
+                    // Not expected for a plain reply, but answer if it happens.
+                    if let Some(a) = activity
+                        .approval
+                        .filter(|a| a.state == ApprovalState::Pending)
+                    {
+                        engine
+                            .respond(&thread.thread_id, &a.request_id, Decision::Allow)
+                            .unwrap();
+                    }
+                }
+                ThreadStreamEvent::Final { thread, message } => break (thread, message),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            message.state,
+            MessageState::Completed,
+            "{:?}",
+            message.error
+        );
+        assert!(message.content.contains("PONG"), "{}", message.content);
+        assert!(message.usage.is_some());
+        let first = engine.0.acp.lock().unwrap()[&thread.thread_id].clone();
+        let mut rx = turn("s2", summary.revision, "Reply with the word AGAIN.").await;
+        let (_, message) = final_of(&mut rx).await;
+        assert!(message.content.contains("AGAIN"), "{}", message.content);
+        let again = engine.0.acp.lock().unwrap()[&thread.thread_id].clone();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the second turn reused the process"
+        );
+        engine.forget_session(&thread.thread_id);
+    }
+
+    pub(super) async fn pending_question(
+        rx: &mut UnboundedReceiver<ThreadStreamEvent>,
+    ) -> (Activity, Question) {
+        loop {
+            match rx.recv().await.expect("stream ended before a question") {
+                ThreadStreamEvent::Activity { activity, .. } => {
+                    if let Some(q) = activity.question.clone().map(|q| *q) {
+                        return (activity, q);
+                    }
+                }
+                ThreadStreamEvent::Final { message, .. } => {
+                    panic!("turn ended before a question: {:?}", message.error)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `cargo test -p lomi-chat real_claude -- --ignored`: answers a real `AskUserQuestion`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code account"]
+    async fn real_claude_question_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, thread) = real_engine("claude", dir.path(), Permissions::Edit);
         let tid = thread.thread_id.clone();
         let (tx, mut rx) = unbounded_channel();
         engine
