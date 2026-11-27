@@ -357,7 +357,7 @@ impl Worker {
             self.finish_operation();
             self.scope = Some(snapshot.scope.clone());
             self.action = Action::Get;
-            // Uplink (off unless LOMI_REMOTE_UPLINK is set): the relay this scope pins.
+            // Uplink (needs a contract hash pin, see uplink.rs): the relay this scope pins.
             if lomi_host_http::uplink::enabled()
                 && let Some(endpoint) = runtime
                     .owner

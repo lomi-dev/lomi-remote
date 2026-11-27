@@ -9,7 +9,8 @@
 //! A call is the only thing that keeps the link alive (`OFFER_TTL`), so a paused,
 //! gated or logged-out actor drops the link by itself. See docs/uplink.md.
 //!
-//! Off unless `LOMI_REMOTE_UPLINK=<64 lowercase hex relay contract hash>`.
+//! The relay contract hash is a build-time pin (`LOMI_HOST_RELAY_CONTRACT_HASH`, required by
+//! release builds); debug builds may override it with `LOMI_REMOTE_UPLINK=<64 lowercase hex>`.
 use crate::{BudgetStop, DataFailure, Error, RelayConnection, RelayTransport, Result, budget};
 use lomi_remote_core::{
     frame::{
@@ -30,7 +31,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-// Development switch: debug builds only until a proper configuration field exists.
+/// The relay contract hash this build was released against (`REMOTE_RELAY_CONTRACT_HASH`).
+const BUILT_IN_HASH: Option<&str> = option_env!("LOMI_HOST_RELAY_CONTRACT_HASH");
+/// Local-stack override for a relay with another hash; debug builds only.
 #[cfg(debug_assertions)]
 const ENV: &str = "LOMI_REMOTE_UPLINK";
 /// The link lives only while the actor keeps calling heartbeat.
@@ -147,7 +150,6 @@ struct Shared {
     wake: Wake,
 }
 
-#[cfg_attr(not(debug_assertions), allow(dead_code))] // release builds never create it
 impl Shared {
     fn new(contract_hash: String) -> Self {
         Self {
@@ -159,22 +161,23 @@ impl Shared {
     }
 }
 
+fn valid_hash(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
 fn shared() -> Option<&'static Shared> {
     SHARED
         .get_or_init(|| {
+            #[cfg(debug_assertions)]
+            let over = std::env::var(ENV).ok();
             #[cfg(not(debug_assertions))]
-            return None;
-            #[cfg(debug_assertions)]
-            let hash = std::env::var(ENV).ok()?;
-            #[cfg(debug_assertions)]
-            {
-                let ok = hash.len() == 64
-                    && hash
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-                ok.then(|| Shared::new(hash))
-            }
+            let over: Option<String> = None;
+            let hash = over.as_deref().or(BUILT_IN_HASH)?;
+            valid_hash(hash).then(|| Shared::new(hash.to_owned()))
         })
         .as_ref()
 }
@@ -426,14 +429,6 @@ pub(crate) fn note_http_heartbeat(started: Instant, lease_ms: u64) {
         }
     }
 }
-/// A publication went over HTTP while a link exists: the server's sequence moved (or may have).
-pub(crate) fn note_http_publication() {
-    if let Some(sh) = shared()
-        && let Some(live) = lock(&sh.state).live.as_mut()
-    {
-        live.publication_seq = None;
-    }
-}
 /// After a `Gate::Fetch` read: keep reading until the server says empty, so a
 /// proposal already fetched but not yet handled is never forgotten.
 pub(crate) fn pending_done(kind: Pending, empty_ok: bool) {
@@ -442,15 +437,22 @@ pub(crate) fn pending_done(kind: Pending, empty_ok: bool) {
     }
 }
 
-/// `publication.put` over the link, or `None` to use HTTP. Same single-attempt rule as
-/// HTTP: no replay, and an uncertain outcome is `OutcomeUnknown` so the actor reconciles.
+/// `publication.put` over the link, the only publication path. Single attempt: no replay, and an
+/// uncertain outcome is `OutcomeUnknown` so the actor reconciles. No usable link (off, down,
+/// stale, other binding or token, token.update pending) is `Error::Network`: nothing was sent.
 pub(crate) fn publication(
     host: HostId,
     params: &PublicationParams,
     access: &HostAccessCredential,
     budget_state: Option<&budget::State>,
-) -> Option<Result<PublicationResult>> {
-    publication_on(shared()?, host, params, access, budget_state)
+) -> Result<PublicationResult> {
+    publication_on(
+        shared().ok_or(Error::Network)?,
+        host,
+        params,
+        access,
+        budget_state,
+    )
 }
 fn publication_on(
     sh: &Shared,
@@ -458,15 +460,17 @@ fn publication_on(
     params: &PublicationParams,
     access: &HostAccessCredential,
     budget_state: Option<&budget::State>,
-) -> Option<Result<PublicationResult>> {
-    let outcome = publication_job(sh, host, params, access, budget_state)?;
+) -> Result<PublicationResult> {
+    let Some(outcome) = publication_job(sh, host, params, access, budget_state) else {
+        return Err(Error::Network);
+    };
     if outcome.is_err()
         && let Some(live) = lock(&sh.state).live.as_mut()
     {
         // Any non-Ok result may or may not have moved the server's sequence.
         live.publication_seq = None;
     }
-    Some(outcome)
+    outcome
 }
 fn publication_job(
     sh: &Shared,

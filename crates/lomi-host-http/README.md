@@ -100,15 +100,15 @@ text is retained. Polling accepts the enrollment gate's exact HTTP 403
 `access_denied` response as denial, without accepting pending/slow-down on 403.
 
 The nine `DataTransport` host data methods are `runtime_get`, `runtime_claim`, `heartbeat`,
-`publication`, `pairing_pending`, `pairing_decision`, `channel_pending`,
+`publication` (uplink only, no HTTP route), `pairing_pending`, `pairing_decision`, `channel_pending`,
 `channel_admission` and `channel_ticket`. They use typed host/pairing/channel
 IDs, canonical protocol DTOs and only a supplied `HostAccessCredential` bearer.
 GETs carry no body. Paths follow the actual Auth v2 handlers: runtime and claim
-use `/runtime` and `/runtime/claim`; heartbeat and publication are directly under
+use `/runtime` and `/runtime/claim`; heartbeat is directly under
 `/hosts/{hostId}`. No method selects a URL, query, cookie or caller header.
 
-Data requests have private endpoint budgets: runtime claim, heartbeat and
-publication allow 1 MiB; pairing decision, channel admission and ticket allow
+Data requests have private endpoint budgets: runtime claim and
+heartbeat allow 1 MiB; pairing decision, channel admission and ticket allow
 16 KiB. Runtime and ticket results allow 32 KiB, pairing decision results
 128 KiB, and pending/admission results 1 MiB. Both declared and streamed response
 lengths are bounded. Data responses additionally require the actual Auth

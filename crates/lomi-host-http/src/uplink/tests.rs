@@ -269,7 +269,7 @@ fn chunks_respect_the_size_bound_and_the_relays_continuation_rule() {
         last = entries.last().and_then(Value::as_object).cloned();
     }
     assert_eq!(terminals, 2100);
-    // a publication that cannot fit 32 chunks is left to HTTP
+    // a publication that cannot fit 32 chunks is refused (there is no HTTP fallback)
     assert!(publication_chunks(&params(1, 4000)).is_some());
     assert_eq!(publication_chunks(&params(0, 0)).unwrap().len(), 1);
 }
@@ -338,7 +338,7 @@ fn pending_reads_skip_http_until_a_wake_hint_and_a_fresh_http_heartbeat() {
 }
 
 #[test]
-fn publication_over_the_link_follows_the_http_outcomes() {
+fn publication_over_the_link_maps_relay_outcomes() {
     let run = |reply: fn(u32, usize, usize) -> Frame, p: PublicationParams| {
         let sh = leaked();
         go_live(sh, TOKEN);
@@ -371,8 +371,7 @@ fn publication_over_the_link_follows_the_http_outcomes() {
             }
             panic!("publication never reached the relay");
         });
-        let result =
-            publication_on(sh, host_id(), &p, &access(TOKEN), None).expect("served by the link");
+        let result = publication_on(sh, host_id(), &p, &access(TOKEN), None);
         relay.join().unwrap();
         result
     };
@@ -409,11 +408,20 @@ fn publication_over_the_link_follows_the_http_outcomes() {
 }
 
 #[test]
-fn publication_goes_to_http_while_a_token_update_is_pending() {
+fn publication_is_refused_while_a_token_update_is_pending() {
     let sh = leaked();
     go_live(sh, TOKEN);
     lock(&sh.state).live.as_mut().unwrap().token_current = false;
-    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None).is_none());
+    assert_eq!(
+        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None),
+        Err(Error::Network)
+    );
+    // no link at all
+    lock(&sh.state).live = None;
+    assert_eq!(
+        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None),
+        Err(Error::Network)
+    );
 }
 
 #[test]
@@ -612,21 +620,13 @@ fn publication_results_other_than_ok_forget_the_sequence() {
             std::thread::sleep(Duration::from_millis(2));
         }
     });
-    assert!(
-        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None)
-            .unwrap()
-            .is_err()
-    );
+    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None).is_err());
     relay.join().unwrap();
     assert_eq!(lock(&sh.state).live.as_ref().unwrap().publication_seq, None);
     // a caller that gives up before anything was sent
     go_live(sh, TOKEN);
     let budget = budget::State::new(Instant::now());
-    assert!(
-        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), Some(&budget))
-            .unwrap()
-            .is_err()
-    );
+    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), Some(&budget)).is_err());
     assert_eq!(lock(&sh.state).live.as_ref().unwrap().publication_seq, None);
 }
 
@@ -658,7 +658,7 @@ fn abandon_and_final_chunk_cannot_both_win() {
 fn publication_over_the_link_requires_the_actors_current_token() {
     let sh = leaked();
     go_live(sh, TOKEN);
-    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN2), None).is_none());
+    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN2), None).is_err());
 }
 
 #[test]

@@ -244,23 +244,8 @@ impl DataTransport {
         request: &PublicationParams,
         access: &HostAccessCredential,
     ) -> Result<PublicationResult> {
-        if let Some(result) =
-            crate::uplink::publication(host, request, access, self.budget.as_deref())
-        {
-            return result;
-        }
-        let result = self.data_mutate(
-            "PUT",
-            &format!("/v2/remote/hosts/{}/publication", String::from(host)),
-            request,
-            access,
-            LARGE,
-            RESPONSE_LIMIT,
-            Scope::Runtime,
-        );
-        // Success or not, the server's sequence moved or may have: the link's copy is stale.
-        crate::uplink::note_http_publication();
-        result
+        // The uplink is the only publication path: no link for this runtime means no publication.
+        crate::uplink::publication(host, request, access, self.budget.as_deref())
     }
     /// Pending reads may commit tombstones. A failed GET does not imply no effect.
     pub fn pairing_pending(

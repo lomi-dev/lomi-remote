@@ -8,14 +8,21 @@ polls. It also carries `publication.put` and `token.update`. Code:
 
 ## Switch
 
-Off unless `LOMI_REMOTE_UPLINK=<64 lowercase hex>` (the relay's
-`REMOTE_RELAY_CONTRACT_HASH`) is set in the environment of a **debug build**:
-release builds do not read the variable at all, until a configuration field
-exists. Off means the
-module is never initialised: every hook returns "use HTTP" and the Host behaves
-exactly as before. The relay URL is not configured separately: it is the
-configured `--relay-endpoint` with `/v2/relay` replaced by `/relay`. A persistent
-configuration field and a build-time contract hash are open (see Risks).
+The uplink is on in every build. The relay contract hash (the relay's
+`REMOTE_RELAY_CONTRACT_HASH`, 64 lowercase hex) is a compile-time pin,
+`LOMI_HOST_RELAY_CONTRACT_HASH`: release builds (`build_release.py`, the
+`lomiremote` build script, the release workflow variable of the same name)
+refuse to build without it. Debug builds may override it with
+`LOMI_REMOTE_UPLINK=<64 lowercase hex>` for a local stack with another hash.
+With no valid hash (a debug or test build without either) the module is never
+initialised and nothing is published. The relay URL is not configured
+separately: it is the configured `--relay-endpoint` with `/v2/relay` replaced
+by `/relay`.
+
+Publication has no HTTP route any more (P2.20): without a usable link
+`DataTransport::publication` fails with `Error::Network` and nothing is sent,
+and the actor retries as for any failed publication. Heartbeat, runtime
+read/claim and the pending polls stay on HTTP until P3 (see below).
 
 ## Design: the uplink is subordinate to the actor
 
@@ -27,7 +34,7 @@ barrier, peer cutoff) is unchanged. It still calls the same four
 | --- | --- | --- |
 | `heartbeat` | HTTP | answered locally: same runtime, `lease_ms` = relay-confirmed lease left (at least 5 s, else HTTP), `freshness_ms` 5000 |
 | `runtime_get` | HTTP, always | HTTP, except `runtime_get_cached`, used only by the read right after a worker-unit rotation (see below) |
-| `publication` | HTTP | chunked `publication.put` CALLs, same single-attempt rule |
+| `publication` | refused (`Error::Network`, nothing sent) | chunked `publication.put` CALLs, single attempt |
 | `pairing_pending`, `channel_pending` | HTTP | "nothing pending" without a request, unless a wake hint is set |
 
 Consequences:
@@ -129,8 +136,8 @@ at a time. Outcomes map to what the HTTP route gives the actor: `STALE_EPOCH`
 chunk, wrong sequence in the reply, link lost after the last chunk was sent,
 caller gave up after sending it) -> `OutcomeUnknown`, which the actor reconciles
 with a fresh GET exactly as for HTTP. Nothing is replayed. While a
-`token.update` is pending the publication goes to HTTP (the relay would still
-check the old token hash).
+`token.update` is pending the publication is refused (the relay would still
+check the old token hash) and retried by the actor.
 
 ### Token rotation (P2.15)
 
@@ -199,8 +206,8 @@ link requires the caller's token to equal the one the link holds, and
 
 ## Risks
 
-- Contract hash and relay URL derivation are a development switch, not a
-  shipped configuration.
+- The production hash is supplied by the release operator and must equal the
+  deployed relay's; a mismatch means the Host can never publish.
 - `lomi-remote-core` enables `serde_json/preserve_order` for the whole Host
   build (key order of `json!` audit lines changes from sorted to insertion).
 - Idle CPU wake-ups of the actor were not reduced.
