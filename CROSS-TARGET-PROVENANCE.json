@@ -209,26 +209,26 @@
       },
       "remoteCore": {
         "README.md": "2cc409e5ea89aeaf139b167dff8f94d3c29215ba44f339623e6197b1ce512ff7",
-        "generated/provenance.json": "78678191394c67327df1512d475e62474cce1114697ce763511bcd6f0dbc0e3c",
+        "generated/provenance.json": "eed23d01ca901f731eeb9a8ab17ae686c55eb397c76d6357129413ab04cac73b",
         "generated/remote_core.d.ts": "b19da30497d6555292aedef76656e97e39de751cece2fc3e5ee23e409001e201",
         "generated/remote_core.js": "15f1811c9c50ac1cbf1f5083789287429dd4f216753e15f4747c8ffdf15a9b48",
-        "generated/remote_core_bg.wasm": "7f85cef71a7b6df42031cd64f83d4c8ed62e13145eee4b5973ee23a84881971a",
+        "generated/remote_core_bg.wasm": "21d16091f38342c88df1f7cd965668f5f5923e3b10b35b697f6f6ec288e19bdc",
         "generated/remote_core_bg.wasm.d.ts": "f9ec41a52c71d925ffd17dfc0753532e49958d72d04a440aaa221ae6c1be5ce5",
         "package.json": "b9b621564ea100c46939361182edb8f2c5cd906e9aea5db097f59c33a4378a35",
         "scripts/build.mjs": "e2cc5f63fc0403ceffc5ed25e2a7c62f14c8345fa68654408ddf07f9c1249bad",
-        "src/index.d.ts": "d048fbd2a60164f7aafd2fba1a25890fb73a91e0a16ba342300a7f3523fe168b",
-        "src/index.mjs": "d2b6dbf753c3f6b80ea9a70d50cc7fa6332b6b6f8cbd4dc0dad6078eeba74556",
-        "test/vectors.test.mjs": "eda850b91b8367ff338fdb73bb52442fd3e0592e9413537efa8671ce5942a605"
+        "src/index.d.ts": "1e1c9c3e8077de2fc21035786d28295773c272d98fced92b4e789407712f5dab",
+        "src/index.mjs": "b15ba8fadaf014851f2ae3158d4f1d5ff37db45b3bf78388afaf672a6933aa72",
+        "test/vectors.test.mjs": "573a2c5f37ce3fe6d3f3cb9644fd3e635aa0e8bf8ac533671a8a5af7b1f597a9"
       }
     },
     "rustRemoteCore": {
       "Cargo.toml": "98bf0b9544bccd982e591b9a6635de85f2d1fc9edd317e79adf0e3b1ff5d4490",
-      "README.md": "1db859b09a1702401e826c07598a281538495b575442131d560e67a57ab0db07",
+      "README.md": "50956b14dbeb87cb0759e5e498f8a44e61bb515f990f9a5712ede55896fe3faa",
       "include/LomiRemoteCoreFFI.h": "08cf24b5ef55767b4ce9a27d2aee6b93d601fc26bcc821a575f49280c97a80c8",
       "include/module.modulemap": "b77a4c07bbc159f258448347cbe913b0f071e96722ec7ed3e1007619a04160ce",
-      "src/bridge.rs": "1489f5aabc72a14f0fe784a8ed1e866d55b0328cd3dfad915c1d99b7710420a6",
+      "src/bridge.rs": "5bab061c0f40f9a9f838644729084cb9bb65d104c1af8532143a43afc05ef0c3",
       "src/directory.rs": "c6db3d35dc7c154f441c7a4b9c56427854bd6374ec0898ebeee7b87cf98a757d",
-      "src/ffi.rs": "9825c4637b6f8fde391810b6a334891e20ee3f9d597a2a0bff37250caeafed47",
+      "src/ffi.rs": "a53f01793f0b9babb365e32531fcb1c93072cb2a29d3129e2b3b01832adc8b8c",
       "src/frame.rs": "59b9bba891e61bf76f3e098922cc232e67dccf76182bdf983221a8421ad6c8d6",
       "src/json.rs": "5e56873f9cb4daecebfd874a34878d09c32911409614b9f40436194bbf678080",
       "src/lib.rs": "20791c563698a8664c1bc63011b812464d256cd6bfcb35d958b148c94ba67604",
@@ -240,7 +240,7 @@
       "tests/directory.rs": "6fcd73a36e2423263d3213f37f776e7aec2f2ea043b758ef6ee77476a2229049",
       "tests/link_scenarios.rs": "d3d4884a6917ee42018cd223796369faffaee5749d12e59f3723234ab96b4737",
       "tests/session_request.rs": "0d74dad42dd37546b998fbe0f723b3801537c57d94cee83aa9618d7ce52e5bfe",
-      "tests/shared_vectors.rs": "20f572a70a02312ba7e27cbac8e9666e6caa42d57c3994865adb9f2440f1f75f",
+      "tests/shared_vectors.rs": "3e7c4dd63eb514b0ad7054feb36a14917cbc152d9d860fe2ce02b4a742c2c298",
       "tests/vectors.rs": "c0a74034979e9848698f5826258085ec07ae9080d3e80e96a8f1633f5540e3c2"
     }
   },

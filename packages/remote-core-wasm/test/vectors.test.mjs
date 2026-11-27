@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { initializeRemoteCore, coreCall, coreJson, coreFree, decodeRecords, CoreError } from '../src/index.mjs';
+import { _guard, initializeRemoteCore, coreCall, coreJson, coreFree, decodeRecords, CoreError } from '../src/index.mjs';
 
 const dir = new URL('../../../crates/lomi-remote-core/test-vectors/', import.meta.url);
 const relay = JSON.parse(readFileSync(new URL('relay-frames.v1.json', dir), 'utf8'));
@@ -68,3 +68,19 @@ for (const sc of scenarios.scenarios) {
     }
   });
 }
+
+test('key payloads are wiped after the call', () => {
+  const payload = Uint8Array.from({ length: 60 }, () => 7);
+  const { handle } = coreJson(0, 'directory.new', { accountId: 'a', deviceId: 'd' });
+  coreCall(handle, 'directory.seal', undefined, payload);
+  assert.ok(payload.every(b => b === 0));
+  coreFree(handle);
+});
+
+// Keep last: it retires the instance.
+test('a WebAssembly trap retires the instance', () => {
+  assert.throws(() => _guard(() => { throw new WebAssembly.RuntimeError('unreachable'); }), /CORE_BROKEN/);
+  assert.throws(() => coreCall(0, 'version'), /CORE_BROKEN/);
+  assert.throws(() => initializeRemoteCore(new Uint8Array(0)), /CORE_BROKEN/);
+  coreFree(1); // must not throw once broken
+});

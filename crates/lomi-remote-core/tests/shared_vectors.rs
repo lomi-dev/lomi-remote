@@ -222,3 +222,21 @@ fn version_and_handle_limit() {
     hs.into_iter().for_each(|h| lomi_core_free(h));
     bridge(0, "directory.new", &a, &[]).unwrap();
 }
+
+#[test]
+fn c_abi_refuses_null_inputs() {
+    let op = CString::new("version").unwrap();
+    let mut len = 0usize;
+    // SAFETY: every call below passes a null that the function must refuse, never dereference.
+    unsafe {
+        let call = |op: *const std::ffi::c_char, a: *const u8, n: usize, out: *mut usize| {
+            lomi_core_call(0, op, a, n, std::ptr::null(), 0, out)
+        };
+        assert!(call(std::ptr::null(), std::ptr::null(), 0, &mut len).is_null());
+        assert!(call(op.as_ptr(), std::ptr::null(), 0, std::ptr::null_mut()).is_null());
+        assert!(call(op.as_ptr(), std::ptr::null(), 4, &mut len).is_null());
+        let p = call(op.as_ptr(), std::ptr::null(), 0, &mut len);
+        assert!(!p.is_null());
+        lomi_core_bytes_free(p, len);
+    }
+}

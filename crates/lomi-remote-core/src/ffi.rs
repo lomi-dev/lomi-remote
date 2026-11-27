@@ -26,11 +26,19 @@ pub unsafe extern "C" fn lomi_core_call(
     payload_len: usize,
     out_len: *mut usize,
 ) -> *mut u8 {
+    // Null where bytes are promised is a caller bug: refuse instead of dereferencing.
+    if op.is_null()
+        || out_len.is_null()
+        || (args.is_null() && args_len > 0)
+        || (payload.is_null() && payload_len > 0)
+    {
+        return std::ptr::null_mut();
+    }
     let slice = |p: *const u8, n: usize| {
         if n == 0 {
             &[][..]
         } else {
-            // SAFETY: guaranteed by the caller.
+            // SAFETY: non-null and readable for `n` bytes per the contract.
             unsafe { std::slice::from_raw_parts(p, n) }
         }
     };
@@ -69,6 +77,7 @@ mod android {
     use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::{jbyteArray, jint};
+    use zeroize::Zeroizing;
 
     fn run(
         env: &mut JNIEnv,
@@ -79,7 +88,8 @@ mod android {
     ) -> Option<jbyteArray> {
         let op: String = env.get_string(op).ok()?.into();
         let args = env.convert_byte_array(args).ok()?;
-        let payload = env.convert_byte_array(payload).ok()?;
+        // The payload can carry directory keys: wipe our copy on every path.
+        let payload = Zeroizing::new(env.convert_byte_array(payload).ok()?);
         let out = catch_unwind(|| bridge::call(handle as u32, &op, &args, &payload)).ok()?;
         Some(env.byte_array_from_slice(&out).ok()?.into_raw())
     }

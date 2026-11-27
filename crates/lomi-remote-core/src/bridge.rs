@@ -27,6 +27,7 @@ use crate::session::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
+use zeroize::Zeroize;
 
 /// Live instances per process; a leak in the platform layer fails loudly instead of growing.
 const MAX_HANDLES: usize = 64;
@@ -168,7 +169,9 @@ fn be32(p: &[u8]) -> u32 {
 fn key_at(p: &[u8]) -> Key {
     let mut k = [0u8; KEY_LEN];
     k.copy_from_slice(&p[4..4 + KEY_LEN]);
-    Key::new(be32(p), k)
+    let key = Key::new(be32(p), k);
+    k.zeroize(); // `Key::new` took a copy
+    key
 }
 
 // ---- dispatch ----

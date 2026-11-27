@@ -16,7 +16,7 @@ with `scripts/test-remote-core-targets.sh`.
 
 * `handle`: `u32`, 0 for stateless operations and for operations that create an instance. Instances
   (`link.new`, `directory.new`, `directory.open`) return `{"handle": n}`. Call `free(handle)` when done
-  (idempotent; a Directory zeroizes its keys). At most 64 live instances (`handleLimit`).
+  (idempotent). At most 64 live instances (`handleLimit`).
 * `args`: strict JSON object (UTF-8, empty = `{}`; integers only, safe-integer range, depth <= 8).
 * `payload`: raw bytes, meaning per operation.
 * Result: first byte `0` = ok, then data; first byte `1` = error, then JSON `{"code": ...}`.
@@ -54,6 +54,16 @@ a zeroizing `Key` for the duration of the call:
 
 * `directory.seal` payload: `key_id u32 BE | key[32] | nonce[24]` (fresh random nonce per seal).
 * `directory.open` payload: `n u8 | n x (key_id u32 BE | key[32]) | blob` (several keys during rotation).
+
+Callers must zero their key buffers right after the call: the JS wrapper and the Kotlin module
+wipe the payload of `directory.seal` / `directory.open` for you (so build a fresh payload per call),
+and the JNI layer and the core wipe their own copies. Swift cannot wipe the `Data` copy the Expo
+bridge makes, so on iOS only the JS array and the core's copy are cleared. A WASM module cannot reach its input copy in
+linear memory, so the web key lives in the worker only for the duration of the call.
+
+Handles are process-global: every caller in the process (every worker, module or script sharing the
+library) can use or free any handle, so all of them must be in one trust domain. Do not load the
+library into a process that runs untrusted code.
 
 Where each platform keeps the key (not implemented here): iOS, a random 32-byte key in the Keychain
 (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), read just before seal/open; Android, a random
