@@ -5046,7 +5046,7 @@ mod real_cli {
         let mut rx = turn(
             "s1",
             thread.revision,
-            "Run exactly this shell command with the Bash tool: python3 -c \"open('made.txt','w').write('x')\" and then reply DONE.",
+            "Run exactly this shell command with the Bash tool: node -e \"require('fs').writeFileSync('made.txt','x')\" and then reply DONE.",
         )
         .await;
         let (summary, message) = loop {
