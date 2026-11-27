@@ -34,18 +34,30 @@ errors: `unauthorized`, `updateRequired`, `outcomeUnknown`, `http` (+`status`, `
 `malformed`). Errors of `frame.*`: `framing`, `encoding`, `shape`.
 
 Link (`link.new {contractHash, seed, maxInflight?, callTimeoutMs?, connectTimeoutMs?, readyTimeoutMs?,
-backoffMinMs?, backoffMaxMs?, refreshLeadMs?}`): `link.start {token, expiresAt, +now}`, `link.stop`,
+backoffMinMs?, backoffMaxMs?, refreshLeadMs?, minRefreshIntervalMs?, silenceMs?}`): `link.start {token, expiresAt, +now}`, `link.stop`,
 `link.onOpen`, `link.onClose`, `link.onMessage` (payload = one WebSocket binary message), `link.tick`,
 `link.call {name, args, +now}`, `link.refreshToken {token, expiresAt, +now}`, `link.nextDeadline`
-(`{deadline}`), `link.isReady`. Data is a record list: `tag u8 | len u32 BE | body`; 1 connect, 2 send
+(`{deadline}`), `link.isReady`, `link.lastServerFrame` (`{monoMs}`: monotonic time of the last relay frame on
+this connection, `null` when not connected). Data is a record list: `tag u8 | len u32 BE | body`; 1 connect, 2 send
 (body = bytes to put on the socket), 3 close, 4 event (JSON, `type` = `ready`, `server`, `callStarted`,
-`callDone`, `tokenRefreshNeeded`, `tokenRefreshed`, `tokenRefreshFailed`, `tokenNeeded`, `disconnected`,
+`callDone`, `tokenRefreshNeeded`, `tokenRefreshed`, `tokenRefreshFailed`, `stale`, `tokenNeeded`, `disconnected`,
 `stopped`). The platform executes connect/send/close and re-arms its timer from `link.nextDeadline`.
 
 Directory: `directory.new {accountId, deviceId}`; `directory.open {accountId, deviceId, minKeyId}`;
 `directory.applySession` (payload = the 200 response body), `applyReadyState {state}`,
 `applyEvent {name, data}` (all return `{effect: unchanged | changed | revoked}`), `setHostName`,
 `setWorkspaceName`, `snapshot` (Hosts for the UI), `wipe`, `seal`.
+
+## Token refresh and liveness
+
+* `tokenRefreshNeeded` fires at `max(now + remaining/2, expiry - refreshLeadMs)` (default lead 60 s,
+  so a 300 s device token is refreshed after 240 s) and never twice within `minRefreshIntervalMs`
+  (default 30 s). A failed refresh is asked again after that interval until the token expires.
+* While Ready, `silenceMs` (default 8000, 0 = off) without any relay frame emits `stale` (`silentMs`),
+  closes the socket and reports `disconnected` with cause `silence`; the usual backoff reconnect
+  follows. The relay sends `authority.fresh` to device links every 2 s, so a healthy link is never
+  silent that long. `link.lastServerFrame` lets the platform bound how stale the last
+  authorization confirmation is, for example to gate sensitive actions.
 
 ## Keys and nonces
 

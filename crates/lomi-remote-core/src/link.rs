@@ -41,8 +41,15 @@ pub struct LinkConfig {
     pub ready_timeout_ms: u64,
     pub backoff_min_ms: u64,
     pub backoff_max_ms: u64,
-    /// `TokenRefreshNeeded` fires this long before the token expires.
+    /// `TokenRefreshNeeded` fires this long before the token expires, but never earlier than
+    /// halfway through its remaining lifetime (a lead as long as the lifetime cannot loop).
     pub refresh_lead_ms: u64,
+    /// Least time between two `TokenRefreshNeeded` events, whatever the other settings say.
+    pub min_refresh_interval_ms: u64,
+    /// While Ready, no server frame (READY, EVENT, REPLY) for this long means the link is
+    /// stale: [`LinkEvent::Stale`], close, reconnect. The relay sends `authority.fresh` to
+    /// device links every 2 s, so 8 s tolerates three misses. 0 disables the check.
+    pub silence_ms: u64,
 }
 
 impl LinkConfig {
@@ -55,7 +62,9 @@ impl LinkConfig {
             ready_timeout_ms: 10_000,
             backoff_min_ms: 500,
             backoff_max_ms: 30_000,
-            refresh_lead_ms: 300_000,
+            refresh_lead_ms: 60_000,
+            min_refresh_interval_ms: 30_000,
+            silence_ms: 8_000,
         }
     }
 }
@@ -97,6 +106,8 @@ pub enum DisconnectCause {
     /// The relay sent something the codec or the link table rejects.
     Protocol,
     TokenExpired,
+    /// No server frame within `silence_ms` (see [`LinkEvent::Stale`]).
+    Silence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +146,12 @@ pub enum LinkEvent {
     /// `code` is the relay error code, `None` for timeout or link loss.
     TokenRefreshFailed {
         code: Option<String>,
+    },
+    /// Nothing heard from the relay for `silent_ms` while Ready: the connection is treated as
+    /// dead and closed; `Disconnected { cause: Silence }` follows. Authorization freshness
+    /// (see [`Link::last_server_frame_mono_ms`]) is lost until the next READY.
+    Stale {
+        silent_ms: u64,
     },
     /// No usable token (expired); fetch one and call `start`.
     TokenNeeded,
@@ -178,6 +195,8 @@ pub struct Link {
     expiry: Option<u64>,
     refresh_at: Option<u64>,
     refresh_asked: bool,
+    last_ask: Option<u64>,
+    last_frame: Option<u64>,
 }
 
 impl Link {
@@ -194,7 +213,17 @@ impl Link {
             expiry: None,
             refresh_at: None,
             refresh_asked: false,
+            last_ask: None,
+            last_frame: None,
         }
+    }
+
+    /// Monotonic time of the last frame from the relay on the current connection (READY, EVENT or
+    /// REPLY), `None` when not connected. Platforms bound authorization freshness with it: the
+    /// relay's `authority.fresh` arrives every 2 s, so `now - value` above a few seconds means the
+    /// device must not act as if its access were confirmed.
+    pub fn last_server_frame_mono_ms(&self) -> Option<u64> {
+        self.last_frame
     }
 
     pub fn is_ready(&self) -> bool {
@@ -270,6 +299,7 @@ impl Link {
             Ok(f) => f,
             Err(_) => return self.violation(now, out),
         };
+        self.last_frame = Some(now.mono_ms);
         match (self.state, frame) {
             (
                 State::Authenticating(_),
@@ -364,8 +394,15 @@ impl Link {
                 self.token = None;
                 self.disconnect(DisconnectCause::TokenExpired, now, &mut out);
             }
-            State::Ready if !self.refresh_asked && self.refresh_at.is_some_and(|r| m >= r) => {
+            State::Ready if self.silent_since(m).is_some() => {
+                let silent_ms = self.silent_since(m).unwrap_or(0);
+                out.push(Output::Event(LinkEvent::Stale { silent_ms }));
+                out.push(Output::Close);
+                self.disconnect(DisconnectCause::Silence, now, &mut out);
+            }
+            State::Ready if !self.refresh_asked && self.refresh_due().is_some_and(|r| m >= r) => {
                 self.refresh_asked = true;
+                self.last_ask = Some(m);
                 out.push(Output::Event(LinkEvent::TokenRefreshNeeded));
             }
             _ => {}
@@ -380,7 +417,10 @@ impl Link {
                         call_id: f.id,
                         result: Err(CallError::Timeout),
                     },
-                    Kind::Refresh(_) => LinkEvent::TokenRefreshFailed { code: None },
+                    Kind::Refresh(_) => {
+                        self.refresh_asked = false;
+                        LinkEvent::TokenRefreshFailed { code: None }
+                    }
                 }));
             } else {
                 i += 1;
@@ -396,7 +436,8 @@ impl Link {
             State::Ready => self
                 .expiry
                 .into_iter()
-                .chain(self.refresh_at.filter(|_| !self.refresh_asked))
+                .chain(self.refresh_due().filter(|_| !self.refresh_asked))
+                .chain(self.silence_deadline())
                 .min(),
             State::Idle => None,
         };
@@ -404,6 +445,30 @@ impl Link {
             .into_iter()
             .chain(self.inflight.iter().map(|f| f.deadline))
             .min()
+    }
+
+    /// When the next `TokenRefreshNeeded` may fire: the planned time, not within
+    /// `min_refresh_interval_ms` of the previous one.
+    fn refresh_due(&self) -> Option<u64> {
+        let at = self.refresh_at?;
+        Some(match self.last_ask {
+            Some(l) => at.max(l.saturating_add(self.cfg.min_refresh_interval_ms)),
+            None => at,
+        })
+    }
+
+    fn silence_deadline(&self) -> Option<u64> {
+        if self.cfg.silence_ms == 0 {
+            return None;
+        }
+        self.last_frame
+            .map(|t| t.saturating_add(self.cfg.silence_ms))
+    }
+
+    /// How long the relay has been silent, if that exceeds `silence_ms`.
+    fn silent_since(&self, m: u64) -> Option<u64> {
+        let d = self.silence_deadline()?;
+        (m >= d).then(|| m.saturating_sub(self.last_frame.unwrap_or(m)))
     }
 
     fn send_call(
@@ -459,14 +524,20 @@ impl Link {
                 self.token = Some(t);
                 LinkEvent::TokenRefreshed { expires_at }
             }
-            (Kind::Refresh(_), Err(code)) => LinkEvent::TokenRefreshFailed { code: Some(code) },
+            (Kind::Refresh(_), Err(code)) => {
+                // Ask again later (not before `min_refresh_interval_ms`).
+                self.refresh_asked = false;
+                LinkEvent::TokenRefreshFailed { code: Some(code) }
+            }
         }));
     }
 
     fn set_expiry(&mut self, expires_at: u64, now: Now) {
         let remaining = expires_at.saturating_sub(now.wall_ms);
         self.expiry = Some(now.mono_ms + remaining);
-        self.refresh_at = Some(now.mono_ms + remaining.saturating_sub(self.cfg.refresh_lead_ms));
+        // `lead` before expiry, but not before half of the remaining lifetime has passed.
+        let wait = (remaining / 2).max(remaining.saturating_sub(self.cfg.refresh_lead_ms));
+        self.refresh_at = Some(now.mono_ms + wait);
     }
 
     fn begin_connect(&mut self, now: Now, out: &mut Vec<Output>) {
@@ -502,6 +573,7 @@ impl Link {
         }
         self.expiry = None;
         self.refresh_at = None;
+        self.last_frame = None;
     }
 
     /// Link lost: abort calls, then wait out a backoff (or, with no token, ask for one).

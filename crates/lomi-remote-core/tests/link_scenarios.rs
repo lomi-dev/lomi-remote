@@ -39,8 +39,11 @@ fn token(expires_at: u64) -> RelayToken {
         expires_at,
     }
 }
+/// Silence check off: most scenarios jump the clock without relay frames in between.
 fn link() -> Link {
-    Link::new(LinkConfig::new(HASH), 42)
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    Link::new(cfg, 42)
 }
 fn relay(f: &Frame) -> Vec<u8> {
     encode_frame(f, MAX_FRAME_BYTES).unwrap()
@@ -383,10 +386,10 @@ fn connect_and_ready_timeouts_retry() {
 
 #[test]
 fn token_refresh_flow_and_failure() {
-    // READY at t=5 carries 999_995 ms: refresh is due 300 s before that, expiry at t=1_000_000.
+    // READY at t=5 carries 999_995 ms: refresh is due 60 s before that, expiry at t=1_000_000.
     let mut l = ready_link();
     let refresh_at = l.next_deadline().unwrap();
-    assert_eq!(refresh_at, 700_000);
+    assert_eq!(refresh_at, 940_000);
     assert!(l.tick(at(refresh_at - 1)).is_empty());
     assert_eq!(
         events(&l.tick(at(refresh_at))),
@@ -594,4 +597,219 @@ fn stop_closes_and_does_not_retry() {
         Some(&&LinkEvent::Stopped(StopReason::Requested))
     );
     assert!(l.tick(at(10_000_000)).is_empty());
+}
+
+fn ready_frame(expires_at: u64) -> Vec<u8> {
+    relay(&Frame::ReadyOk {
+        role: Role::Device,
+        expires_at,
+        state: Default::default(),
+    })
+}
+
+/// A link READY at t=0 on a 300 s token (the server's device token lifetime).
+fn ready_300s(cfg: LinkConfig) -> Link {
+    let mut l = Link::new(cfg.clone(), 42);
+    l.start(token(WALL0 + 300_000), at(0));
+    l.on_open(at(0));
+    l.on_message(&ready_frame(WALL0 + 300_000), at(0));
+    assert!(l.is_ready());
+    l
+}
+
+fn refresh_ok(l: &mut Link, expires_at: u64, now: u64) -> Vec<Output> {
+    let out = l.refresh_token(token(expires_at), at(now)).unwrap();
+    let Frame::Call { call_id, .. } = &sent(&out)[0] else {
+        panic!()
+    };
+    l.on_message(
+        &relay(&Frame::ReplyOk {
+            call_id: *call_id,
+            data: Default::default(),
+        }),
+        at(now + 1),
+    )
+}
+
+#[test]
+fn default_lead_refreshes_a_300s_token_after_240s_not_at_once() {
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    let mut l = ready_300s(cfg);
+    assert_eq!(l.next_deadline(), Some(240_000));
+    assert_eq!(
+        events(&l.tick(at(240_000))),
+        [&LinkEvent::TokenRefreshNeeded]
+    );
+    let out = refresh_ok(&mut l, WALL0 + 240_010 + 300_000, 240_010);
+    assert!(matches!(
+        events(&out)[..],
+        [LinkEvent::TokenRefreshed { .. }]
+    ));
+    // The next refresh is a full cycle away, not "now".
+    assert!(l.tick(at(240_100)).is_empty());
+    assert!(l.next_deadline().unwrap() >= 240_011 + 150_000);
+}
+
+#[test]
+fn a_lead_as_long_as_the_token_cannot_loop() {
+    // The old default (300 s lead) on a 300 s token: refresh at half of the lifetime, once per cycle.
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    cfg.refresh_lead_ms = 300_000;
+    let mut l = ready_300s(cfg);
+    assert_eq!(l.next_deadline(), Some(150_000));
+    assert_eq!(
+        events(&l.tick(at(150_000))),
+        [&LinkEvent::TokenRefreshNeeded]
+    );
+    refresh_ok(&mut l, WALL0 + 150_010 + 300_000, 150_010);
+    let next = l.next_deadline().unwrap();
+    assert!(next >= 150_011 + 150_000 - 1, "{next}");
+    // Even a lead larger than the lifetime and a zero-length token interval stay bounded.
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    cfg.refresh_lead_ms = u64::MAX;
+    let l = ready_300s(cfg);
+    assert_eq!(l.next_deadline(), Some(150_000));
+}
+
+#[test]
+fn failed_refreshes_are_spaced_by_the_minimum_interval() {
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    cfg.refresh_lead_ms = u64::MAX; // refresh due at half of the token's life
+    let mut l = ready_300s(cfg);
+    assert_eq!(
+        events(&l.tick(at(150_000))),
+        [&LinkEvent::TokenRefreshNeeded]
+    );
+    let mut asked = 1;
+    let mut last_ask = 150_000;
+    // The platform's refresh keeps failing; the core asks again, never faster than 30 s.
+    for _ in 0..4 {
+        let out = l
+            .refresh_token(token(WALL0 + 999_999), at(last_ask + 1))
+            .unwrap();
+        let Frame::Call { call_id, .. } = &sent(&out)[0] else {
+            panic!()
+        };
+        l.on_message(
+            &relay(&Frame::ReplyErr {
+                call_id: *call_id,
+                code: "UNAVAILABLE".into(),
+            }),
+            at(last_ask + 2),
+        );
+        let due = l.next_deadline().unwrap();
+        assert!(
+            due >= last_ask + 30_000,
+            "due {due} after ask at {last_ask}"
+        );
+        if due >= 300_000 {
+            break; // token expiry, not a refresh
+        }
+        assert!(l.tick(at(due - 1)).is_empty());
+        assert_eq!(events(&l.tick(at(due))), [&LinkEvent::TokenRefreshNeeded]);
+        asked += 1;
+        last_ask = due;
+    }
+    assert!(asked >= 2);
+}
+
+#[test]
+fn silence_while_ready_goes_stale_and_reconnects() {
+    let mut l = Link::new(LinkConfig::new(HASH), 42);
+    l.start(token(WALL0 + 300_000), at(0));
+    l.on_open(at(0));
+    assert_eq!(l.last_server_frame_mono_ms(), None);
+    l.on_message(&ready_frame(WALL0 + 300_000), at(0));
+    assert_eq!(l.last_server_frame_mono_ms(), Some(0));
+    assert_eq!(l.next_deadline(), Some(8_000));
+    // authority.fresh every 2 s keeps the link alive
+    for t in [2_000, 4_000, 6_000] {
+        l.on_message(&vector("event-authority-fresh"), at(t));
+        assert!(l.tick(at(t + 1)).is_empty());
+    }
+    assert_eq!(l.last_server_frame_mono_ms(), Some(6_000));
+    assert_eq!(l.next_deadline(), Some(14_000));
+    assert!(l.tick(at(13_999)).is_empty());
+    let out = l.tick(at(14_000));
+    assert_eq!(out[1], Output::Close);
+    let ev = events(&out);
+    assert_eq!(ev[0], &LinkEvent::Stale { silent_ms: 8_000 });
+    assert!(matches!(
+        ev[1],
+        LinkEvent::Disconnected {
+            cause: DisconnectCause::Silence,
+            retry_in_ms: Some(_)
+        }
+    ));
+    assert!(!l.is_ready() && l.last_server_frame_mono_ms().is_none());
+    // The token is still valid: the backoff ends in a new connection attempt.
+    let t = l.next_deadline().unwrap();
+    assert_eq!(l.tick(at(t)), vec![Output::Connect]);
+}
+
+#[test]
+fn silence_check_can_be_disabled() {
+    let mut cfg = LinkConfig::new(HASH);
+    cfg.silence_ms = 0;
+    let mut l = ready_300s(cfg);
+    assert!(l.tick(at(100_000)).is_empty() && l.is_ready());
+}
+
+#[test]
+fn bridge_exposes_silence_and_last_frame() {
+    use lomi_remote_core::bridge::{call, free};
+    let ok = |r: Vec<u8>| {
+        assert_eq!(r[0], 0, "{}", String::from_utf8_lossy(&r[1..]));
+        r[1..].to_vec()
+    };
+    let new = ok(call(
+        0,
+        "link.new",
+        format!(
+            r#"{{"contractHash":"{HASH}","seed":1,"silenceMs":3000,"minRefreshIntervalMs":5000}}"#
+        )
+        .as_bytes(),
+        &[],
+    ));
+    let h = serde_json::from_slice::<Value>(&new).unwrap()["handle"]
+        .as_u64()
+        .unwrap() as u32;
+    let now = |m: u64| format!(r#""monoMs":{m},"wallMs":{}"#, WALL0 + m);
+    let tok = format!(
+        r#"{{"token":"{}","expiresAt":{},{}}}"#,
+        "T".repeat(24),
+        WALL0 + 300_000,
+        now(0)
+    );
+    ok(call(h, "link.start", tok.as_bytes(), &[]));
+    ok(call(
+        h,
+        "link.onOpen",
+        format!("{{{}}}", now(0)).as_bytes(),
+        &[],
+    ));
+    ok(call(
+        h,
+        "link.onMessage",
+        format!("{{{}}}", now(10)).as_bytes(),
+        &ready_frame(WALL0 + 300_000),
+    ));
+    let last = ok(call(h, "link.lastServerFrame", b"{}", &[]));
+    assert_eq!(last, br#"{"monoMs":10}"#);
+    let out = ok(call(
+        h,
+        "link.tick",
+        format!("{{{}}}", now(3_010)).as_bytes(),
+        &[],
+    ));
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(r#""type":"stale""#) && text.contains(r#""cause":"silence""#),
+        "{text}"
+    );
+    free(h);
 }

@@ -321,6 +321,8 @@ fn link_new(a: &Object) -> R {
     set("backoffMinMs", &mut cfg.backoff_min_ms)?;
     set("backoffMaxMs", &mut cfg.backoff_max_ms)?;
     set("refreshLeadMs", &mut cfg.refresh_lead_ms)?;
+    set("minRefreshIntervalMs", &mut cfg.min_refresh_interval_ms)?;
+    set("silenceMs", &mut cfg.silence_ms)?;
     let mut inflight = cfg.max_inflight as u64;
     set("maxInflight", &mut inflight)?;
     cfg.max_inflight = usize::try_from(inflight).map_err(|_| fail("badArgs"))?;
@@ -363,6 +365,7 @@ fn event_json(e: &LinkEvent) -> Value {
         LinkEvent::TokenRefreshFailed { code } => {
             json!({ "type": "tokenRefreshFailed", "code": code })
         }
+        LinkEvent::Stale { silent_ms } => json!({ "type": "stale", "silentMs": silent_ms }),
         LinkEvent::TokenNeeded => json!({ "type": "tokenNeeded" }),
         LinkEvent::Disconnected { cause, retry_in_ms } => json!({
             "type": "disconnected",
@@ -374,6 +377,7 @@ fn event_json(e: &LinkEvent) -> Value {
                 DisconnectCause::Busy => "busy",
                 DisconnectCause::Protocol => "protocol",
                 DisconnectCause::TokenExpired => "tokenExpired",
+                DisconnectCause::Silence => "silence",
             },
             "retryInMs": retry_in_ms,
         }),
@@ -443,6 +447,7 @@ fn link_op(h: u32, op: &str, a: &Object, payload: &[u8]) -> R {
             ),
             "link.nextDeadline" => to_bytes(&json!({ "deadline": l.next_deadline() })),
             "link.isReady" => to_bytes(&json!({ "ready": l.is_ready() })),
+            "link.lastServerFrame" => to_bytes(&json!({ "monoMs": l.last_server_frame_mono_ms() })),
             _ => return Err(fail("unknownOp")),
         })
     })
