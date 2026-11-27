@@ -2516,7 +2516,14 @@ fn storage(value: secrets::StorageState) -> LocalAuthStorage {
         secrets::StorageState::Unavailable => LocalAuthStorage::Unavailable,
     }
 }
+#[track_caller]
 fn set_failed(state: &Mutex<View>, storage: LocalAuthStorage, gate: &AtomicBool) {
+    // Debug builds only: this terminal state otherwise leaves no trace.
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "lomi-host: auth worker failed at {}",
+        std::panic::Location::caller()
+    );
     gate.store(true, Ordering::Release);
     if let Ok(mut view) = state.lock() {
         view.status.storage = storage;
@@ -4992,6 +4999,8 @@ fn run_with_apis_inner(
                 continue;
             }
             Err(StepError::Auth(error)) => {
+                #[cfg(debug_assertions)]
+                eprintln!("lomi-host: auth worker step failed: {error}");
                 if publication_barrier.is_active() {
                     publication_barrier.reset();
                     ingress.discard();
