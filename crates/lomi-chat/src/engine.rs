@@ -3415,9 +3415,137 @@ read -r third
     }
 
     fn which(name: &str) -> Option<PathBuf> {
+        // Windows installs CLIs as `.exe` (native) or `.cmd` (npm shims).
+        let names: &[String] = if cfg!(windows) {
+            &[format!("{name}.exe"), format!("{name}.cmd"), name.into()]
+        } else {
+            &[name.to_string()]
+        };
         std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|d| d.join(name))
+            .flat_map(|d| names.iter().map(move |n| d.join(n)))
             .find(|p| p.is_file())
+    }
+
+    /// Rewinds a real CLI thread to its second user message and checks the agent
+    /// forgot that turn: `cargo test -p lomi-chat real_rewind -- --ignored`.
+    async fn real_rewind_forgets_the_later_turn(cli: &str, model: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = which(cli).unwrap_or_else(|| panic!("{cli} on PATH"));
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |_| Some(bin.clone())),
+        };
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    s.cli_providers.push(CliProvider {
+                        instance_id: cli.into(),
+                        cli: cli.into(),
+                        label: cli.into(),
+                        enabled: true,
+                        models: vec![],
+                    });
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: cli.into(),
+                        model: model.into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &str, revision: u64, text: &str| {
+            let engine = engine.clone();
+            let send = ThreadSend {
+                operation_id: op.into(),
+                thread_id: thread.thread_id.clone(),
+                expected_revision: revision,
+                instance_id: cli.into(),
+                model: model.into(),
+                text: text.into(),
+                attachments: vec![],
+            };
+            async move {
+                let (tx, mut rx) = unbounded_channel();
+                engine.send(send, Arc::new(Recorder(tx))).await.unwrap();
+                let (summary, message) = final_of(&mut rx).await;
+                assert_eq!(
+                    message.state,
+                    MessageState::Completed,
+                    "{:?}",
+                    message.error
+                );
+                (summary, message)
+            }
+        };
+        let rule = "Do not use any tools. Reply with only the word OK.";
+        let (s, _) = turn(
+            "r1",
+            thread.revision,
+            &format!("Remember the secret word APPLE. {rule}"),
+        )
+        .await;
+        let (s, _) = turn(
+            "r2",
+            s.revision,
+            &format!("The secret word is now BANANA instead. {rule}"),
+        )
+        .await;
+        let second = engine
+            .with(|i| i.store.messages_page(&thread.thread_id, None, 50))
+            .unwrap()
+            .0
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .nth(1)
+            .expect("second user message");
+        let report = engine
+            .rewind(&ThreadRewind {
+                thread_id: thread.thread_id.clone(),
+                message_id: second.message_id,
+                expected_revision: s.revision,
+                restore_files: false,
+            })
+            .unwrap();
+        assert_eq!(report.context, RewindContext::Native);
+        let (_, answer) = turn(
+            "r3",
+            report.thread.revision,
+            "What is the secret word? Do not use any tools. Reply with only the word.",
+        )
+        .await;
+        let text = answer.content.to_uppercase();
+        assert!(
+            text.contains("APPLE") && !text.contains("BANANA"),
+            "{}",
+            answer.content
+        );
+        engine.forget_session(&thread.thread_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code account"]
+    async fn real_rewind_claude() {
+        real_rewind_forgets_the_later_turn("claude", "haiku").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Codex account"]
+    async fn real_rewind_codex() {
+        real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL).await;
     }
 
     #[tokio::test]
@@ -5008,10 +5136,16 @@ read -r never
         rx: &mut UnboundedReceiver<ThreadStreamEvent>,
     ) -> (Activity, Question) {
         loop {
-            if let Some(ThreadStreamEvent::Activity { activity, .. }) = rx.recv().await
-                && let Some(q) = activity.question.clone().map(|q| *q)
-            {
-                return (activity, q);
+            match rx.recv().await.expect("stream ended before a question") {
+                ThreadStreamEvent::Activity { activity, .. } => {
+                    if let Some(q) = activity.question.clone().map(|q| *q) {
+                        return (activity, q);
+                    }
+                }
+                ThreadStreamEvent::Final { message, .. } => {
+                    panic!("turn ended before a question: {:?}", message.error)
+                }
+                _ => {}
             }
         }
     }

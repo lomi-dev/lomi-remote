@@ -633,6 +633,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // drives /bin/sh
     #[tokio::test]
     async fn lines_close_when_a_grandchild_outside_the_group_holds_stdout() {
         // `set -m` puts the background sleep in its own process group, out of reach of kill_group.
@@ -658,6 +659,7 @@ mod tests {
         assert!(wire.exit_detail().starts_with("The CLI exited"));
     }
 
+    #[cfg(unix)] // drives /bin/sh
     #[tokio::test]
     async fn an_oversized_line_ends_the_session_with_a_clear_error() {
         let spec = cli::Spec {
