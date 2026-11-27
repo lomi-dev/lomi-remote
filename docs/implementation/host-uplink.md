@@ -9,7 +9,9 @@ polls. It also carries `publication.put` and `token.update`. Code:
 ## Switch
 
 Off unless `LOMI_REMOTE_UPLINK=<64 lowercase hex>` (the relay's
-`REMOTE_RELAY_CONTRACT_HASH`) is set in the Host's environment. Off means the
+`REMOTE_RELAY_CONTRACT_HASH`) is set in the environment of a **debug build**:
+release builds do not read the variable at all, until a configuration field
+exists. Off means the
 module is never initialised: every hook returns "use HTTP" and the Host behaves
 exactly as before. The relay URL is not configured separately: it is the
 configured `--relay-endpoint` with `/v2/relay` replaced by `/relay`. A persistent
@@ -23,8 +25,8 @@ barrier, peer cutoff) is unchanged. It still calls the same four
 
 | Call | Uplink off, down, stale or not matching the binding | Uplink admitted for this runtime |
 | --- | --- | --- |
-| `heartbeat` | HTTP | answered locally: same runtime, `lease_ms` 15000, `freshness_ms` 5000 |
-| `runtime_get` | HTTP | answered locally from the admitted runtime and the publication sequence this link knows |
+| `heartbeat` | HTTP | answered locally: same runtime, `lease_ms` = relay-confirmed lease left (at least 5 s, else HTTP), `freshness_ms` 5000 |
+| `runtime_get` | HTTP, always | HTTP, except `runtime_get_cached`, used only by the read right after a worker-unit rotation (see below) |
 | `publication` | HTTP | chunked `publication.put` CALLs, same single-attempt rule |
 | `pairing_pending`, `channel_pending` | HTTP | "nothing pending" without a request, unless a wake hint is set |
 
@@ -51,23 +53,48 @@ Consequences:
 
 `authority.fresh` arrives every 2 s while the relay's authorization feed is
 confirmed. A heartbeat is answered from the link only if the last one is at most
-3 s old, and then grants 5 s (the HTTP value): at most 8 s after relay
-confirmation, the plan's bound. When the feed lapses or the link drops, the
-next heartbeat is a normal HTTP heartbeat with the server's own freshness.
+3 s old, and then grants 5 s (the HTTP value). So the grant ends at most 8 s
+after the event was *received*; the relay sends the event when the feed was
+confirmed within its last 5 s, so measured from the relay's own confirmation the
+bound is up to 13 s, not 8 s (the plan's 8 s is the Host-side silence rule for
+tunnels, which P3 applies). A link that hears nothing for 15 s is closed and
+reconnected (half-open). When the feed lapses or the link drops, the next
+heartbeat is a normal HTTP heartbeat with the server's own freshness.
+
+On system sleep (`Instant` does not count it) the actor's existing suspend
+detection calls `uplink::link_reset`: the link is dropped at once, so the first
+heartbeat after wake is HTTP, and the thread reconnects.
+
+### Lease
+
+A synthesized heartbeat never invents a lease. The Host keeps `lease_until` from
+what the relay confirmed: READY `leaseMs` (remaining lease at connect), then the
+host-link `authority.fresh` field `leaseRemainingMs` (below), and a real HTTP
+heartbeat (its `lease_ms`). Heartbeats and runtime reads are synthesized only
+while at least 5 s of confirmed lease is left (the DTO needs
+`freshness_ms <= lease_ms`); otherwise they go to HTTP.
+
+Server contract needed (not yet emitted by the relay; until it is, a Host falls
+back to one HTTP heartbeat about every 25 s): the host-link `authority.fresh`
+EVENT data gains `leaseRemainingMs` (decimal string): milliseconds left on
+`host_runtime.leaseExpiresAt` as of the relay's last *successful* batched
+presence write, computed at emission, and `"0"` (or absent) when no write
+succeeded within the last write interval plus retry (`presenceWriteMs + 3 s`).
 
 ### Runtime reads
 
 The actor re-reads the runtime whenever a worker unit rotates (every ~15 s, even
-idle), which would be the last periodic request of an idle Host. While the link
-is admitted for the binding the actor last used, fresh, and its publication
-sequence known, that read is answered locally: READY gives the sequence, our own
-acknowledged publications advance it, an uncertain publication clears it, and
-any real HTTP runtime read restores it. A cleared sequence sends the read to
-HTTP, where the actor's existing reconciliation runs.
-
-`lease_ms` is a fixed 15 s, not READY's `leaseMs` (the lease remaining at that
-moment): the relay renews the 30 s lease at least every 15 s while the link
-lives, so 15 s is always true and the actor's rolling `lease_until` never lapses.
+idle). Only that read may come from the link: at the rotation point the actor
+calls `uplink::allow_cached_runtime_read` (a one-shot grant valid 2 s), and only
+`configured_cloud_get_send` uses `runtime_get_cached`. Every other runtime read
+(logout epoch, started-Git control plane, claim reconciliation, after an unknown
+publication) is HTTP; a fresh-read demand or an unknown outcome revokes the grant.
+Even when granted it is answered locally only while the link is admitted for the
+binding the actor last used, fresh, with a publication sequence this link still
+knows. The sequence comes from READY, advances with our own acknowledged
+publications, and is cleared by any non-Ok link publication (including a caller
+giving up after the final chunk) and by every HTTP publication while a link
+exists; any real HTTP runtime read restores it.
 
 ### Peer activity keeps heartbeats on HTTP (until P3)
 
@@ -76,8 +103,11 @@ require the server's 5 s freshness, and the relay's batched availability write
 leaves gaps in it (it only covers 5 s of every `REMOTE_RELAY_PRESENCE_WRITE_MS`).
 So, from a wake hint or any peer-scope HTTP call until 30 s after the last one,
 heartbeats and runtime reads go to HTTP again, and a hinted pending read waits
-(its hint is kept) until an HTTP heartbeat has succeeded in the last 3 s. An idle
-Host never enters this mode; an active one behaves as before. Removing it is part
+(its hint is kept) until an HTTP heartbeat has succeeded in the last 3 s. Cold
+latency therefore grows by up to one heartbeat period (measured: first channel
+admission 2.07 s against 1.33 s on HTTP; later ones 1.4 s). Every connect sets both wake hints, so the first pending read after each
+(re)connect opens a 30 s window of HTTP heartbeats; after that an idle Host is
+out of the mode, an active one behaves as before. Removing it is part
 of P3 (channels over the link).
 
 ### Pending reads (wake hints)
@@ -143,16 +173,29 @@ check stays with desktop CI.
 ## Not changed / not covered
 
 - Channels, tickets and admission stay HTTP and relay data channels (P3).
-- `device.revoked`, `devices.changed` and `circuit.*` events are ignored; the
-  Host still learns of device revocation through the existing pairing reads
-  (P3 moves that onto the uplink). `host.revoked` closes the link; the next
-  heartbeat is HTTP and hits the existing revocation handling.
+- `device.revoked`, `devices.changed` and `circuit.*` events are ignored. The
+  Host does not learn a device revocation from pending reads. It relies on what
+  it relies on today: the per-connection pairing refresh while a channel is
+  established (HTTP, so those calls also keep the peer window open), grant expiry,
+  and the server refusing new pairings/channels of a revoked device. A device
+  revoked while no channel exists is therefore noticed at its next attempt; P3
+  reconciles the full device list at every uplink connect. `host.revoked` closes
+  the link; the next heartbeat is HTTP and hits the existing revocation handling.
 - Legacy readers of the server's freshness (web inventory "online") see an
   uplink Host as live for 5 s of every `REMOTE_RELAY_PRESENCE_WRITE_MS`; the local
   stack was run with 5000 so the e2e does not hit a gap. Clients move to
   `presence` events in P2.17-P2.19.
 - The actor's own wake-ups (heartbeat tick, 500 ms peer cadence) still run
   locally; they no longer make requests.
+
+## Token hygiene
+
+The uplink drops the access token (`Desired`) once the actor has not called for
+10 s (pause, logout). Copies in the link state, the in-flight `token.update` and
+the encoded AUTH bytes are zeroized; the `token.update` frame bytes and its
+argument object are plain JSON strings and are not (the codec owns them). `publication` over the
+link requires the caller's token to equal the one the link holds, and
+`offer_token` requires the same Host id.
 
 ## Risks
 
