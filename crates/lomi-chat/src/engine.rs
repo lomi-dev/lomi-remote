@@ -5106,8 +5106,9 @@ mod real_cli {
     }
 
     /// Rewinds a real CLI thread to its second user message and checks the agent
-    /// forgot that turn: `cargo test -p lomi-chat real_rewind -- --ignored`.
-    async fn real_rewind_forgets_the_later_turn(cli: &str, model: &str) {
+    /// forgot that turn: `cargo test -p lomi-chat real_rewind -- --ignored`. Agents that
+    /// cannot rewind their own session (`Replay`) get the kept conversation as text.
+    async fn real_rewind_forgets_the_later_turn(cli: &str, model: &str, context: RewindContext) {
         let dir = tempfile::tempdir().unwrap();
         let bin = which(cli).unwrap_or_else(|| panic!("{cli} on PATH"));
         let hooks = Hooks {
@@ -5199,7 +5200,7 @@ mod real_cli {
                 restore_files: false,
             })
             .unwrap();
-        assert_eq!(report.context, RewindContext::Native);
+        assert_eq!(report.context, context);
         let (_, answer) = turn(
             "r3",
             report.thread.revision,
@@ -5218,13 +5219,26 @@ mod real_cli {
     #[tokio::test]
     #[ignore = "spends a few tokens of the local Claude Code account"]
     async fn real_rewind_claude() {
-        real_rewind_forgets_the_later_turn("claude", "haiku").await;
+        real_rewind_forgets_the_later_turn("claude", "haiku", RewindContext::Native).await;
     }
 
     #[tokio::test]
     #[ignore = "spends a few tokens of the local Codex account"]
     async fn real_rewind_codex() {
-        real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL).await;
+        real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL, RewindContext::Native)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Antigravity account"]
+    async fn real_rewind_agy() {
+        real_rewind_forgets_the_later_turn("agy", cli::DEFAULT_MODEL, RewindContext::Replay).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Kimi Code account"]
+    async fn real_rewind_kimi() {
+        real_rewind_forgets_the_later_turn("kimi", cli::DEFAULT_MODEL, RewindContext::Replay).await;
     }
 
     /// Drives the installed `codex` app-server: `cargo test -p lomi-chat real_codex -- --ignored`.
