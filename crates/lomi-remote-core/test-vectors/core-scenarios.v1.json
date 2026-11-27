@@ -1,0 +1,1071 @@
+{
+  "format": "lomi-remote-core-scenarios",
+  "version": 1,
+  "description": "Core-level scenarios run through the bridge (call/free) by every compilation: native Rust (also over the C ABI on iOS and Android targets) and the WASM package. A step runs one bridge operation. 'as' stores the returned handle, 'on' uses one; 'payload' is 'hex:..', 'utf8:..' or 'vector:<name>' (a valid relay-frames vector); in an open payload '@last' is replaced by the last seal output. expect: json (deep equal), records (link record list; 'send' entries are decoded to the frame JSON), hex, or error (the error JSON). Seal output is a golden value produced by this core, not an external reference.",
+  "scenarios": [
+    {
+      "name": "session-request",
+      "steps": [
+        {
+          "op": "session.request",
+          "args": {
+            "contractHash": "ab"
+          },
+          "expect": {
+            "json": {
+              "method": "POST",
+              "path": "/remote/session",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "body": "{\"contractHash\":\"ab\"}"
+            }
+          }
+        },
+        {
+          "op": "session.request",
+          "args": {
+            "contractHash": "ab",
+            "refreshCredential": "rc"
+          },
+          "expect": {
+            "json": {
+              "method": "POST",
+              "path": "/remote/session",
+              "headers": [
+                [
+                  "content-type",
+                  "application/json"
+                ]
+              ],
+              "body": "{\"contractHash\":\"ab\",\"refreshCredential\":\"rc\"}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "session-parse",
+      "steps": [
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 200
+          },
+          "payload": "utf8:{\"account\":{\"id\":\"acc-1\",\"email\":\"a@example.test\"},\"sessionExpiresAt\":1795000000000,\"relay\":{\"token\":\"TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-\",\"expiresAt\":1794003600000},\"hosts\":[{\"hostId\":\"11111111-1111-4111-8111-111111111111\",\"online\":true,\"accessEpoch\":\"3\",\"runtimeGeneration\":\"7\",\"workspaces\":[{\"workspaceId\":\"22222222-2222-4222-8222-222222222222\",\"workspaceEpoch\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}]}],\"device\":{\"state\":\"registered\",\"deviceId\":\"dev-1\"},\"futureField\":{\"ignored\":true}}",
+          "expect": {
+            "json": {
+              "outcome": "full",
+              "account": {
+                "id": "acc-1",
+                "email": "a@example.test"
+              },
+              "sessionExpiresAt": 1795000000000,
+              "relay": {
+                "token": "TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-",
+                "expiresAt": 1794003600000
+              },
+              "hosts": [
+                {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "name": null,
+                  "online": true,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "7",
+                  "workspaces": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "name": null,
+                      "epoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    }
+                  ]
+                }
+              ],
+              "device": {
+                "state": "registered",
+                "deviceId": "dev-1"
+              }
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 200
+          },
+          "payload": "utf8:{\"account\":{\"id\":\"acc-1\",\"email\":\"a@example.test\"},\"sessionExpiresAt\":1795000000000,\"relay\":{\"token\":\"TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-\",\"expiresAt\":1794003600000},\"hosts\":[{\"hostId\":\"11111111-1111-4111-8111-111111111111\",\"online\":true,\"accessEpoch\":\"3\",\"runtimeGeneration\":\"7\",\"workspaces\":[{\"workspaceId\":\"22222222-2222-4222-8222-222222222222\",\"workspaceEpoch\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}]}],\"device\":{\"state\":\"registered\",\"deviceId\":\"dev-1\"},\"futureField\":{\"ignored\":true},\"accessToken\":{\"token\":\"ACC\",\"expiresAt\":5},\"refreshCredential\":\"sid.rot\"}",
+          "expect": {
+            "json": {
+              "outcome": "full",
+              "account": {
+                "id": "acc-1",
+                "email": "a@example.test"
+              },
+              "sessionExpiresAt": 1795000000000,
+              "relay": {
+                "token": "TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-",
+                "expiresAt": 1794003600000
+              },
+              "hosts": [
+                {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "name": null,
+                  "online": true,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "7",
+                  "workspaces": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "name": null,
+                      "epoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    }
+                  ]
+                }
+              ],
+              "device": {
+                "state": "registered",
+                "deviceId": "dev-1"
+              },
+              "accessToken": {
+                "token": "ACC",
+                "expiresAt": 5
+              },
+              "refreshCredential": "sid.rot"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 200
+          },
+          "payload": "utf8:{\"degraded\":true,\"reason\":\"AUTH_REQUIRED\",\"accessToken\":{\"token\":\"ACC\",\"expiresAt\":5},\"refreshCredential\":\"sid.rot\"}",
+          "expect": {
+            "json": {
+              "outcome": "degraded",
+              "reason": "AUTH_REQUIRED",
+              "accessToken": {
+                "token": "ACC",
+                "expiresAt": 5
+              },
+              "refreshCredential": "sid.rot"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 401
+          },
+          "payload": "utf8:{}",
+          "expect": {
+            "error": {
+              "code": "unauthorized"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 409
+          },
+          "payload": "utf8:{\"code\":\"UPDATE_REQUIRED\"}",
+          "expect": {
+            "error": {
+              "code": "updateRequired"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 409
+          },
+          "payload": "utf8:{\"code\":\"OUTCOME_UNKNOWN\"}",
+          "expect": {
+            "error": {
+              "code": "outcomeUnknown"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 503
+          },
+          "payload": "utf8:",
+          "expect": {
+            "error": {
+              "code": "http",
+              "status": 503,
+              "retryable": true
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 400
+          },
+          "payload": "utf8:",
+          "expect": {
+            "error": {
+              "code": "http",
+              "status": 400,
+              "retryable": false
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 200
+          },
+          "payload": "utf8:{\"account\":{\"id\":\"a\"},\"account\":{}}",
+          "expect": {
+            "error": {
+              "code": "malformed"
+            }
+          }
+        },
+        {
+          "op": "session.parse",
+          "args": {
+            "status": 200
+          },
+          "payload": "utf8:[]",
+          "expect": {
+            "error": {
+              "code": "malformed"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bridge-errors",
+      "steps": [
+        {
+          "op": "nope",
+          "expect": {
+            "error": {
+              "code": "unknownOp"
+            }
+          }
+        },
+        {
+          "op": "link.tick",
+          "args": {
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "error": {
+              "code": "badHandle"
+            }
+          }
+        },
+        {
+          "op": "directory.snapshot",
+          "args": {},
+          "expect": {
+            "error": {
+              "code": "badHandle"
+            }
+          }
+        },
+        {
+          "op": "link.new",
+          "args": {
+            "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "expect": {
+            "error": {
+              "code": "badArgs"
+            }
+          }
+        },
+        {
+          "op": "frame.canonical",
+          "args": {
+            "fromRelay": true
+          },
+          "payload": "hex:",
+          "expect": {
+            "error": {
+              "code": "framing"
+            }
+          }
+        },
+        {
+          "op": "frame.canonical",
+          "args": {
+            "fromRelay": true
+          },
+          "payload": "hex:0300",
+          "expect": {
+            "error": {
+              "code": "encoding"
+            }
+          }
+        },
+        {
+          "op": "frame.canonical",
+          "args": {
+            "fromRelay": false
+          },
+          "payload": "vector:ready-device",
+          "expect": {
+            "error": {
+              "code": "framing"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "link-happy-path",
+      "steps": [
+        {
+          "op": "link.new",
+          "as": "l",
+          "args": {
+            "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "seed": 42
+          }
+        },
+        {
+          "op": "link.start",
+          "on": "l",
+          "args": {
+            "token": "TTTTTTTTTTTTTTTTTTTTTTTT",
+            "expiresAt": 1795000000000,
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.isReady",
+          "on": "l",
+          "expect": {
+            "json": {
+              "ready": false
+            }
+          }
+        },
+        {
+          "op": "link.onOpen",
+          "on": "l",
+          "args": {
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "send",
+                "frame": {
+                  "type": "AUTH",
+                  "role": "device",
+                  "token": "TTTTTTTTTTTTTTTTTTTTTTTT",
+                  "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onMessage",
+          "on": "l",
+          "args": {
+            "monoMs": 5,
+            "wallMs": 1794999000005
+          },
+          "payload": "vector:ready-device",
+          "expect": {
+            "records": [
+              {
+                "t": "event",
+                "event": {
+                  "type": "ready",
+                  "expiresAt": 1795000000000,
+                  "state": {
+                    "hosts": [
+                      {
+                        "hostId": "11111111-1111-4111-8111-111111111111",
+                        "online": true,
+                        "accessEpoch": "3",
+                        "runtimeGeneration": "7"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.isReady",
+          "on": "l",
+          "expect": {
+            "json": {
+              "ready": true
+            }
+          }
+        },
+        {
+          "op": "link.onMessage",
+          "on": "l",
+          "args": {
+            "monoMs": 10,
+            "wallMs": 1794999000010
+          },
+          "payload": "vector:event-presence",
+          "expect": {
+            "records": [
+              {
+                "t": "event",
+                "event": {
+                  "type": "server",
+                  "name": "presence",
+                  "data": {
+                    "hostId": "11111111-1111-4111-8111-111111111111",
+                    "online": false,
+                    "accessEpoch": "3",
+                    "runtimeGeneration": "7"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.call",
+          "on": "l",
+          "args": {
+            "name": "circuit.open",
+            "args": {
+              "hostId": "11111111-1111-4111-8111-111111111111"
+            },
+            "monoMs": 20,
+            "wallMs": 1794999000020
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "event",
+                "event": {
+                  "type": "callStarted",
+                  "callId": 1
+                }
+              },
+              {
+                "t": "send",
+                "frame": {
+                  "type": "CALL",
+                  "callId": 1,
+                  "name": "circuit.open",
+                  "args": {
+                    "hostId": "11111111-1111-4111-8111-111111111111"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onMessage",
+          "on": "l",
+          "args": {
+            "monoMs": 30,
+            "wallMs": 1794999000030
+          },
+          "payload": "vector:reply-ok",
+          "expect": {
+            "records": [
+              {
+                "t": "event",
+                "event": {
+                  "type": "callDone",
+                  "callId": 1,
+                  "ok": {
+                    "publicationSeq": "4"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.call",
+          "on": "l",
+          "args": {
+            "name": "token.update",
+            "args": {},
+            "monoMs": 31,
+            "wallMs": 1794999000031
+          },
+          "expect": {
+            "error": {
+              "code": "unknownCall"
+            }
+          }
+        },
+        {
+          "op": "link.stop",
+          "on": "l",
+          "expect": {
+            "records": [
+              {
+                "t": "close"
+              },
+              {
+                "t": "event",
+                "event": {
+                  "type": "stopped",
+                  "reason": "requested",
+                  "older": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "link-rejections",
+      "steps": [
+        {
+          "op": "link.new",
+          "as": "l",
+          "args": {
+            "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "seed": 42
+          }
+        },
+        {
+          "op": "link.call",
+          "on": "l",
+          "args": {
+            "name": "circuit.open",
+            "args": {},
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "error": {
+              "code": "notReady"
+            }
+          }
+        },
+        {
+          "op": "link.start",
+          "on": "l",
+          "args": {
+            "token": "TTTTTTTTTTTTTTTTTTTTTTTT",
+            "expiresAt": 1795000000000,
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onOpen",
+          "on": "l",
+          "args": {
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "send",
+                "frame": {
+                  "type": "AUTH",
+                  "role": "device",
+                  "token": "TTTTTTTTTTTTTTTTTTTTTTTT",
+                  "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onMessage",
+          "on": "l",
+          "args": {
+            "monoMs": 5,
+            "wallMs": 1794999000005
+          },
+          "payload": "vector:ready-auth-failed",
+          "expect": {
+            "records": [
+              {
+                "t": "close"
+              },
+              {
+                "t": "event",
+                "event": {
+                  "type": "stopped",
+                  "reason": "authFailed",
+                  "older": null
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.new",
+          "as": "m",
+          "args": {
+            "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "seed": 1
+          }
+        },
+        {
+          "op": "link.start",
+          "on": "m",
+          "args": {
+            "token": "short",
+            "expiresAt": 1795000000000,
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onOpen",
+          "on": "m",
+          "args": {
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "close"
+              },
+              {
+                "t": "event",
+                "event": {
+                  "type": "stopped",
+                  "reason": "badToken",
+                  "older": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "link-reconnect-backoff",
+      "steps": [
+        {
+          "op": "link.new",
+          "as": "l",
+          "args": {
+            "contractHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "seed": 42
+          }
+        },
+        {
+          "op": "link.start",
+          "on": "l",
+          "args": {
+            "token": "TTTTTTTTTTTTTTTTTTTTTTTT",
+            "expiresAt": 1795000000000,
+            "monoMs": 0,
+            "wallMs": 1794999000000
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "connect"
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.onClose",
+          "on": "l",
+          "args": {
+            "monoMs": 100,
+            "wallMs": 1794999000100
+          },
+          "expect": {
+            "records": [
+              {
+                "t": "event",
+                "event": {
+                  "type": "disconnected",
+                  "cause": "socketClosed",
+                  "retryInMs": 472
+                }
+              }
+            ]
+          }
+        },
+        {
+          "op": "link.nextDeadline",
+          "on": "l",
+          "expect": {
+            "json": {
+              "deadline": 572
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "directory-seal-open",
+      "steps": [
+        {
+          "op": "directory.new",
+          "as": "d",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1"
+          }
+        },
+        {
+          "op": "directory.applySession",
+          "on": "d",
+          "payload": "utf8:{\"account\":{\"id\":\"acc-1\",\"email\":\"a@example.test\"},\"sessionExpiresAt\":1795000000000,\"relay\":{\"token\":\"TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-\",\"expiresAt\":1794003600000},\"hosts\":[{\"hostId\":\"11111111-1111-4111-8111-111111111111\",\"online\":true,\"accessEpoch\":\"3\",\"runtimeGeneration\":\"7\",\"workspaces\":[{\"workspaceId\":\"22222222-2222-4222-8222-222222222222\",\"workspaceEpoch\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}]}],\"device\":{\"state\":\"registered\",\"deviceId\":\"dev-1\"},\"futureField\":{\"ignored\":true}}",
+          "expect": {
+            "json": {
+              "effect": "changed"
+            }
+          }
+        },
+        {
+          "op": "directory.applySession",
+          "on": "d",
+          "payload": "utf8:{\"account\":{\"id\":\"acc-1\",\"email\":\"a@example.test\"},\"sessionExpiresAt\":1795000000000,\"relay\":{\"token\":\"TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-\",\"expiresAt\":1794003600000},\"hosts\":[{\"hostId\":\"11111111-1111-4111-8111-111111111111\",\"online\":true,\"accessEpoch\":\"3\",\"runtimeGeneration\":\"7\",\"workspaces\":[{\"workspaceId\":\"22222222-2222-4222-8222-222222222222\",\"workspaceEpoch\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}]}],\"device\":{\"state\":\"registered\",\"deviceId\":\"dev-1\"},\"futureField\":{\"ignored\":true}}",
+          "expect": {
+            "json": {
+              "effect": "unchanged"
+            }
+          }
+        },
+        {
+          "op": "directory.snapshot",
+          "on": "d",
+          "expect": {
+            "json": {
+              "wiped": false,
+              "hosts": [
+                {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "name": null,
+                  "online": true,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "7",
+                  "workspaces": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "name": null,
+                      "epoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "directory.setHostName",
+          "on": "d",
+          "args": {
+            "hostId": "11111111-1111-4111-8111-111111111111",
+            "name": "Studio"
+          },
+          "expect": {
+            "json": {
+              "changed": true
+            }
+          }
+        },
+        {
+          "op": "directory.seal",
+          "on": "d",
+          "payload": "hex:000000010101010101010101010101010101010101010101010101010101010101010101070707070707070707070707070707070707070707070707",
+          "expect": {
+            "hex": "4c5244520200000001070707070707070707070707070707070707070707070707e60ee087cebe3b5630b20b3bc576cb9e7e9da05a2245183acc728dacbba188496533d17a8ae0bebbb5f64ad7ee5d230df35f98dd53585a38cf680b05028cffa93228532cf3be19726d7bf2b62b40ec0156ed2eea35d4679df59f4f6cdcdeaab85abaaa0b39d2516382f0f899ca5eee40f5aefff6a1176fca55ef08dfbb62739b15d854fed99c1b98a9f36170aa46f50e734cdb3e82bd7b15e3a3b9e3d7f46cd28c95261e8a04af9bc3b5e153291af5b552faace94505c56c01e8dc7e74c2d82fc5ca5c6e9da47b7c662c53218fee94f5de07ea9eac2611ab76631c8ba504ce5b0f5fbdae635b2527e80495c4bd22e9ff1996987ddc01db5f028a029867"
+          }
+        },
+        {
+          "op": "directory.open",
+          "as": "e",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 0
+          },
+          "payload": "hex:01000000010101010101010101010101010101010101010101010101010101010101010101@last"
+        },
+        {
+          "op": "directory.snapshot",
+          "on": "e",
+          "expect": {
+            "json": {
+              "wiped": false,
+              "hosts": [
+                {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "name": "Studio",
+                  "online": true,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "7",
+                  "workspaces": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "name": null,
+                      "epoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 0
+          },
+          "payload": "hex:01000000010202020202020202020202020202020202020202020202020202020202020202@last",
+          "expect": {
+            "error": {
+              "code": "auth"
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-2",
+            "minKeyId": 0
+          },
+          "payload": "hex:01000000010101010101010101010101010101010101010101010101010101010101010101@last",
+          "expect": {
+            "error": {
+              "code": "auth"
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 2
+          },
+          "payload": "hex:01000000010101010101010101010101010101010101010101010101010101010101010101@last",
+          "expect": {
+            "error": {
+              "code": "stale"
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 0
+          },
+          "payload": "hex:01000000020202020202020202020202020202020202020202020202020202020202020202@last",
+          "expect": {
+            "error": {
+              "code": "noKey"
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 0
+          },
+          "payload": "hex:00@last",
+          "expect": {
+            "error": {
+              "code": "noKey"
+            }
+          }
+        },
+        {
+          "op": "directory.open",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1",
+            "minKeyId": 0
+          },
+          "payload": "hex:0001",
+          "expect": {
+            "error": {
+              "code": "badFormat"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "directory-events-and-wipe",
+      "steps": [
+        {
+          "op": "directory.new",
+          "as": "d",
+          "args": {
+            "accountId": "acc-1",
+            "deviceId": "dev-1"
+          }
+        },
+        {
+          "op": "directory.applySession",
+          "on": "d",
+          "payload": "utf8:{\"account\":{\"id\":\"acc-1\",\"email\":\"a@example.test\"},\"sessionExpiresAt\":1795000000000,\"relay\":{\"token\":\"TTTTTTTTabcdefghijklmnopqrstuvwxyz0123456789_-\",\"expiresAt\":1794003600000},\"hosts\":[{\"hostId\":\"11111111-1111-4111-8111-111111111111\",\"online\":true,\"accessEpoch\":\"3\",\"runtimeGeneration\":\"7\",\"workspaces\":[{\"workspaceId\":\"22222222-2222-4222-8222-222222222222\",\"workspaceEpoch\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}]}],\"device\":{\"state\":\"registered\",\"deviceId\":\"dev-1\"},\"futureField\":{\"ignored\":true}}",
+          "expect": {
+            "json": {
+              "effect": "changed"
+            }
+          }
+        },
+        {
+          "op": "directory.applyEvent",
+          "on": "d",
+          "args": {
+            "name": "presence",
+            "data": {
+              "hostId": "11111111-1111-4111-8111-111111111111",
+              "online": false,
+              "accessEpoch": "3",
+              "runtimeGeneration": "8"
+            }
+          },
+          "expect": {
+            "json": {
+              "effect": "changed"
+            }
+          }
+        },
+        {
+          "op": "directory.snapshot",
+          "on": "d",
+          "expect": {
+            "json": {
+              "wiped": false,
+              "hosts": [
+                {
+                  "id": "11111111-1111-4111-8111-111111111111",
+                  "name": null,
+                  "online": false,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "8",
+                  "workspaces": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "name": null,
+                      "epoch": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "directory.applyReadyState",
+          "on": "d",
+          "args": {
+            "state": {
+              "hosts": [
+                {
+                  "hostId": "11111111-1111-4111-8111-111111111111",
+                  "online": true,
+                  "accessEpoch": "3",
+                  "runtimeGeneration": "7"
+                }
+              ]
+            }
+          },
+          "expect": {
+            "json": {
+              "effect": "unchanged"
+            }
+          }
+        },
+        {
+          "op": "directory.applyEvent",
+          "on": "d",
+          "args": {
+            "name": "revoked",
+            "data": {}
+          },
+          "expect": {
+            "json": {
+              "effect": "revoked"
+            }
+          }
+        },
+        {
+          "op": "directory.snapshot",
+          "on": "d",
+          "expect": {
+            "json": {
+              "wiped": true,
+              "hosts": []
+            }
+          }
+        },
+        {
+          "op": "directory.seal",
+          "on": "d",
+          "payload": "hex:000000010101010101010101010101010101010101010101010101010101010101010101070707070707070707070707070707070707070707070707",
+          "expect": {
+            "error": {
+              "code": "wiped"
+            }
+          }
+        },
+        {
+          "op": "directory.applySession",
+          "on": "d",
+          "payload": "utf8:{\"degraded\":true,\"reason\":\"AUTH_REQUIRED\",\"accessToken\":{\"token\":\"ACC\",\"expiresAt\":5},\"refreshCredential\":\"sid.rot\"}",
+          "expect": {
+            "error": {
+              "code": "degraded"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

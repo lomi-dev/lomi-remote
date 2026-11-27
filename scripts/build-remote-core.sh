@@ -13,12 +13,11 @@ cargo build --locked --release -p lomi-remote-core
 size target/release/liblomi_remote_core.a
 
 echo "== wasm"
-cargo rustc --locked --release -p lomi-remote-core --lib --target wasm32-unknown-unknown --features browser --crate-type cdylib
-wasm-bindgen target/wasm32-unknown-unknown/release/lomi_remote_core.wasm --target web --out-dir "$OUT/wasm" --out-name remote_core
-W="$OUT/wasm/remote_core_bg.wasm"
+node packages/remote-core-wasm/scripts/build.mjs
+W="packages/remote-core-wasm/generated/remote_core_bg.wasm"
 size "$W"
-gzip -9 -c "$W" > "$W.gz"; size "$W.gz"
-brotli -q 11 -c "$W" > "$W.br"; size "$W.br"
+gzip -9 -c "$W" > "$OUT/remote_core_bg.wasm.gz"; size "$OUT/remote_core_bg.wasm.gz"
+brotli -q 11 -c "$W" > "$OUT/remote_core_bg.wasm.br"; size "$OUT/remote_core_bg.wasm.br"
 
 echo "== ios"
 export IPHONEOS_DEPLOYMENT_TARGET=16.4
@@ -26,9 +25,10 @@ for t in aarch64-apple-ios aarch64-apple-ios-sim; do
   cargo build --locked --release -p lomi-remote-core --target "$t"
   size "target/$t/release/liblomi_remote_core.a"
 done
+mkdir -p "$OUT"
 xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/liblomi_remote_core.a \
-  -library target/aarch64-apple-ios-sim/release/liblomi_remote_core.a \
+  -library target/aarch64-apple-ios/release/liblomi_remote_core.a -headers crates/lomi-remote-core/include \
+  -library target/aarch64-apple-ios-sim/release/liblomi_remote_core.a -headers crates/lomi-remote-core/include \
   -output "$OUT/LomiRemoteCore.xcframework" >/dev/null
 echo "$OUT/LomiRemoteCore.xcframework"
 

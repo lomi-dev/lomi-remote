@@ -3,9 +3,14 @@
 //! * [`frame`]: relay link frame codec, pinned by `test-vectors/relay-frames.v1.json`.
 //! * [`link`]: link client state machine for role `device` (sans-I/O).
 //! * [`session`]: the `POST /remote/session` startup request and response.
+//! * [`bridge`]: the one handle-based byte/JSON boundary every platform binds (WASM, C ABI in
+//!   [`ffi`], JNI).
 //! * [`directory`]: on-device Host directory, merged with server data, sealed at rest.
 
+pub mod bridge;
 pub mod directory;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffi;
 pub mod frame;
 pub mod json;
 pub mod link;
@@ -18,27 +23,16 @@ pub fn version() -> &'static str {
 
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser {
-    use crate::frame::{Direction, MAX_FRAME_BYTES, decode_frame, encode_frame};
     use wasm_bindgen::prelude::*;
 
-    #[wasm_bindgen(js_name = coreVersion)]
-    pub fn core_version() -> String {
-        super::version().to_owned()
+    /// See [`crate::bridge::call`]; `args` is a JSON object, `payload` raw bytes.
+    #[wasm_bindgen]
+    pub fn call(handle: u32, op: &str, args: &[u8], payload: &[u8]) -> Vec<u8> {
+        crate::bridge::call(handle, op, args, payload)
     }
 
-    /// Decodes a relay link frame and returns its canonical encoding (`None` when rejected).
-    /// `from_relay` is the sender: true for READY/EVENT/REPLY, false for AUTH/CALL.
-    #[wasm_bindgen(js_name = canonicalFrame)]
-    pub fn canonical_frame(bytes: &[u8], from_relay: bool) -> Option<Vec<u8>> {
-        let from = if from_relay {
-            Direction::Relay
-        } else {
-            Direction::Client
-        };
-        encode_frame(
-            &decode_frame(bytes, from, MAX_FRAME_BYTES).ok()?,
-            MAX_FRAME_BYTES,
-        )
-        .ok()
+    #[wasm_bindgen]
+    pub fn free(handle: u32) {
+        crate::bridge::free(handle);
     }
 }

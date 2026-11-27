@@ -1,0 +1,4 @@
+module LomiRemoteCoreFFI {
+  header "LomiRemoteCoreFFI.h"
+  export *
+}

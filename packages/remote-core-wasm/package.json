@@ -3,7 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.mjs" }, "./wasm": "./generated/remote_core_bg.wasm" },
   "scripts": {
-    "build": "bash ../../scripts/build-remote-core.sh"
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check",
+    "test": "node --test test/vectors.test.mjs"
   }
 }

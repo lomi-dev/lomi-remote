@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "package": "@lomi/remote-core-wasm",
+  "target": "wasm32-unknown-unknown",
+  "profile": "release",
+  "features": [
+    "browser"
+  ],
+  "tools": {
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "wasmBindgen": "wasm-bindgen 0.2.126"
+  },
+  "sourceInputMode": "live workspace guarded by equal pre-build and post-bindgen source digests",
+  "sourceSha256": {
+    "Cargo.lock": "681ee471c0b4e0b3dc7ac2d0272b65e67e116c08d7a36b66a904f0f09226f43f",
+    "Cargo.toml": "662b75edfd7947a6b1c1dbed2dba4c29b466f344d68a68561553a122fe0761d0",
+    "crates/lomi-remote-core/Cargo.toml": "98bf0b9544bccd982e591b9a6635de85f2d1fc9edd317e79adf0e3b1ff5d4490",
+    "crates/lomi-remote-core/src/bridge.rs": "1489f5aabc72a14f0fe784a8ed1e866d55b0328cd3dfad915c1d99b7710420a6",
+    "crates/lomi-remote-core/src/directory.rs": "c6db3d35dc7c154f441c7a4b9c56427854bd6374ec0898ebeee7b87cf98a757d",
+    "crates/lomi-remote-core/src/ffi.rs": "9825c4637b6f8fde391810b6a334891e20ee3f9d597a2a0bff37250caeafed47",
+    "crates/lomi-remote-core/src/frame.rs": "59b9bba891e61bf76f3e098922cc232e67dccf76182bdf983221a8421ad6c8d6",
+    "crates/lomi-remote-core/src/json.rs": "5e56873f9cb4daecebfd874a34878d09c32911409614b9f40436194bbf678080",
+    "crates/lomi-remote-core/src/lib.rs": "20791c563698a8664c1bc63011b812464d256cd6bfcb35d958b148c94ba67604",
+    "crates/lomi-remote-core/src/link.rs": "be9e63b49096a3c63241a11058423ac187b29296345c5b2b9c60412b9facb837",
+    "crates/lomi-remote-core/src/session.rs": "14bb08b05867c6dd4d351aa2da33dbb0e3e0555f183469f47d7d7cfd2f87d0c7",
+    "packages/remote-core-wasm/README.md": "2cc409e5ea89aeaf139b167dff8f94d3c29215ba44f339623e6197b1ce512ff7",
+    "packages/remote-core-wasm/package.json": "b9b621564ea100c46939361182edb8f2c5cd906e9aea5db097f59c33a4378a35",
+    "packages/remote-core-wasm/scripts/build.mjs": "e2cc5f63fc0403ceffc5ed25e2a7c62f14c8345fa68654408ddf07f9c1249bad",
+    "packages/remote-core-wasm/src/index.d.ts": "d048fbd2a60164f7aafd2fba1a25890fb73a91e0a16ba342300a7f3523fe168b",
+    "packages/remote-core-wasm/src/index.mjs": "d2b6dbf753c3f6b80ea9a70d50cc7fa6332b6b6f8cbd4dc0dad6078eeba74556",
+    "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
+  },
+  "inputWasmSha256": "880dd4e24577c27497165bc26891203454e00ff4ea512c4c747d751beeefd5af",
+  "generatedSha256": {
+    "remote_core.d.ts": "b19da30497d6555292aedef76656e97e39de751cece2fc3e5ee23e409001e201",
+    "remote_core.js": "15f1811c9c50ac1cbf1f5083789287429dd4f216753e15f4747c8ffdf15a9b48",
+    "remote_core_bg.wasm": "7f85cef71a7b6df42031cd64f83d4c8ed62e13145eee4b5973ee23a84881971a",
+    "remote_core_bg.wasm.d.ts": "f9ec41a52c71d925ffd17dfc0753532e49958d72d04a440aaa221ae6c1be5ce5"
+  },
+  "scope": "Sans-I/O client core: relay link frames, link state machine, session request/response and the sealed directory. No sockets, clocks, randomness or key storage; the platform supplies time, seed, keys and nonces.",
+  "provenanceSelfHash": false
+}

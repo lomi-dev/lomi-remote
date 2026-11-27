@@ -67,7 +67,9 @@ const manifest = {
     wasmPackages: {
       protocolCodec: await tree(root, 'packages/protocol-codec-wasm'),
       authorityCrypto: await tree(root, 'packages/authority-crypto-wasm'),
+      remoteCore: await tree(root, 'packages/remote-core-wasm'),
     },
+    rustRemoteCore: await tree(root, 'crates/lomi-remote-core'),
   },
   consumers: {
     remoteWebPackages: webPackages,
@@ -89,6 +91,7 @@ if (!write) {
   const checks = [
     ['remote contracts', process.execPath, [join(root, 'packages/remote-contracts/scripts/generate.mjs'), '--check'], root],
     ['protocol codec WASM', process.execPath, [join(root, 'packages/protocol-codec-wasm/scripts/build.mjs'), '--check'], root],
+    ['remote core WASM', process.execPath, [join(root, 'packages/remote-core-wasm/scripts/build.mjs'), '--check'], root],
     ['authority crypto WASM', process.execPath, [join(root, 'packages/authority-crypto-wasm/scripts/build.mjs'), '--check'], root],
     ['remote-web package snapshots', process.execPath, [join(root, 'scripts/sync-remote-web-packages.mjs'), '--check'], root],
     ['mobile crypto provenance', 'python3', [join(mobile, 'scripts/check-crypto.py')], mobile],

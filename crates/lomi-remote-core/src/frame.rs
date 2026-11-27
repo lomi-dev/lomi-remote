@@ -6,7 +6,7 @@
 //! rejected here.
 
 use crate::json::{self, Object};
-use serde_json::{Number, Value};
+use serde_json::{Number, Value, json};
 
 pub const TYPE_AUTH: u8 = 0x01;
 pub const TYPE_READY: u8 = 0x02;
@@ -465,4 +465,64 @@ pub fn encode_frame(frame: &Frame, max_bytes: usize) -> Result<Vec<u8>, FrameErr
     // Validate what we are about to send with the rules the peer applies.
     decode_frame(&out, frame.direction(), max_bytes)?;
     Ok(out)
+}
+
+fn role_name(r: Role) -> &'static str {
+    if r == Role::Host { "host" } else { "device" }
+}
+
+/// The frame as the vectors' `frame` object (the TypeScript `Frame` type).
+pub fn frame_to_json(f: &Frame) -> Value {
+    match f {
+        Frame::Auth {
+            role: r,
+            token,
+            contract_hash,
+            claim,
+        } => {
+            let mut v = json!({"type":"AUTH","role":role_name(*r),"token":token,"contractHash":contract_hash});
+            if let Some(c) = claim {
+                v["claim"] = json!({"hostId":c.host_id,"runtimeId":c.runtime_id,"expectedGeneration":c.expected_generation});
+            }
+            v
+        }
+        Frame::ReadyOk {
+            role: r,
+            expires_at,
+            state,
+        } => {
+            json!({"type":"READY","ok":true,"role":role_name(*r),"expiresAt":expires_at,"state":state})
+        }
+        Frame::ReadyErr { code, older } => {
+            let code = match code {
+                ReadyErrorCode::AuthFailed => "AUTH_FAILED",
+                ReadyErrorCode::UpdateRequired => "UPDATE_REQUIRED",
+                ReadyErrorCode::Unavailable => "UNAVAILABLE",
+                ReadyErrorCode::Busy => "BUSY",
+                ReadyErrorCode::HostBusy => "HOST_BUSY",
+                ReadyErrorCode::StaleEpoch => "STALE_EPOCH",
+            };
+            let mut e = json!({ "code": code });
+            if let Some(o) = older {
+                e["older"] = json!(match o {
+                    Older::Host => "host",
+                    Older::Client => "client",
+                    Older::Unknown => "unknown",
+                });
+            }
+            json!({"type":"READY","ok":false,"error":e})
+        }
+        Frame::Event { name, data } => json!({"type":"EVENT","name":name,"data":data}),
+        Frame::Call {
+            call_id,
+            name,
+            args,
+        } => json!({"type":"CALL","callId":call_id,"name":name,"args":args}),
+        Frame::ReplyOk { call_id, data } => {
+            json!({"type":"REPLY","callId":call_id,"ok":true,"data":data})
+        }
+        Frame::ReplyErr { call_id, code } => {
+            json!({"type":"REPLY","callId":call_id,"ok":false,"error":{"code":code}})
+        }
+    }
 }
