@@ -851,6 +851,10 @@ impl Engine {
         })
         .await?;
         if let Some(job) = job {
+            if job.switched {
+                // The previous agent's warm process belongs to the old session.
+                self.forget_session(&accepted.thread.thread_id);
+            }
             self.notify(accepted.thread.revision, &accepted.thread.thread_id);
             tokio::spawn(run_stream(self.clone(), job, sink));
         }
@@ -869,6 +873,7 @@ impl Engine {
             ..
         } = i;
         let mut provider = None;
+        let mut switched = false;
         let begin =
             store.send_begin(request, settings.behavior.system_instructions.len(), |t| {
                 // An undo holds the thread's active entry.
@@ -895,8 +900,8 @@ impl Engine {
                             .cli_providers
                             .iter()
                             .find(|p| p.instance_id == request.instance_id)
-                            .filter(|p| p.instance_id == t.instance_id)
                             .ok_or("Unknown CLI provider.")?;
+                        switched = p.instance_id != t.instance_id;
                         if !p.enabled {
                             return Err("This provider is disabled.".into());
                         }
@@ -927,6 +932,15 @@ impl Engine {
                         attachments_dir: store.attachments_dir(),
                     }),
                     Provider::Cli(id, bin) => {
+                        if switched {
+                            // Another CLI takes the chat over: it starts its own session and
+                            // receives the conversation so far as text.
+                            store.set_native_session(&a.thread.thread_id, None)?;
+                            store.set_pending_rewind(
+                                &a.thread.thread_id,
+                                Some(&PendingRewind::Replay),
+                            )?;
+                        }
                         let session = store
                             .native_session(&a.thread.thread_id)?
                             .filter(|s| cli::valid_session(s));
@@ -997,6 +1011,7 @@ impl Engine {
                     live,
                     steer_rx: Mutex::new(Some(steer_rx)),
                     notices: Mutex::new(Vec::new()),
+                    switched,
                 };
                 (a, Some(job))
             }
@@ -1110,6 +1125,8 @@ struct Job {
     live: Arc<Mutex<LiveTurn>>,
     /// Steering messages for the turn loop, which takes the receiver once.
     steer_rx: Mutex<Option<UnboundedReceiver<SteerReq>>>,
+    /// The send moved a CLI thread to another CLI.
+    switched: bool,
     /// Notices raised before the stream starts; the first `Acc` of the turn emits them.
     notices: Mutex<Vec<Activity>>,
 }
@@ -5227,6 +5244,106 @@ mod real_cli {
     async fn real_rewind_codex() {
         real_rewind_forgets_the_later_turn("codex", cli::DEFAULT_MODEL, RewindContext::Native)
             .await;
+    }
+
+    /// A chat started with Claude Code moves to Codex, which must know the earlier turn:
+    /// `cargo test -p lomi-chat real_switch -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spends a few tokens of the local Claude Code and Codex accounts"]
+    async fn real_switch_claude_to_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, codex) = (which("claude").unwrap(), which("codex").unwrap());
+        let hooks = Hooks {
+            api_key: Box::new(|_| Ok(None)),
+            threads_changed: Box::new(|_, _| {}),
+            resolve_cli: Box::new(move |cli| {
+                Some(if cli == "codex" {
+                    codex.clone()
+                } else {
+                    claude.clone()
+                })
+            }),
+        };
+        let engine = Engine::new(dir.path().join("data"), hooks);
+        let thread = engine
+            .with(|i| {
+                i.settings.mutate(&i.dir.clone(), None, |s| {
+                    for cli in ["claude", "codex"] {
+                        s.cli_providers.push(CliProvider {
+                            instance_id: cli.into(),
+                            cli: cli.into(),
+                            label: cli.into(),
+                            enabled: true,
+                            models: vec![],
+                        });
+                    }
+                    Ok(())
+                })?;
+                i.store.create(
+                    &ThreadCreate {
+                        operation_id: "c1".into(),
+                        project: dir.path().to_string_lossy().into_owned(),
+                        instance_id: "claude".into(),
+                        model: "haiku".into(),
+                        title: "T".into(),
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        effort: None,
+                        workspace_id: None,
+                        permissions: Permissions::Edit,
+                        workspace: Workspace::default(),
+                    },
+                    "T",
+                    ThreadKind::Cli,
+                )
+            })
+            .unwrap();
+        let turn = |op: &str, revision: u64, cli: &str, model: &str, text: &str| {
+            let engine = engine.clone();
+            let send = ThreadSend {
+                operation_id: op.into(),
+                thread_id: thread.thread_id.clone(),
+                expected_revision: revision,
+                instance_id: cli.into(),
+                model: model.into(),
+                text: text.into(),
+                attachments: vec![],
+            };
+            async move {
+                let (tx, mut rx) = unbounded_channel();
+                engine.send(send, Arc::new(Recorder(tx))).await.unwrap();
+                let (summary, message) = final_of(&mut rx).await;
+                assert_eq!(
+                    message.state,
+                    MessageState::Completed,
+                    "{:?}",
+                    message.error
+                );
+                (summary, message)
+            }
+        };
+        let (s, _) = turn(
+            "w1",
+            thread.revision,
+            "claude",
+            "haiku",
+            "Remember the secret word MANGO. Do not use any tools. Reply with only OK.",
+        )
+        .await;
+        let (s, answer) = turn(
+            "w2",
+            s.revision,
+            "codex",
+            cli::DEFAULT_MODEL,
+            "What is the secret word? Do not use any tools. Reply with only the word.",
+        )
+        .await;
+        assert!(
+            answer.content.to_uppercase().contains("MANGO"),
+            "{}",
+            answer.content
+        );
+        assert_eq!(s.instance_id, "codex");
+        engine.forget_session(&thread.thread_id);
     }
 
     #[tokio::test]
