@@ -758,12 +758,15 @@ fn store_reject_link(path: &std::path::Path) -> Result<(), String> {
     lomi_chat::storage::reject_link(path)
 }
 fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    // Windows has no mode bits; restrict the ACL to the current user instead.
+    #[cfg(windows)]
+    lomi_chat::storage::private(path, false).map_err(std::io::Error::other)?;
+    Ok(file)
 }
 fn prompt_meta(text: &str) -> serde_json::Value {
     serde_json::json!({"promptBytes": text.len(), "promptSha256": format!("{:x}", Sha256::digest(text.as_bytes()))})
