@@ -75,6 +75,7 @@ jobs:
           LOMI_HOST_RELAY_ENDPOINT: ${{ vars.LOMI_HOST_RELAY_ENDPOINT }}
           LOMI_HOST_CLIENT_ID: ${{ vars.LOMI_HOST_CLIENT_ID }}
           LOMI_HOST_REMOTE_WEB_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_WEB_ORIGIN }}
+          LOMI_HOST_RELAY_CONTRACT_HASH: ${{ vars.LOMI_HOST_RELAY_CONTRACT_HASH }}
         run: |
           test -n "$LOMI_UPDATE_ROOT_FILE"
           test -f "$LOMI_UPDATE_ROOT_FILE"
@@ -83,6 +84,7 @@ jobs:
           test -n "$LOMI_HOST_RELAY_ENDPOINT"
           test -n "$LOMI_HOST_CLIENT_ID"
           test -n "$LOMI_HOST_REMOTE_WEB_ORIGIN"
+          test -n "$LOMI_HOST_RELAY_CONTRACT_HASH"
           python3 - "$LOMI_UPDATE_ROOT_FILE" "$EXPECTED_ROOT_SHA256" <<'PY'
           import hashlib, pathlib, sys
           data = pathlib.Path(sys.argv[1]).read_bytes()
@@ -146,6 +148,7 @@ jobs:
           LOMI_HOST_RELAY_ENDPOINT: ${{ vars.LOMI_HOST_RELAY_ENDPOINT }}
           LOMI_HOST_CLIENT_ID: ${{ vars.LOMI_HOST_CLIENT_ID }}
           LOMI_HOST_REMOTE_WEB_ORIGIN: ${{ vars.LOMI_HOST_REMOTE_WEB_ORIGIN }}
+          LOMI_HOST_RELAY_CONTRACT_HASH: ${{ vars.LOMI_HOST_RELAY_CONTRACT_HASH }}
         run: |
           args=(
             --platform "$RELEASE_PLATFORM"

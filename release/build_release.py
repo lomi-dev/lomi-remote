@@ -466,10 +466,13 @@ def public_host_bootstrap_pins() -> dict[str, str]:
         "LOMI_HOST_RELAY_ENDPOINT",
         "LOMI_HOST_CLIENT_ID",
         "LOMI_HOST_REMOTE_WEB_ORIGIN",
+        "LOMI_HOST_RELAY_CONTRACT_HASH",
     )
     pins = {key: os.environ.get(key, "") for key in keys}
     if any(not value for value in pins.values()):
-        fail("release builds require all five public LOMI_HOST_* bootstrap pins")
+        fail("release builds require all six public LOMI_HOST_* bootstrap pins")
+    if not re.fullmatch(r"[0-9a-f]{64}", pins["LOMI_HOST_RELAY_CONTRACT_HASH"]):
+        fail("LOMI_HOST_RELAY_CONTRACT_HASH must be 64 lowercase hex characters")
     identity = require_public_https_origin(
         pins["LOMI_HOST_IDENTITY_ORIGIN"], "LOMI_HOST_IDENTITY_ORIGIN"
     )

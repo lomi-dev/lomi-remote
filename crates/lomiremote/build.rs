@@ -273,6 +273,18 @@ fn main() {
             );
         }
     }
+    println!("cargo:rerun-if-env-changed=LOMI_HOST_RELAY_CONTRACT_HASH");
+    if env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+        let hash = env::var("LOMI_HOST_RELAY_CONTRACT_HASH")
+            .expect("release host requires the relay contract hash pin");
+        assert!(
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "relay contract hash pin must be 64 lowercase hex characters"
+        );
+    }
     for key in KEYS {
         println!("cargo:rerun-if-env-changed={key}");
     }

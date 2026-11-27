@@ -131,9 +131,11 @@ toolchain and platform signing tools installed. The target triple must match
 the runner because release identity is read from the built executable. The
 build requires:
 
-- Five public compile-time pins: `LOMI_HOST_IDENTITY_ORIGIN`,
+- Six public compile-time pins: `LOMI_HOST_IDENTITY_ORIGIN`,
   `LOMI_HOST_REMOTE_API_ORIGIN`, `LOMI_HOST_RELAY_ENDPOINT`,
-  `LOMI_HOST_CLIENT_ID` and `LOMI_HOST_REMOTE_WEB_ORIGIN`. The independently
+  `LOMI_HOST_CLIENT_ID`, `LOMI_HOST_REMOTE_WEB_ORIGIN` and
+  `LOMI_HOST_RELAY_CONTRACT_HASH` (64 lowercase hex, equal to the relay's
+  `REMOTE_RELAY_CONTRACT_HASH`; the Host uplink is the only way it publishes). The independently
   configured HTTPS Web origin is used only to construct a workspace link with
   public IDs; it is never inferred from identity/API/relay responses.
 - An offline, operator supplied **public** TUF root file and its independently
