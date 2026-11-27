@@ -76,6 +76,9 @@ fn cadence_peer_deferral_request(
     }
     Some(request_started)
 }
+/// A block is re-evaluated from a fresh Cloud GET; every retry runs the same
+/// checks, so retrying never admits what the checks reject.
+const BLOCKED_RETRY: Duration = Duration::from_secs(5);
 #[derive(Default)]
 enum Action {
     #[default]
@@ -89,6 +92,8 @@ pub(super) struct Worker {
     transport: Option<DataTransport>,
     scope: Option<CloudRuntimeScope>,
     action: Action,
+    /// When a blocked worker may re-read the runtime (see `BLOCKED_RETRY`).
+    blocked_until: Option<Instant>,
     claim: Option<CloudClaimAdmission>,
     awaiting_claim_get: bool,
     unit_pending: bool,
@@ -170,6 +175,16 @@ impl Worker {
     }
     pub(super) fn take_rejected_fresh_runtime_read(&mut self) -> bool {
         std::mem::take(&mut self.fresh_runtime_read_rejected)
+    }
+    /// Leaves `Blocked` for a fresh GET once the backoff elapsed.
+    fn leave_blocked_if_due(&mut self, now: Instant) -> bool {
+        let due = matches!(self.action, Action::Blocked)
+            && self.blocked_until.is_none_or(|until| now >= until);
+        if due {
+            self.action = Action::Get;
+            self.blocked_until = None;
+        }
+        due
     }
     pub(super) fn is_blocked(&self) -> bool {
         matches!(&self.action, Action::Blocked)
@@ -359,6 +374,7 @@ impl Worker {
             let origin = RemoteApiOrigin::new(config, snapshot.scope.remote_api_origin.clone())?;
             self.transport = Some(runtime.public_io.data_transport(origin)?);
         }
+        self.leave_blocked_if_due(Instant::now());
         match self.action {
             Action::Blocked => {
                 self.clear_observations();
@@ -386,7 +402,7 @@ impl Worker {
                         Err(CloudGetError::Domain(DomainError::Busy)) => runtime.busy()?,
                         Err(error) => {
                             if matches!(turn.take_decision(), Some(CloudGetDecision::Blocked)) {
-                                return self.block();
+                                return Ok(self.block());
                             }
                             return Err(cloud_error(error));
                         }
@@ -394,7 +410,7 @@ impl Worker {
                 }
                 self.awaiting_claim_get = false;
                 match turn.take_decision().ok_or(StepError::Stale)? {
-                    CloudGetDecision::Blocked => self.block(),
+                    CloudGetDecision::Blocked => Ok(self.block()),
                     CloudGetDecision::Claim(expected_generation) => {
                         if self.fresh_runtime_read_pending {
                             self.fresh_runtime_read_pending = false;
@@ -537,7 +553,7 @@ impl Worker {
                     drop(attempt);
                     match outcome {
                         Err(StepError::Http(lomi_host_http::Error::InvalidResponse)) => {
-                            return self.block();
+                            return Ok(self.block());
                         }
                         Err(
                             error @ StepError::Http(lomi_host_http::Error::DataRemote(
@@ -614,7 +630,7 @@ impl Worker {
                     match outcome {
                         Err(StepError::Http(lomi_host_http::Error::InvalidResponse)) => {
                             drop(attempt);
-                            return self.block();
+                            return Ok(self.block());
                         }
                         Err(error) => return Err(error),
                         Ok(()) => {}
@@ -688,7 +704,7 @@ impl Worker {
             attempt.finish_heartbeat_only().map_err(publication_error)
         })();
         match outcome {
-            Err(StepError::Http(lomi_host_http::Error::InvalidResponse)) => self.block(),
+            Err(StepError::Http(lomi_host_http::Error::InvalidResponse)) => Ok(self.block()),
             Err(error) => {
                 self.invalidate_heartbeat_state();
                 Err(error)
@@ -801,15 +817,17 @@ impl Worker {
         self.fresh_runtime_scope = None;
         Ok(StepOutcome::PeerEligible(eligibility))
     }
-    fn block<T>(&mut self) -> Result<T, StepError> {
+    /// Not an HTTP error: a block is a local verdict, not a network outage.
+    fn block(&mut self) -> StepOutcome {
         self.action = Action::Blocked;
+        self.blocked_until = Instant::now().checked_add(BLOCKED_RETRY);
         self.claim = None;
         self.awaiting_claim_get = false;
         self.unit_pending = false;
         self.fresh_runtime_read_pending = false;
         self.fresh_runtime_scope = None;
         self.clear_observations();
-        Err(lomi_host_http::Error::InvalidResponse.into())
+        StepOutcome::Deferred
     }
 }
 
@@ -1992,6 +2010,13 @@ mod tests {
         assert!(worker.is_blocked());
         worker.finish_operation();
         assert!(worker.is_blocked());
+        // Stuck state recovers: no retry before the backoff, a fresh GET after it.
+        worker.blocked_until = Some(Instant::now() + BLOCKED_RETRY);
+        assert!(!worker.leave_blocked_if_due(Instant::now()));
+        assert!(worker.is_blocked());
+        assert!(worker.leave_blocked_if_due(Instant::now() + BLOCKED_RETRY));
+        assert!(matches!(&worker.action, Action::Get));
+        worker.action = Action::Blocked;
 
         worker = Worker::default();
         worker.action = Action::Claim(DecimalU64(4));

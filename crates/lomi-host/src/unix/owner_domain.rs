@@ -1417,6 +1417,9 @@ impl<'d, 'o> WriterGuard<'_, 'd, 'o> {
         });
         let mut current = plan.previous().cloned();
         let mut blocked = plan.provider_invalid();
+        if blocked {
+            eprintln!("lomi-host: cloud runtime blocked: provider rejected runtime observation");
+        }
         if !blocked {
             if let Some(old) = plan.previous() {
                 if old.scope != *plan.scope() || own != Some(&old.server_runtime) {
@@ -1463,9 +1466,17 @@ impl<'d, 'o> WriterGuard<'_, 'd, 'o> {
                             post,
                         )?);
                     } else if snapshot.publication_seq != intent.params.expected_publication_seq {
+                        eprintln!(
+                            "lomi-host: cloud runtime blocked: server publication_seq {} matches neither the pending intent nor its expected value",
+                            snapshot.publication_seq.0
+                        );
                         blocked = true;
                     }
                 } else if snapshot.publication_seq != old.acknowledged_publication_seq {
+                    eprintln!(
+                        "lomi-host: cloud runtime blocked: server publication_seq {} differs from acknowledged {}",
+                        snapshot.publication_seq.0, old.acknowledged_publication_seq.0
+                    );
                     blocked = true;
                 }
             }
@@ -1474,6 +1485,10 @@ impl<'d, 'o> WriterGuard<'_, 'd, 'o> {
                 && current.is_none()
             {
                 if snapshot.publication_seq.0 != 0 {
+                    eprintln!(
+                        "lomi-host: cloud runtime blocked: unbound runtime has server publication_seq {}",
+                        snapshot.publication_seq.0
+                    );
                     blocked = true;
                 } else {
                     self.check_cloud_pre_effect_advanced(&scope)

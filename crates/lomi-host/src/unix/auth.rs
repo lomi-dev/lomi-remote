@@ -4455,6 +4455,13 @@ fn run_with_apis_inner(
                             ingress.discard();
                             return Ok(false);
                         }
+                        // A blocked worker serves no peer: drop sockets nobody reads,
+                        // else a hung-up relay socket makes poll(2) return at once.
+                        if cloud.is_blocked() {
+                            publication_barrier.reset();
+                            ingress.discard();
+                            return Ok(false);
+                        }
                         let outcome_kind = match &outcome {
                             cloud::StepOutcome::Network => CloudOutcomeKind::Network,
                             cloud::StepOutcome::Deferred => CloudOutcomeKind::Deferred,
