@@ -13,6 +13,7 @@ const check = process.argv.includes('--check');
 const contractSource = join(root, 'packages/remote-contracts');
 const codecSource = join(root, 'packages/protocol-codec-wasm');
 const authoritySource = join(root, 'packages/authority-crypto-wasm');
+const coreWasmSource = join(root, 'packages/remote-core-wasm');
 const rendererSource = join(root, 'packages/terminal-renderer');
 async function contractRuntimeFiles() {
   const generated = join(contractSource, 'generated');
@@ -76,6 +77,16 @@ const snapshots = [
       'src/index.mjs', 'src/index.d.ts',
       'generated/authority_crypto.js', 'generated/authority_crypto_bg.wasm',
       'generated/authority_crypto_bg.wasm.d.ts',
+    ],
+  },
+  {
+    // The shared Rust client core for the browser worker (P2.17).
+    source: coreWasmSource,
+    destination: join(web, 'packages/remote-core-wasm'),
+    files: async () => [
+      'src/index.mjs', 'src/index.d.ts',
+      'generated/remote_core.js', 'generated/remote_core.d.ts',
+      'generated/remote_core_bg.wasm', 'generated/remote_core_bg.wasm.d.ts',
     ],
   },
 ];

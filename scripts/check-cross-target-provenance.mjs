@@ -43,7 +43,7 @@ assertAdapted('mobile crypto vendor', cryptoSource, cryptoMobile, cryptoDiffs, c
 assertAdapted('mobile protocol vendor', protocolSource, protocolMobile, protocolDiffs);
 
 const webPackages = {};
-for (const name of ['remote-contracts', 'protocol-codec-wasm', 'authority-crypto-wasm', 'terminal-renderer']) {
+for (const name of ['remote-contracts', 'protocol-codec-wasm', 'authority-crypto-wasm', 'terminal-renderer', 'remote-core-wasm']) {
   const path = `packages/${name}`;
   const canonical = await tree(root, path);
   const snapshot = await tree(web, path);

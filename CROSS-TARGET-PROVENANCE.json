@@ -473,6 +473,31 @@
           "src/stream-assembler.ts": "d3fea96d36c9eaabdf9f60315ef34a184d06a412752056cd0682c962cf427c31",
           "src/workspace-stream.ts": "f361cd6d4c13dcbb839fb1404ace1f4872e6849b3ef32dee588749e808182729"
         }
+      },
+      "remote-core-wasm": {
+        "canonical": {
+          "README.md": "2cc409e5ea89aeaf139b167dff8f94d3c29215ba44f339623e6197b1ce512ff7",
+          "generated/provenance.json": "0a4efa6a9aba955a745157a203450fbcf350bf8e58f42b15995f7fd95363adc0",
+          "generated/remote_core.d.ts": "b19da30497d6555292aedef76656e97e39de751cece2fc3e5ee23e409001e201",
+          "generated/remote_core.js": "15f1811c9c50ac1cbf1f5083789287429dd4f216753e15f4747c8ffdf15a9b48",
+          "generated/remote_core_bg.wasm": "dcec23fb59189f8e139238420caf8dbde9fb001e73e4b0a6ac89e0717c143e74",
+          "generated/remote_core_bg.wasm.d.ts": "f9ec41a52c71d925ffd17dfc0753532e49958d72d04a440aaa221ae6c1be5ce5",
+          "package.json": "b9b621564ea100c46939361182edb8f2c5cd906e9aea5db097f59c33a4378a35",
+          "scripts/build.mjs": "e2cc5f63fc0403ceffc5ed25e2a7c62f14c8345fa68654408ddf07f9c1249bad",
+          "src/index.d.ts": "1e1c9c3e8077de2fc21035786d28295773c272d98fced92b4e789407712f5dab",
+          "src/index.mjs": "b15ba8fadaf014851f2ae3158d4f1d5ff37db45b3bf78388afaf672a6933aa72",
+          "test/vectors.test.mjs": "573a2c5f37ce3fe6d3f3cb9644fd3e635aa0e8bf8ac533671a8a5af7b1f597a9"
+        },
+        "snapshot": {
+          "generated/remote_core.d.ts": "b19da30497d6555292aedef76656e97e39de751cece2fc3e5ee23e409001e201",
+          "generated/remote_core.js": "15f1811c9c50ac1cbf1f5083789287429dd4f216753e15f4747c8ffdf15a9b48",
+          "generated/remote_core_bg.wasm": "dcec23fb59189f8e139238420caf8dbde9fb001e73e4b0a6ac89e0717c143e74",
+          "generated/remote_core_bg.wasm.d.ts": "f9ec41a52c71d925ffd17dfc0753532e49958d72d04a440aaa221ae6c1be5ce5",
+          "package.json": "0c21ca9606c9333c8430a1aa5b3738d4b7a870fdaff50d912143a87fc4b22fde",
+          "snapshot-manifest.json": "3bccb947f9adc5805c87848f99d4df1ba4cdec2c1beb3913430e40d24a8caac1",
+          "src/index.d.ts": "1e1c9c3e8077de2fc21035786d28295773c272d98fced92b4e789407712f5dab",
+          "src/index.mjs": "b15ba8fadaf014851f2ae3158d4f1d5ff37db45b3bf78388afaf672a6933aa72"
+        }
       }
     },
     "mobileCryptoVendor": {
