@@ -150,6 +150,21 @@ impl BudgetDataTransport<'_> {
             bound.runtime_get(host, access)
         })
     }
+    pub fn runtime_get_cached(
+        &self,
+        host: HostId,
+        access: &HostAccessCredential,
+    ) -> Result<HostRuntimeGetResult> {
+        budget::run(self.deadline, self.check, |state| {
+            let bound = DataTransport {
+                agent: self.inner.pooled.clone(),
+                pooled: self.inner.pooled.clone(),
+                budget: Some(state),
+                origin: RemoteApiOrigin(self.inner.origin.0.clone()),
+            };
+            bound.runtime_get_cached(host, access)
+        })
+    }
     pub fn runtime_claim(
         &self,
         host: HostId,

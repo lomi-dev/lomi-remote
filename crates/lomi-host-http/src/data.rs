@@ -177,9 +177,6 @@ impl DataTransport {
         host: HostId,
         access: &HostAccessCredential,
     ) -> Result<HostRuntimeGetResult> {
-        if let Some(result) = crate::uplink::runtime_get(host) {
-            return Ok(result);
-        }
         let result: HostRuntimeGetResult = self.data_get(
             &format!("/v2/remote/hosts/{}/runtime", String::from(host)),
             access,
@@ -188,6 +185,17 @@ impl DataTransport {
         )?;
         crate::uplink::note_runtime_get(&result);
         Ok(result)
+    }
+    /// The one periodic read the actor may serve from the uplink (see `uplink::allow_cached_runtime_read`).
+    pub fn runtime_get_cached(
+        &self,
+        host: HostId,
+        access: &HostAccessCredential,
+    ) -> Result<HostRuntimeGetResult> {
+        if let Some(result) = crate::uplink::runtime_get_cached(host) {
+            return Ok(result);
+        }
+        self.runtime_get(host, access)
     }
     pub fn runtime_claim(
         &self,
@@ -215,7 +223,8 @@ impl DataTransport {
         if let Some(result) = crate::uplink::heartbeat(host, &request.runtime, access) {
             return Ok(result);
         }
-        let result = self.data_mutate(
+        let started = std::time::Instant::now();
+        let result: Result<HeartbeatResult> = self.data_mutate(
             "POST",
             &format!("/v2/remote/hosts/{}/heartbeat", String::from(host)),
             request,
@@ -224,8 +233,8 @@ impl DataTransport {
             RESPONSE_LIMIT,
             Scope::Runtime,
         );
-        if result.is_ok() {
-            crate::uplink::note_http_heartbeat();
+        if let Ok(r) = &result {
+            crate::uplink::note_http_heartbeat(started, r.lease_ms.0);
         }
         result
     }
@@ -235,10 +244,12 @@ impl DataTransport {
         request: &PublicationParams,
         access: &HostAccessCredential,
     ) -> Result<PublicationResult> {
-        if let Some(result) = crate::uplink::publication(host, request, self.budget.as_deref()) {
+        if let Some(result) =
+            crate::uplink::publication(host, request, access, self.budget.as_deref())
+        {
             return result;
         }
-        self.data_mutate(
+        let result = self.data_mutate(
             "PUT",
             &format!("/v2/remote/hosts/{}/publication", String::from(host)),
             request,
@@ -246,7 +257,10 @@ impl DataTransport {
             LARGE,
             RESPONSE_LIMIT,
             Scope::Runtime,
-        )
+        );
+        // Success or not, the server's sequence moved or may have: the link's copy is stale.
+        crate::uplink::note_http_publication();
+        result
     }
     /// Pending reads may commit tombstones. A failed GET does not imply no effect.
     pub fn pairing_pending(

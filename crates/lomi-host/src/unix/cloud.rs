@@ -160,6 +160,7 @@ impl Worker {
             return false;
         }
         self.clear_observations();
+        lomi_host_http::uplink::forbid_cached_runtime_read();
         self.action = Action::Get;
         self.unit_pending = true;
         self.fresh_runtime_read_pending = true;
@@ -547,6 +548,7 @@ impl Worker {
                             // not retry it from the current observation; reconcile
                             // the committed cursor and state with a fresh GET.
                             self.action = Action::Get;
+                            lomi_host_http::uplink::forbid_cached_runtime_read();
                             return Err(error);
                         }
                         Err(error) => return Err(error),
@@ -698,6 +700,7 @@ impl Worker {
         }
     }
     fn invalidate_heartbeat_state(&mut self) {
+        lomi_host_http::uplink::forbid_cached_runtime_read();
         self.normal_publication_origin = None;
         self.heartbeat_observation = None;
         self.heartbeat_deferral_attempt = None;

@@ -2563,7 +2563,9 @@ fn configured_cloud_get_send(
     let check = || budget.check();
     transport
         .with_budget(budget.deadline(), &check)
-        .runtime_get(request.host, &request.access)
+        // Only the worker-unit rotation read may be answered by the uplink; the
+        // actor grants that per rotation (`uplink::allow_cached_runtime_read`).
+        .runtime_get_cached(request.host, &request.access)
 }
 // END ORIGINAL OPERATION CONFIGURED HTTP BINDING
 
@@ -3155,8 +3157,11 @@ impl<S: lomi_platform::secrets::SecretStorage + ?Sized>
                 self.attempt.auth.accept_rotation(response, floor).inspect(|()| {
                     // P2.15: hand the new access token to the uplink (token.update on the
                     // live link; a no-op while the uplink is off).
-                    if let Ok(access) = self.attempt.auth.access_credential(floor) {
-                        lomi_host_http::uplink::offer_token(&access);
+                    if let (Ok(access), Ok(identity)) = (
+                        self.attempt.auth.access_credential(floor),
+                        self.attempt.auth.public_host_identity(floor),
+                    ) {
+                        lomi_host_http::uplink::offer_token(identity.host_id, &access);
                     }
                 })
             }

@@ -30,6 +30,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+// Development switch: debug builds only until a proper configuration field exists.
+#[cfg(debug_assertions)]
 const ENV: &str = "LOMI_REMOTE_UPLINK";
 /// The link lives only while the actor keeps calling heartbeat.
 const OFFER_TTL: Duration = Duration::from_secs(10);
@@ -37,9 +39,13 @@ const OFFER_TTL: Duration = Duration::from_secs(10);
 /// grants stays inside the 8 s the plan allows between relay confirmation and use.
 const FRESH_MAX_AGE: Duration = Duration::from_secs(3);
 const FRESHNESS_MS: u64 = 5_000;
-/// Lease a synthesized heartbeat grants. The relay renews the 30 s lease at most
-/// every 15 s (`REMOTE_RELAY_PRESENCE_WRITE_MS` upper bound), so 15 s is always true.
-const LEASE_MS: u64 = 15_000;
+/// A synthesized heartbeat needs at least this much confirmed server lease left (the heartbeat
+/// DTO requires `freshness_ms <= lease_ms`); below it the heartbeat goes to HTTP.
+const MIN_LEASE_MS: u64 = FRESHNESS_MS;
+/// No `authority.fresh` for this long: the link is half-open, close and reconnect.
+const HALF_OPEN: Duration = Duration::from_secs(15);
+/// A cached runtime read is only granted this long after the actor's rotation point.
+const CACHED_READ_TTL: Duration = Duration::from_secs(2);
 /// How long after the last peer-scope HTTP call or wake hint heartbeats stay on HTTP.
 const PEER_ACTIVE: Duration = Duration::from_secs(30);
 /// A peer read needs an HTTP heartbeat this recent (the server's freshness is 5 s).
@@ -90,6 +96,9 @@ struct Desired {
 struct Live {
     binding: Binding,
     last_fresh: Instant,
+    /// Server lease as the relay last confirmed it (READY `leaseMs`, then `leaseRemainingMs` of
+    /// `authority.fresh`, or a real HTTP heartbeat). Never extended locally.
+    lease_until: Instant,
     /// The relay holds the token the actor currently has (no token.update pending).
     token_current: bool,
     /// Publication sequence the server holds, as far as this link knows: from READY,
@@ -98,6 +107,11 @@ struct Live {
     publication_seq: Option<u64>,
 }
 impl Live {
+    /// Confirmed lease left, if enough for a synthesized heartbeat.
+    fn lease_ms(&self, now: Instant) -> Option<u64> {
+        let ms = u64::try_from(self.lease_until.saturating_duration_since(now).as_millis()).ok()?;
+        (ms >= MIN_LEASE_MS).then_some(ms.min(30_000))
+    }
     fn usable(&self, binding: &Binding, now: Instant) -> bool {
         &self.binding == binding && now.saturating_duration_since(self.last_fresh) <= FRESH_MAX_AGE
     }
@@ -115,6 +129,10 @@ struct State {
     /// write leaves gaps), so heartbeats stay on HTTP while peers are active (until P3).
     peer_until: Option<Instant>,
     http_heartbeat_at: Option<Instant>,
+    /// The actor's worker-unit rotation read may be served from the link until here.
+    cached_read_until: Option<Instant>,
+    /// Bumped by `link_reset` (system sleep): a running link older than this is closed.
+    reset_gen: u64,
     thread: bool,
 }
 impl State {
@@ -129,6 +147,7 @@ struct Shared {
     wake: Wake,
 }
 
+#[cfg_attr(not(debug_assertions), allow(dead_code))] // release builds never create it
 impl Shared {
     fn new(contract_hash: String) -> Self {
         Self {
@@ -144,12 +163,18 @@ static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
 fn shared() -> Option<&'static Shared> {
     SHARED
         .get_or_init(|| {
+            #[cfg(not(debug_assertions))]
+            return None;
+            #[cfg(debug_assertions)]
             let hash = std::env::var(ENV).ok()?;
-            let ok = hash.len() == 64
-                && hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-            ok.then(|| Shared::new(hash))
+            #[cfg(debug_assertions)]
+            {
+                let ok = hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                ok.then(|| Shared::new(hash))
+            }
         })
         .as_ref()
 }
@@ -171,10 +196,15 @@ pub fn set_endpoint(endpoint: &LocalRelayEndpoint) {
 /// Actor-side token hand-off (P2.15): called right after a rotation is durably
 /// accepted. The uplink sends `token.update` on the live link without closing it.
 /// The binding is kept; the next heartbeat call refreshes it anyway.
-pub fn offer_token(token: &HostAccessCredential) {
-    let Some(sh) = shared() else { return };
+pub fn offer_token(host: HostId, token: &HostAccessCredential) {
+    if let Some(sh) = shared() {
+        offer_token_on(sh, host, token);
+    }
+}
+fn offer_token_on(sh: &Shared, host: HostId, token: &HostAccessCredential) {
     let mut st = lock(&sh.state);
     if let Some(d) = st.desired.as_mut()
+        && d.binding.host == String::from(host)
         && d.token.as_str() != token.expose_wire()
     {
         d.token = Zeroizing::new(token.expose_wire().to_owned());
@@ -251,20 +281,54 @@ fn heartbeat_on(
     let binding = Binding::new(host, runtime);
     let st = lock(&sh.state);
     let live = st.live.as_ref()?;
-    (live.usable(&binding, Instant::now()) && !st.peer_active(Instant::now())).then(|| {
-        HeartbeatResult {
-            runtime: runtime.clone(),
-            lease_ms: DecimalU64(LEASE_MS),
-            freshness_ms: DecimalU64(FRESHNESS_MS),
-        }
+    let now = Instant::now();
+    if !live.usable(&binding, now) || st.peer_active(now) {
+        return None;
+    }
+    Some(HeartbeatResult {
+        runtime: runtime.clone(),
+        lease_ms: DecimalU64(live.lease_ms(now)?),
+        freshness_ms: DecimalU64(FRESHNESS_MS),
     })
 }
 
-/// The periodic runtime read (the actor re-reads when a worker unit rotates, every
-/// ~15 s) answered from the link, or `None` for HTTP. Only for the binding the actor
-/// last used, a fresh link and a publication sequence this link has not lost track of.
-pub(crate) fn runtime_get(host: HostId) -> Option<HostRuntimeGetResult> {
-    runtime_get_on(shared()?, host)
+/// The actor's worker-unit rotation (every ~15 s, even idle) is about to re-read the runtime:
+/// that one read may be answered from the link. Every other runtime read stays HTTP.
+pub fn allow_cached_runtime_read() {
+    if let Some(sh) = shared() {
+        lock(&sh.state).cached_read_until = Some(Instant::now() + CACHED_READ_TTL);
+    }
+}
+/// A reconciliation (fresh read demanded, unknown outcome) needs the server's answer.
+pub fn forbid_cached_runtime_read() {
+    if let Some(sh) = shared() {
+        lock(&sh.state).cached_read_until = None;
+    }
+}
+/// The system slept (`Instant` does not count it): drop the link and its freshness at once, so
+/// the first heartbeat after wake goes to HTTP and the thread reconnects.
+pub fn link_reset() {
+    if let Some(sh) = shared() {
+        let mut st = lock(&sh.state);
+        st.reset_gen += 1;
+        st.live = None;
+        st.cached_read_until = None;
+        drop(st);
+        sh.wake.wake();
+    }
+}
+/// One-shot: consumed by the read that asks, whatever the answer.
+pub(crate) fn runtime_get_cached(host: HostId) -> Option<HostRuntimeGetResult> {
+    let sh = shared()?;
+    let granted = lock(&sh.state)
+        .cached_read_until
+        .take()
+        .is_some_and(|until| Instant::now() < until);
+    if granted {
+        runtime_get_on(sh, host)
+    } else {
+        None
+    }
 }
 fn runtime_get_on(sh: &Shared, host: HostId) -> Option<HostRuntimeGetResult> {
     let st = lock(&sh.state);
@@ -283,7 +347,7 @@ fn runtime_get_on(sh: &Shared, host: HostId) -> Option<HostRuntimeGetResult> {
         runtime_generation: DecimalU64(live.binding.generation),
         runtime: Some(live.binding.runtime()?),
         publication_seq: DecimalU64(live.publication_seq?),
-        lease_ms: DecimalU64(LEASE_MS),
+        lease_ms: DecimalU64(live.lease_ms(Instant::now())?),
         freshness_ms: DecimalU64(FRESHNESS_MS),
     })
 }
@@ -351,9 +415,23 @@ pub(crate) fn note_peer_http() {
     }
 }
 /// A heartbeat that really went to the server.
-pub(crate) fn note_http_heartbeat() {
+pub(crate) fn note_http_heartbeat(started: Instant, lease_ms: u64) {
     if let Some(sh) = shared() {
-        lock(&sh.state).http_heartbeat_at = Some(Instant::now());
+        let mut st = lock(&sh.state);
+        st.http_heartbeat_at = Some(Instant::now());
+        if let Some(live) = st.live.as_mut() {
+            live.lease_until = live
+                .lease_until
+                .max(started + Duration::from_millis(lease_ms));
+        }
+    }
+}
+/// A publication went over HTTP while a link exists: the server's sequence moved (or may have).
+pub(crate) fn note_http_publication() {
+    if let Some(sh) = shared()
+        && let Some(live) = lock(&sh.state).live.as_mut()
+    {
+        live.publication_seq = None;
     }
 }
 /// After a `Gate::Fetch` read: keep reading until the server says empty, so a
@@ -369,14 +447,32 @@ pub(crate) fn pending_done(kind: Pending, empty_ok: bool) {
 pub(crate) fn publication(
     host: HostId,
     params: &PublicationParams,
+    access: &HostAccessCredential,
     budget_state: Option<&budget::State>,
 ) -> Option<Result<PublicationResult>> {
-    publication_on(shared()?, host, params, budget_state)
+    publication_on(shared()?, host, params, access, budget_state)
 }
 fn publication_on(
     sh: &Shared,
     host: HostId,
     params: &PublicationParams,
+    access: &HostAccessCredential,
+    budget_state: Option<&budget::State>,
+) -> Option<Result<PublicationResult>> {
+    let outcome = publication_job(sh, host, params, access, budget_state)?;
+    if outcome.is_err()
+        && let Some(live) = lock(&sh.state).live.as_mut()
+    {
+        // Any non-Ok result may or may not have moved the server's sequence.
+        live.publication_seq = None;
+    }
+    Some(outcome)
+}
+fn publication_job(
+    sh: &Shared,
+    host: HostId,
+    params: &PublicationParams,
+    access: &HostAccessCredential,
     budget_state: Option<&budget::State>,
 ) -> Option<Result<PublicationResult>> {
     let binding = Binding::new(host, &params.runtime);
@@ -394,8 +490,13 @@ fn publication_on(
     {
         let mut st = lock(&sh.state);
         let live = st.live.as_ref()?;
-        // A pending token.update means the relay would still check the old token hash.
-        if !live.usable(&binding, Instant::now()) || !live.token_current {
+        // A pending token.update means the relay would still check the old token hash; a call
+        // with another token than the one the link holds is not the actor's current one.
+        let same_token = st
+            .desired
+            .as_ref()
+            .is_some_and(|d| d.token.as_str() == access.expose_wire());
+        if !live.usable(&binding, Instant::now()) || !live.token_current || !same_token {
             return None;
         }
         st.jobs.push_back(job.clone());
@@ -477,9 +578,17 @@ impl Job {
             }
         )
     }
-    fn mark_final_sent(&self) {
-        if let JobOut::Pending { final_sent, .. } = &mut *lock(&self.out) {
-            *final_sent = true;
+    /// Atomic with `abandon`: false (and nothing marked) if the caller already gave up.
+    fn mark_final_sent(&self) -> bool {
+        match &mut *lock(&self.out) {
+            JobOut::Pending {
+                final_sent,
+                abandoned: false,
+            } => {
+                *final_sent = true;
+                true
+            }
+            _ => false,
         }
     }
     fn final_sent(&self) -> bool {
@@ -580,9 +689,10 @@ enum Refusal {
     Invalid,
 }
 struct Ready {
+    lease_ms: u64,
     publication_seq: u64,
 }
-fn auth_frame(contract_hash: &str, token: &str, binding: &Binding) -> Option<Vec<u8>> {
+fn auth_frame(contract_hash: &str, token: &str, binding: &Binding) -> Option<Zeroizing<Vec<u8>>> {
     let frame = Frame::Auth {
         role: Role::Host,
         token: token.to_owned(),
@@ -595,7 +705,9 @@ fn auth_frame(contract_hash: &str, token: &str, binding: &Binding) -> Option<Vec
             expected_generation: binding.generation.checked_sub(1)?.to_string(),
         }),
     };
-    encode_frame(&frame, MAX_FRAME_BYTES).ok()
+    encode_frame(&frame, MAX_FRAME_BYTES)
+        .ok()
+        .map(Zeroizing::new)
 }
 fn parse_ready(bytes: &[u8], binding: &Binding) -> std::result::Result<Ready, Refusal> {
     match decode_frame(bytes, Direction::Relay, MAX_FRAME_BYTES).map_err(|_| Refusal::Invalid)? {
@@ -617,9 +729,10 @@ fn parse_ready(bytes: &[u8], binding: &Binding) -> std::result::Result<Ready, Re
             // `leaseMs` is the remaining lease as a decimal string.
             let lease = text(&state, "leaseMs").and_then(|s| s.parse::<u64>().ok());
             match (same, lease, seq) {
-                (true, Some(lease_ms), Some(publication_seq)) if lease_ms > 0 => {
-                    Ok(Ready { publication_seq })
-                }
+                (true, Some(lease_ms), Some(publication_seq)) if lease_ms > 0 => Ok(Ready {
+                    lease_ms,
+                    publication_seq,
+                }),
                 _ => Err(Refusal::Invalid),
             }
         }
@@ -665,7 +778,8 @@ struct Session {
     job: Option<(Arc<Job>, usize)>,
 }
 enum Effect {
-    Fresh,
+    /// `authority.fresh`, with the relay-confirmed server lease left (ms) if it carried one.
+    Fresh(Option<u64>),
     Wake(Pending),
     TokenAcked,
     /// The server's publication sequence after our publication: known, or lost track of.
@@ -732,10 +846,11 @@ impl Session {
         let args = job.chunks.get(*index)?.clone();
         let last = *index + 1 == job.chunks.len();
         let job = job.clone();
-        let (call_id, bytes) = self.call("publication.put", args)?;
-        if last {
-            job.mark_final_sent();
+        if last && !job.mark_final_sent() {
+            self.job = None; // abandoned between the check above and now: nothing goes out
+            return self.next_send(token, binding, queue);
         }
+        let (call_id, bytes) = self.call("publication.put", args)?;
         self.inflight = Some(Inflight::Chunk {
             call_id,
             sent: Instant::now(),
@@ -744,8 +859,12 @@ impl Session {
     }
     fn on_frame(&mut self, frame: Frame) -> Vec<Effect> {
         match frame {
-            Frame::Event { name, .. } => match name.as_str() {
-                "authority.fresh" => vec![Effect::Fresh],
+            Frame::Event { name, data } => match name.as_str() {
+                "authority.fresh" => vec![Effect::Fresh(
+                    data.get("leaseRemainingMs")
+                        .and_then(Value::as_str)
+                        .and_then(|s| s.parse().ok()),
+                )],
                 "channel.pending" => vec![Effect::Wake(Pending::Channels)],
                 "pairing.pending" => vec![Effect::Wake(Pending::Pairings)],
                 "host.revoked" => vec![Effect::Close],
@@ -842,10 +961,15 @@ fn run(sh: &'static Shared) {
         let (endpoint, desired_binding) = {
             let mut st = lock(&sh.state);
             loop {
-                let ready = st
+                // An actor that stopped calling (pause, logout) leaves no token behind.
+                if st
                     .desired
                     .as_ref()
-                    .is_some_and(|d| d.offered_at.elapsed() < OFFER_TTL);
+                    .is_some_and(|d| d.offered_at.elapsed() >= OFFER_TTL)
+                {
+                    st.desired = None;
+                }
+                let ready = st.desired.is_some();
                 match (&st.endpoint, ready) {
                     (Some(endpoint), true) => {
                         break (
@@ -865,6 +989,13 @@ fn run(sh: &'static Shared) {
         {
             let mut st = lock(&sh.state);
             st.live = None;
+            if st
+                .desired
+                .as_ref()
+                .is_some_and(|d| d.offered_at.elapsed() >= OFFER_TTL)
+            {
+                st.desired = None;
+            }
         }
         failures = if reached_ready && started.elapsed() > Duration::from_secs(10) {
             0
@@ -891,9 +1022,12 @@ fn connect_and_drive(
     binding: &Binding,
 ) -> bool {
     let check = || -> std::result::Result<(), BudgetStop> { Ok(()) };
-    let token = match lock(&sh.state).desired.as_ref() {
-        Some(d) if &d.binding == binding => d.token.clone(),
-        _ => return false,
+    let (token, generation) = {
+        let st = lock(&sh.state);
+        match st.desired.as_ref() {
+            Some(d) if &d.binding == binding => (d.token.clone(), st.reset_gen),
+            _ => return false,
+        }
     };
     let Ok(transport) = RelayTransport::new(endpoint.clone()) else {
         return false;
@@ -927,6 +1061,10 @@ fn connect_and_drive(
     let now = Instant::now();
     {
         let mut st = lock(&sh.state);
+        if st.reset_gen != generation {
+            conn.close();
+            return false; // the system slept while connecting
+        }
         let current = st
             .desired
             .as_ref()
@@ -934,6 +1072,7 @@ fn connect_and_drive(
         st.live = Some(Live {
             binding: binding.clone(),
             last_fresh: now,
+            lease_until: now + Duration::from_millis(ready.lease_ms),
             token_current: current,
             publication_seq: Some(ready.publication_seq),
         });
@@ -941,7 +1080,7 @@ fn connect_and_drive(
         st.fetch = [true, true];
     }
     let mut session = Session::new(token);
-    let _ = drive(sh, &mut conn, &mut session, binding);
+    let _ = drive(sh, &mut conn, &mut session, binding, generation);
     conn.close();
     let mut st = lock(&sh.state);
     st.live = None;
@@ -954,6 +1093,7 @@ fn drive(
     conn: &mut RelayConnection,
     session: &mut Session,
     binding: &Binding,
+    generation: u64,
 ) -> Result<()> {
     let check = || -> std::result::Result<(), BudgetStop> { Ok(()) };
     loop {
@@ -966,9 +1106,13 @@ fn drive(
                 let mut st = lock(&sh.state);
                 match effect {
                     Effect::Close => return Err(Error::RelayClosed),
-                    Effect::Fresh => {
+                    Effect::Fresh(lease_left) => {
                         if let Some(live) = st.live.as_mut() {
-                            live.last_fresh = Instant::now();
+                            let now = Instant::now();
+                            live.last_fresh = now;
+                            if let Some(ms) = lease_left {
+                                live.lease_until = now + Duration::from_millis(ms);
+                            }
                         }
                     }
                     Effect::Wake(kind) => {
@@ -992,17 +1136,30 @@ fn drive(
                 }
             }
         }
-        let (token, idle, same_binding) = {
+        let (token, idle, same_binding, silent) = {
             let st = lock(&sh.state);
+            if st.reset_gen != generation {
+                return Ok(());
+            }
+            let silent = st
+                .live
+                .as_ref()
+                .map(|l| l.last_fresh.elapsed())
+                .unwrap_or(HALF_OPEN);
             match st.desired.as_ref() {
                 Some(d) => (
                     d.token.clone(),
                     d.offered_at.elapsed(),
                     d.binding == *binding,
+                    silent,
                 ),
                 None => return Ok(()),
             }
         };
+        // Half-open (relay or path gone without a close): reconnect.
+        if silent >= HALF_OPEN {
+            return Err(Error::Timeout);
+        }
         // The actor stopped calling (paused, logged out, gated) or re-claimed: drop the link.
         if idle >= OFFER_TTL || !same_binding {
             return Ok(());
@@ -1021,7 +1178,9 @@ fn drive(
         if progressed {
             continue;
         }
-        let limit = (OFFER_TTL - idle).min(session.next_timeout().unwrap_or(OFFER_TTL));
+        let limit = (OFFER_TTL - idle)
+            .min(HALF_OPEN - silent)
+            .min(session.next_timeout().unwrap_or(OFFER_TTL));
         sh.wake.wait(conn, limit);
     }
 }
@@ -1034,6 +1193,7 @@ struct Wake {
         std::os::unix::net::UnixStream,
     )>,
 }
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 impl Wake {
     fn new() -> Self {
         Self {

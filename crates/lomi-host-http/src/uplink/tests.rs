@@ -78,6 +78,7 @@ fn go_live(sh: &Shared, token: &str) {
     st.live = Some(Live {
         binding: binding(),
         last_fresh: Instant::now(),
+        lease_until: Instant::now() + Duration::from_secs(30),
         token_current: true,
         publication_seq: Some(9),
     });
@@ -89,7 +90,7 @@ fn auth_frame_is_the_canonical_recorded_bytes() {
     let expected = format!(
         "\u{1}{{\"role\":\"host\",\"token\":\"{TOKEN}\",\"contractHash\":\"{HASH}\",\"claim\":{{\"hostId\":\"{HOST}\",\"runtimeId\":\"{RUNTIME}\",\"expectedGeneration\":\"4\"}}}}"
     );
-    assert_eq!(bytes, expected.as_bytes());
+    assert_eq!(bytes.as_slice(), expected.as_bytes());
     // generation 0 has no predecessor to claim from
     assert!(
         auth_frame(
@@ -151,7 +152,7 @@ fn events_map_to_wake_hints_and_close() {
     let mut s = Session::new(Zeroizing::new(TOKEN.into()));
     assert!(matches!(
         s.on_frame(event("authority.fresh"))[..],
-        [Effect::Fresh]
+        [Effect::Fresh(None)]
     ));
     assert!(matches!(
         s.on_frame(event("channel.pending"))[..],
@@ -280,9 +281,10 @@ fn heartbeat_is_served_only_for_the_admitted_runtime_and_a_fresh_link() {
     assert!(heartbeat_on(sh, host_id(), &runtime_binding(), &access(TOKEN)).is_none());
     go_live(sh, TOKEN);
     let r = heartbeat_on(sh, host_id(), &runtime_binding(), &access(TOKEN)).unwrap();
+    assert!((29_000..=30_000).contains(&r.lease_ms.0));
     assert_eq!(
-        (r.lease_ms.0, r.freshness_ms.0, r.runtime.clone()),
-        (15_000, 5_000, runtime_binding())
+        (r.freshness_ms.0, r.runtime.clone()),
+        (5_000, runtime_binding())
     );
     let other: RuntimeBinding = serde_json::from_value(
         json!({"runtimeId": RUNTIME, "runtimeGeneration": "6", "hostAccessEpoch": "6"}),
@@ -369,7 +371,8 @@ fn publication_over_the_link_follows_the_http_outcomes() {
             }
             panic!("publication never reached the relay");
         });
-        let result = publication_on(sh, host_id(), &p, None).expect("served by the link");
+        let result =
+            publication_on(sh, host_id(), &p, &access(TOKEN), None).expect("served by the link");
         relay.join().unwrap();
         result
     };
@@ -410,7 +413,7 @@ fn publication_goes_to_http_while_a_token_update_is_pending() {
     let sh = leaked();
     go_live(sh, TOKEN);
     lock(&sh.state).live.as_mut().unwrap().token_current = false;
-    assert!(publication_on(sh, host_id(), &params(1, 1), None).is_none());
+    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None).is_none());
 }
 
 #[test]
@@ -460,7 +463,8 @@ fn runtime_reads_are_served_by_the_link_until_a_publication_is_uncertain() {
         (r.publication_seq.0, r.runtime),
         (9, Some(runtime_binding()))
     );
-    assert_eq!((r.lease_ms.0, r.freshness_ms.0), (15_000, 5_000));
+    assert!((29_000..=30_000).contains(&r.lease_ms.0));
+    assert_eq!(r.freshness_ms.0, 5_000);
     // our own acknowledged publication moves the sequence; an uncertain one loses track of it
     let mut s = Session::new(Zeroizing::new(TOKEN.into()));
     let job = |p| {
@@ -496,4 +500,198 @@ fn runtime_reads_are_served_by_the_link_until_a_publication_is_uncertain() {
     go_live(sh, TOKEN);
     lock(&sh.state).desired.as_mut().unwrap().binding.generation = 6;
     assert!(runtime_get_on(sh, host_id()).is_none());
+}
+
+fn job_for(p: PublicationParams) -> Arc<Job> {
+    Arc::new(Job {
+        binding: binding(),
+        next: 10,
+        chunks: publication_chunks(&p).unwrap(),
+        out: Mutex::new(JobOut::Pending {
+            final_sent: false,
+            abandoned: false,
+        }),
+        cv: Condvar::new(),
+    })
+}
+
+#[test]
+fn lease_comes_only_from_relay_confirmation() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    let hb = |sh| heartbeat_on(sh, host_id(), &runtime_binding(), &access(TOKEN));
+    let r = hb(sh).unwrap();
+    assert!(
+        (29_000..=30_000).contains(&r.lease_ms.0),
+        "READY lease, counted down"
+    );
+    // an authority.fresh without a lease field leaves the confirmed lease as it was
+    lock(&sh.state).live.as_mut().unwrap().lease_until = Instant::now() + Duration::from_secs(4);
+    assert!(
+        hb(sh).is_none(),
+        "less than the 5 s a heartbeat grants: HTTP"
+    );
+    assert!(runtime_get_on(sh, host_id()).is_none());
+    // a relay write confirmation brings it back
+    lock(&sh.state).live.as_mut().unwrap().lease_until =
+        Instant::now() + Duration::from_millis(20_000);
+    assert!(hb(sh).is_some());
+    // a real HTTP heartbeat (30 s lease) extends it, never shortens
+    let mut st = lock(&sh.state);
+    let live = st.live.as_mut().unwrap();
+    let before = live.lease_until;
+    live.lease_until = before.min(Instant::now() + Duration::from_secs(1));
+    drop(st);
+    assert!(hb(sh).is_none());
+    // parse of the event field
+    let mut s = Session::new(Zeroizing::new(TOKEN.into()));
+    let Value::Object(data) = json!({"seq": "5", "leaseRemainingMs": "27000"}) else {
+        panic!()
+    };
+    let effects = s.on_frame(Frame::Event {
+        name: "authority.fresh".into(),
+        data,
+    });
+    assert!(matches!(effects[..], [Effect::Fresh(Some(27_000))]));
+}
+
+#[test]
+fn cached_runtime_read_is_one_shot_and_only_when_granted() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    // not granted: the plain read never touches the link
+    assert!(
+        runtime_get_on(sh, host_id()).is_some(),
+        "the link could answer ..."
+    );
+    let granted = |sh: &Shared| {
+        lock(&sh.state)
+            .cached_read_until
+            .take()
+            .is_some_and(|u| Instant::now() < u)
+    };
+    assert!(!granted(sh), "... but nobody granted it");
+    lock(&sh.state).cached_read_until = Some(Instant::now() + CACHED_READ_TTL);
+    assert!(granted(sh));
+    assert!(!granted(sh), "one shot");
+    lock(&sh.state).cached_read_until = Some(Instant::now() - Duration::from_millis(1));
+    assert!(!granted(sh), "expired");
+}
+
+#[test]
+fn publication_results_other_than_ok_forget_the_sequence() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    // abandoned after the final chunk went out
+    let job = job_for(params(1, 1));
+    assert!(job.mark_final_sent());
+    assert_eq!(
+        job.abandon(Error::Timeout),
+        Error::DataRemote(DataFailure::OutcomeUnknown)
+    );
+    // a link failure through publication_on
+    let relay = std::thread::spawn(move || {
+        let mut s = Session::new(Zeroizing::new(TOKEN.into()));
+        for _ in 0..500 {
+            let bytes = {
+                let mut st = lock(&sh.state);
+                s.next_send(TOKEN, &binding(), &mut st.jobs)
+            };
+            if let Some(b) = bytes {
+                let Frame::Call { call_id, .. } =
+                    decode_frame(&b, Direction::Client, MAX_FRAME_BYTES).unwrap()
+                else {
+                    panic!()
+                };
+                s.on_frame(Frame::ReplyErr {
+                    call_id,
+                    code: "STALE_EPOCH".into(),
+                });
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    assert!(
+        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), None)
+            .unwrap()
+            .is_err()
+    );
+    relay.join().unwrap();
+    assert_eq!(lock(&sh.state).live.as_ref().unwrap().publication_seq, None);
+    // a caller that gives up before anything was sent
+    go_live(sh, TOKEN);
+    let budget = budget::State::new(Instant::now());
+    assert!(
+        publication_on(sh, host_id(), &params(1, 1), &access(TOKEN), Some(&budget))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(lock(&sh.state).live.as_ref().unwrap().publication_seq, None);
+}
+
+#[test]
+fn abandon_and_final_chunk_cannot_both_win() {
+    let job = job_for(params(1, 1));
+    assert_eq!(
+        job.abandon(Error::Timeout),
+        Error::Timeout,
+        "nothing sent yet: plain timeout"
+    );
+    assert!(
+        !job.mark_final_sent(),
+        "abandoned: the final chunk must not go out"
+    );
+    let mut s = Session::new(Zeroizing::new(TOKEN.into()));
+    let mut queue: VecDeque<_> = [job].into();
+    assert!(s.next_send(TOKEN, &binding(), &mut queue).is_none());
+    // the other order
+    let job = job_for(params(1, 1));
+    assert!(job.mark_final_sent());
+    assert_eq!(
+        job.abandon(Error::Timeout),
+        Error::DataRemote(DataFailure::OutcomeUnknown)
+    );
+}
+
+#[test]
+fn publication_over_the_link_requires_the_actors_current_token() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    assert!(publication_on(sh, host_id(), &params(1, 1), &access(TOKEN2), None).is_none());
+}
+
+#[test]
+fn a_token_offer_for_another_host_is_ignored() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    offer_token_on(sh, HostId::try_from(uuid(77)).unwrap(), &access(TOKEN2));
+    assert_eq!(
+        lock(&sh.state).desired.as_ref().unwrap().token.as_str(),
+        TOKEN
+    );
+    offer_token_on(sh, host_id(), &access(TOKEN2));
+    assert_eq!(
+        lock(&sh.state).desired.as_ref().unwrap().token.as_str(),
+        TOKEN2
+    );
+    assert!(!lock(&sh.state).live.as_ref().unwrap().token_current);
+}
+
+#[test]
+fn link_reset_drops_the_link_at_once() {
+    let sh = leaked();
+    go_live(sh, TOKEN);
+    assert!(heartbeat_on(sh, host_id(), &runtime_binding(), &access(TOKEN)).is_some());
+    {
+        let mut st = lock(&sh.state);
+        st.reset_gen += 1;
+        st.live = None;
+    }
+    assert!(heartbeat_on(sh, host_id(), &runtime_binding(), &access(TOKEN)).is_none());
+}
+
+#[test]
+fn half_open_window_is_longer_than_the_relays_two_second_cadence() {
+    assert!(HALF_OPEN >= Duration::from_secs(6) && HALF_OPEN > FRESH_MAX_AGE);
 }

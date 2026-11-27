@@ -3886,6 +3886,8 @@ fn run_with_apis_inner(
                 && !ingress.has_active_git_writer()
             {
                 cloud.finish_operation();
+                // `Instant` skipped the sleep: the link's freshness is not to be trusted.
+                lomi_host_http::uplink::link_reset();
                 peer.discard_retained_operation();
                 channel.discard_retained_operation();
                 idle.reset_reservation();
@@ -3915,6 +3917,8 @@ fn run_with_apis_inner(
             && ingress.suspend_at_message_boundary(scheduling_time);
         if settled_at_message_boundary {
             cloud.finish_operation();
+            // The runtime read that follows this rotation may come from the uplink.
+            lomi_host_http::uplink::allow_cached_runtime_read();
             idle.reset_reservation();
             units.admit_after_settlement(stopping);
         }
