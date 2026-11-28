@@ -25,6 +25,8 @@ const READY_LIMIT: usize = 125;
 const ADMISSION_LIMIT: usize = lomi_remote_protocol::admission::WSS_ADMISSION_MAX_BYTES;
 type TlsSocket = rustls::StreamOwned<rustls::ClientConnection, RelaySocket>;
 type Socket = WebSocket<TlsSocket>;
+/// The relay link's frame limit (`lomi_remote_core::frame::MAX_FRAME_BYTES`, relay `maxPayloadLength`).
+const LINK_FRAME_LEN: usize = lomi_remote_core::frame::MAX_FRAME_BYTES;
 
 /// Uses only the independently committed canonical relay endpoint. TLS always
 /// verifies the normal WebPKI chain, time and endpoint hostname, with SNI.
@@ -166,6 +168,7 @@ impl RelayTransport {
             Ok(RelayConnection {
                 socket: Some(socket),
                 ready_deadline: Some(deadline),
+                limit: MAX_TRANSPORT_FRAME_LEN,
             })
         })
     }
@@ -189,15 +192,19 @@ impl RelayTransport {
         budget::run(original_deadline, check, |state| {
             state.check()?;
             let mut socket = self.open(&url, &state)?;
+            // Link frames (a tunnel DATA frame carries one Noise message) go up to the relay's
+            // 65535-byte frame limit, not the old channel's transport frame.
             socket.set_config(|c| {
-                c.max_message_size = Some(MAX_TRANSPORT_FRAME_LEN);
-                c.max_frame_size = Some(MAX_TRANSPORT_FRAME_LEN);
+                c.max_message_size = Some(LINK_FRAME_LEN);
+                c.max_frame_size = Some(LINK_FRAME_LEN);
+                c.max_write_buffer_size = 2 * LINK_FRAME_LEN + 512;
             });
             state.check()?;
             socket.get_mut().sock.state = None;
             Ok(RelayConnection {
                 socket: Some(socket),
                 ready_deadline: None,
+                limit: LINK_FRAME_LEN,
             })
         })
     }
@@ -219,6 +226,8 @@ pub struct RelayConnection {
     socket: Option<Socket>,
     // Until the relay reports `ready`: the ticket bound the old blocking wait had.
     ready_deadline: Option<Instant>,
+    /// Largest binary message either way: a channel's transport frame or a link frame.
+    limit: usize,
 }
 enum RelayStatus {
     Authenticated,
@@ -280,10 +289,7 @@ impl RelayConnection {
         original_deadline: Instant,
         check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
     ) -> Result<()> {
-        if ciphertext.is_empty()
-            || ciphertext.len() > MAX_TRANSPORT_FRAME_LEN
-            || self.ready_deadline.is_some()
-        {
+        if ciphertext.is_empty() || ciphertext.len() > self.limit || self.ready_deadline.is_some() {
             self.close();
             return Err(Error::Request);
         }
@@ -306,7 +312,7 @@ impl RelayConnection {
         original_deadline: Instant,
         check: &(dyn Fn() -> std::result::Result<(), BudgetStop> + Sync),
     ) -> Result<std::task::Poll<Vec<u8>>> {
-        let awaiting_ready = self.ready_deadline;
+        let (awaiting_ready, limit) = (self.ready_deadline, self.limit);
         if awaiting_ready.is_some_and(|deadline| Instant::now() >= deadline) {
             self.close();
             return Err(Error::Timeout);
@@ -321,9 +327,7 @@ impl RelayConnection {
             state.check()?;
             match read {
                 Ok(Message::Binary(bytes))
-                    if awaiting_ready.is_none()
-                        && !bytes.is_empty()
-                        && bytes.len() <= MAX_TRANSPORT_FRAME_LEN =>
+                    if awaiting_ready.is_none() && !bytes.is_empty() && bytes.len() <= limit =>
                 {
                     Ok(Polled::Frame(bytes.to_vec()))
                 }
@@ -365,13 +369,12 @@ impl RelayConnection {
             self.close();
             return Err(Error::Request);
         }
+        let limit = self.limit;
         self.operation(original_deadline, check, |socket, state| {
             loop {
                 state.check()?;
                 match socket.read().map_err(ws_error)? {
-                    Message::Binary(bytes)
-                        if !bytes.is_empty() && bytes.len() <= MAX_TRANSPORT_FRAME_LEN =>
-                    {
+                    Message::Binary(bytes) if !bytes.is_empty() && bytes.len() <= limit => {
                         state.check()?;
                         return Ok(bytes.to_vec());
                     }
@@ -501,7 +504,43 @@ impl Drop for RelaySocket {
 
 #[cfg(test)]
 mod tests {
-    use super::{RelayStatus, relay_status};
+    #[test]
+    fn a_link_takes_frames_up_to_the_relay_limit_and_a_channel_only_transport_frames() {
+        let send = |limit: usize, n: usize| {
+            let mut c = RelayConnection {
+                socket: None,
+                ready_deadline: None,
+                limit,
+            };
+            c.send_binary(
+                &vec![1; n],
+                Instant::now() + Duration::from_secs(1),
+                &|| Ok(()),
+            )
+        };
+        // In bounds the size check passes (and the absent socket answers); past it the request fails.
+        assert!(matches!(
+            send(LINK_FRAME_LEN, 20_000),
+            Err(Error::RelayClosed)
+        ));
+        assert!(matches!(
+            send(LINK_FRAME_LEN, LINK_FRAME_LEN),
+            Err(Error::RelayClosed)
+        ));
+        assert!(matches!(
+            send(LINK_FRAME_LEN, LINK_FRAME_LEN + 1),
+            Err(Error::Request)
+        ));
+        assert!(matches!(
+            send(MAX_TRANSPORT_FRAME_LEN, 20_000),
+            Err(Error::Request)
+        ));
+    }
+
+    use super::{
+        Duration, Error, Instant, LINK_FRAME_LEN, MAX_TRANSPORT_FRAME_LEN, RelayConnection,
+        RelayStatus, relay_status,
+    };
 
     #[test]
     fn loopback_relay_endpoints_with_explicit_ports_are_canonical() {
