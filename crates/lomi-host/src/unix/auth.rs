@@ -3876,6 +3876,7 @@ fn run_with_apis_inner(
     let mut immediate_ingress_pass = false;
     let mut suspended_seen = suspended_reading;
     let mut wake_guard = WakeGuard::default();
+    let mut tunnels_ready = false;
     // If the system slept, end the unit exactly like a deadline settlement
     // (nothing retained crosses the jump, the gate closes and must be
     // reopened by a real Ready resume), then move the projection forward.
@@ -3990,6 +3991,14 @@ fn run_with_apis_inner(
         // explicit request racing a failure remains visible even if try_send fails.
         retry_requested.store(false, Ordering::Release);
         let mut now = runtime.projected_time();
+        if !tunnels_ready {
+            // Debug-only uplink: device tunnels need the Host identity, so wait until it is Ready.
+            tunnels_ready = super::tunnel_service::install(&coordinator, || {
+                auth.tunnel_identity(now)
+                    .ok()
+                    .map(|(identity, host)| (identity, host.to_bytes()))
+            });
+        }
         if ingress.has_active_git_writer()
             && (operation.check().is_err() || runtime.check().is_err())
         {

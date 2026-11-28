@@ -2416,6 +2416,1207 @@
         "title": "ConsumerWindowRevokeResult",
         "type": "object"
       },
+      "DirectoryMessage": {
+        "$defs": {
+          "Capability": {
+            "enum": [
+              "workspace.read",
+              "terminal.observe",
+              "terminal.control",
+              "terminal.manage",
+              "files.read",
+              "files.write",
+              "git.read",
+              "git.write",
+              "git.network",
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
+            ],
+            "type": "string"
+          },
+          "CapabilitySet": {
+            "items": {
+              "$ref": "#/components/schemas/DirectoryMessage/$defs/Capability"
+            },
+            "type": "array"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "DirectoryChange": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Added or changed.",
+                "properties": {
+                  "workspace": {
+                    "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryWorkspace"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "No longer shared with this device, or gone.",
+                "properties": {
+                  "removed": {
+                    "$ref": "#/components/schemas/DirectoryMessage/$defs/WorkspaceId"
+                  }
+                },
+                "required": [
+                  "removed"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "DirectoryChat": {
+            "properties": {
+              "lastActivityAt": {
+                "description": "Unix milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/ChatPermissions"
+              },
+              "model": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/ChatModelId"
+              },
+              "provider": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/ChatProviderId"
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryChatState"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/ChatTitle"
+              }
+            },
+            "required": [
+              "threadId",
+              "title",
+              "provider",
+              "model",
+              "mode",
+              "state",
+              "lastActivityAt"
+            ],
+            "type": "object"
+          },
+          "DirectoryChatState": {
+            "enum": [
+              "Idle",
+              "Generating"
+            ],
+            "type": "string"
+          },
+          "DirectoryHost": {
+            "properties": {
+              "name": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              },
+              "platform": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              },
+              "version": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "name",
+              "platform",
+              "version"
+            ],
+            "type": "object"
+          },
+          "DirectoryLayout": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Pane": {
+                    "$ref": "#/components/schemas/DirectoryMessage/$defs/PaneId"
+                  }
+                },
+                "required": [
+                  "Pane"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Split": {
+                    "properties": {
+                      "axis": {
+                        "$ref": "#/components/schemas/DirectoryMessage/$defs/SplitAxis"
+                      },
+                      "first": {
+                        "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryLayout"
+                      },
+                      "second": {
+                        "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryLayout"
+                      }
+                    },
+                    "required": [
+                      "axis",
+                      "first",
+                      "second"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "Split"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "DirectorySnapshot": {
+            "properties": {
+              "host": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryHost"
+              },
+              "seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "workspaces": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryWorkspace"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "seq",
+              "host",
+              "workspaces"
+            ],
+            "type": "object"
+          },
+          "DirectoryTab": {
+            "properties": {
+              "layout": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryLayout"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/TabId"
+              }
+            },
+            "required": [
+              "tabId",
+              "name",
+              "layout"
+            ],
+            "type": "object"
+          },
+          "DirectoryTerminal": {
+            "properties": {
+              "paneId": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/PaneId"
+              },
+              "sessionEpoch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DirectoryMessage/$defs/SessionEpoch"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`None` while the pane has no live session."
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/PaneState"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/TabId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "paneId",
+              "tabId",
+              "title",
+              "state"
+            ],
+            "type": "object"
+          },
+          "DirectoryUpdate": {
+            "properties": {
+              "change": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryChange"
+              },
+              "seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seq",
+              "change"
+            ],
+            "type": "object"
+          },
+          "DirectoryWorkspace": {
+            "properties": {
+              "capabilities": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/CapabilitySet",
+                "description": "What this device may do there (ceiling of the workspace, limited by the device grant)."
+              },
+              "chats": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryChat"
+                },
+                "type": "array"
+              },
+              "epoch": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/WorkspaceEpoch"
+              },
+              "id": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/WorkspaceId"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DisplayText"
+              },
+              "tabs": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryTab"
+                },
+                "type": "array"
+              },
+              "terminals": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryTerminal"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "epoch",
+              "name",
+              "capabilities",
+              "tabs",
+              "terminals",
+              "chats"
+            ],
+            "type": "object"
+          },
+          "DisplayText": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "PaneId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "PaneState": {
+            "enum": [
+              "starting",
+              "publishing",
+              "running",
+              "exited",
+              "stopped",
+              "lost"
+            ],
+            "type": "string"
+          },
+          "SessionEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SplitAxis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          },
+          "TabId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "snapshot": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectorySnapshot"
+              }
+            },
+            "required": [
+              "snapshot"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "change": {
+                "$ref": "#/components/schemas/DirectoryMessage/$defs/DirectoryUpdate"
+              }
+            },
+            "required": [
+              "change"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "DirectoryMessage"
+      },
+      "DirectorySnapshot": {
+        "$defs": {
+          "Capability": {
+            "enum": [
+              "workspace.read",
+              "terminal.observe",
+              "terminal.control",
+              "terminal.manage",
+              "files.read",
+              "files.write",
+              "git.read",
+              "git.write",
+              "git.network",
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
+            ],
+            "type": "string"
+          },
+          "CapabilitySet": {
+            "items": {
+              "$ref": "#/components/schemas/DirectorySnapshot/$defs/Capability"
+            },
+            "type": "array"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "DirectoryChat": {
+            "properties": {
+              "lastActivityAt": {
+                "description": "Unix milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/ChatPermissions"
+              },
+              "model": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/ChatModelId"
+              },
+              "provider": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/ChatProviderId"
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryChatState"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/ChatTitle"
+              }
+            },
+            "required": [
+              "threadId",
+              "title",
+              "provider",
+              "model",
+              "mode",
+              "state",
+              "lastActivityAt"
+            ],
+            "type": "object"
+          },
+          "DirectoryChatState": {
+            "enum": [
+              "Idle",
+              "Generating"
+            ],
+            "type": "string"
+          },
+          "DirectoryHost": {
+            "properties": {
+              "name": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              },
+              "platform": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              },
+              "version": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "name",
+              "platform",
+              "version"
+            ],
+            "type": "object"
+          },
+          "DirectoryLayout": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Pane": {
+                    "$ref": "#/components/schemas/DirectorySnapshot/$defs/PaneId"
+                  }
+                },
+                "required": [
+                  "Pane"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Split": {
+                    "properties": {
+                      "axis": {
+                        "$ref": "#/components/schemas/DirectorySnapshot/$defs/SplitAxis"
+                      },
+                      "first": {
+                        "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryLayout"
+                      },
+                      "second": {
+                        "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryLayout"
+                      }
+                    },
+                    "required": [
+                      "axis",
+                      "first",
+                      "second"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "Split"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "DirectoryTab": {
+            "properties": {
+              "layout": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryLayout"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/TabId"
+              }
+            },
+            "required": [
+              "tabId",
+              "name",
+              "layout"
+            ],
+            "type": "object"
+          },
+          "DirectoryTerminal": {
+            "properties": {
+              "paneId": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/PaneId"
+              },
+              "sessionEpoch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DirectorySnapshot/$defs/SessionEpoch"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`None` while the pane has no live session."
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/PaneState"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/TabId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "paneId",
+              "tabId",
+              "title",
+              "state"
+            ],
+            "type": "object"
+          },
+          "DirectoryWorkspace": {
+            "properties": {
+              "capabilities": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/CapabilitySet",
+                "description": "What this device may do there (ceiling of the workspace, limited by the device grant)."
+              },
+              "chats": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryChat"
+                },
+                "type": "array"
+              },
+              "epoch": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/WorkspaceEpoch"
+              },
+              "id": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/WorkspaceId"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectorySnapshot/$defs/DisplayText"
+              },
+              "tabs": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryTab"
+                },
+                "type": "array"
+              },
+              "terminals": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryTerminal"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "epoch",
+              "name",
+              "capabilities",
+              "tabs",
+              "terminals",
+              "chats"
+            ],
+            "type": "object"
+          },
+          "DisplayText": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "PaneId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "PaneState": {
+            "enum": [
+              "starting",
+              "publishing",
+              "running",
+              "exited",
+              "stopped",
+              "lost"
+            ],
+            "type": "string"
+          },
+          "SessionEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SplitAxis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          },
+          "TabId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "host": {
+            "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryHost"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workspaces": {
+            "items": {
+              "$ref": "#/components/schemas/DirectorySnapshot/$defs/DirectoryWorkspace"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "seq",
+          "host",
+          "workspaces"
+        ],
+        "title": "DirectorySnapshot",
+        "type": "object"
+      },
+      "DirectoryUpdate": {
+        "$defs": {
+          "Capability": {
+            "enum": [
+              "workspace.read",
+              "terminal.observe",
+              "terminal.control",
+              "terminal.manage",
+              "files.read",
+              "files.write",
+              "git.read",
+              "git.write",
+              "git.network",
+              "git.execute",
+              "chat.read",
+              "chat.send",
+              "chat.permissions.edit",
+              "chat.permissions.full"
+            ],
+            "type": "string"
+          },
+          "CapabilitySet": {
+            "items": {
+              "$ref": "#/components/schemas/DirectoryUpdate/$defs/Capability"
+            },
+            "type": "array"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "DirectoryChange": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Added or changed.",
+                "properties": {
+                  "workspace": {
+                    "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryWorkspace"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "No longer shared with this device, or gone.",
+                "properties": {
+                  "removed": {
+                    "$ref": "#/components/schemas/DirectoryUpdate/$defs/WorkspaceId"
+                  }
+                },
+                "required": [
+                  "removed"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "DirectoryChat": {
+            "properties": {
+              "lastActivityAt": {
+                "description": "Unix milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/ChatPermissions"
+              },
+              "model": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/ChatModelId"
+              },
+              "provider": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/ChatProviderId"
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryChatState"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/ChatThreadId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/ChatTitle"
+              }
+            },
+            "required": [
+              "threadId",
+              "title",
+              "provider",
+              "model",
+              "mode",
+              "state",
+              "lastActivityAt"
+            ],
+            "type": "object"
+          },
+          "DirectoryChatState": {
+            "enum": [
+              "Idle",
+              "Generating"
+            ],
+            "type": "string"
+          },
+          "DirectoryLayout": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Pane": {
+                    "$ref": "#/components/schemas/DirectoryUpdate/$defs/PaneId"
+                  }
+                },
+                "required": [
+                  "Pane"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "Split": {
+                    "properties": {
+                      "axis": {
+                        "$ref": "#/components/schemas/DirectoryUpdate/$defs/SplitAxis"
+                      },
+                      "first": {
+                        "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryLayout"
+                      },
+                      "second": {
+                        "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryLayout"
+                      }
+                    },
+                    "required": [
+                      "axis",
+                      "first",
+                      "second"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "Split"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "DirectoryTab": {
+            "properties": {
+              "layout": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryLayout"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/DisplayText"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/TabId"
+              }
+            },
+            "required": [
+              "tabId",
+              "name",
+              "layout"
+            ],
+            "type": "object"
+          },
+          "DirectoryTerminal": {
+            "properties": {
+              "paneId": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/PaneId"
+              },
+              "sessionEpoch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DirectoryUpdate/$defs/SessionEpoch"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "`None` while the pane has no live session."
+              },
+              "state": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/PaneState"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/TabId"
+              },
+              "title": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "paneId",
+              "tabId",
+              "title",
+              "state"
+            ],
+            "type": "object"
+          },
+          "DirectoryWorkspace": {
+            "properties": {
+              "capabilities": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/CapabilitySet",
+                "description": "What this device may do there (ceiling of the workspace, limited by the device grant)."
+              },
+              "chats": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryChat"
+                },
+                "type": "array"
+              },
+              "epoch": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/WorkspaceEpoch"
+              },
+              "id": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/WorkspaceId"
+              },
+              "name": {
+                "$ref": "#/components/schemas/DirectoryUpdate/$defs/DisplayText"
+              },
+              "tabs": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryTab"
+                },
+                "type": "array"
+              },
+              "terminals": {
+                "items": {
+                  "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryTerminal"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "epoch",
+              "name",
+              "capabilities",
+              "tabs",
+              "terminals",
+              "chats"
+            ],
+            "type": "object"
+          },
+          "DisplayText": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "PaneId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "PaneState": {
+            "enum": [
+              "starting",
+              "publishing",
+              "running",
+              "exited",
+              "stopped",
+              "lost"
+            ],
+            "type": "string"
+          },
+          "SessionEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SplitAxis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          },
+          "TabId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/DirectoryUpdate/$defs/DirectoryChange"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "change"
+        ],
+        "title": "DirectoryUpdate",
+        "type": "object"
+      },
       "DraftContract": {
         "$defs": {
           "ApplicationMajor": {
@@ -21934,6 +23135,16 @@
           },
           "timeoutMs": {
             "$ref": "#/components/schemas/RpcEnvelope/$defs/TimeoutMs"
+          },
+          "workspaceId": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

@@ -30,6 +30,9 @@ serde = { version = "=1.0.229", features = ["derive"] }
 signal-hook = "=0.4.5"
 uuid = { version = "=1.26.1", features = ["v4"] }
 
+[dev-dependencies]
+lomi-remote-core = { path = "../lomi-remote-core" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
 

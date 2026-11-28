@@ -68,7 +68,7 @@ pub(super) struct RemoteTerminalState {
     pending: Option<PendingDelivery>,
     disconnected: bool,
 }
-fn fault(code: ErrorCode) -> RemoteError {
+pub(super) fn fault(code: ErrorCode) -> RemoteError {
     RemoteError::new(code, false, Effect::None, ErrorDetails::empty(), None).expect("static error")
 }
 fn gate(_: GateError) -> RemoteError {
@@ -79,7 +79,7 @@ fn owner(_: super::shared_owner::Error) -> RemoteError {
     fault(ErrorCode::ServiceUnavailable)
 }
 
-fn terminal(error: lomi_terminal::Error) -> RemoteError {
+pub(super) fn terminal(error: lomi_terminal::Error) -> RemoteError {
     if error == lomi_terminal::Error::OutcomeUnknown {
         return RemoteError::new(
             ErrorCode::OutcomeUnknown,
@@ -117,7 +117,7 @@ fn target(call: &RpcCall) -> Option<&TerminalContext> {
         _ => None,
     }
 }
-fn lease_result(context: TerminalContext, lease: &ControlLease) -> TerminalLeaseResult {
+pub(super) fn lease_result(context: TerminalContext, lease: &ControlLease) -> TerminalLeaseResult {
     TerminalLeaseResult {
         terminal: context,
         lease: lease.wire_binding(),

@@ -14,7 +14,7 @@
     "wasmBindgen": "wasm-bindgen 0.2.126"
   },
   "sourceSha256": {
-    "Cargo.lock": "af50e29deb6c8b79ea4f794094c0ba7b5c164b0da1e19a476343445ad117f489",
+    "Cargo.lock": "f082d9b3d2c02e32d1d735f3172d15ae14144d8be35389945ffd20cc4b329de8",
     "Cargo.toml": "662b75edfd7947a6b1c1dbed2dba4c29b466f344d68a68561553a122fe0761d0",
     "crates/lomi-remote-crypto/.gitignore": "0013c9fb76b8728f13ada5de1d5c76b5734468f5bc2f5f905c0d7185ce9cdd76",
     "crates/lomi-remote-crypto/Cargo.toml": "bff415a89e632ed906d80177c9706b7892533310dfc960d579993d3efa243e7f",
@@ -87,7 +87,7 @@
     "crates/lomi-remote-protocol/Cargo.toml": "de54586bda1014f566988c27c32c5c7b5eedc7e201ac1bbde8c5d3b5997fcb76",
     "crates/lomi-remote-protocol/README.md": "0d31daacd26d2f804c5d40a267ce2e2386bcd2b458432da083110737a46b695e",
     "crates/lomi-remote-protocol/src/admission.rs": "15b09c71095868df2cb360a74ca95bbc716880ece23d49604cb63f3af112e04f",
-    "crates/lomi-remote-protocol/src/bin/generate-contracts.rs": "9ca8b4f7684fe2565ac209492697ee83b0617a415c9eb8fa8879a7a9c1a20d9b",
+    "crates/lomi-remote-protocol/src/bin/generate-contracts.rs": "f52f0f422ff5d216f3b9c10967c8ac1dac4e7b1ff8d483068afc9309c737a9dc",
     "crates/lomi-remote-protocol/src/browser_codec.rs": "4f15aafcd93d2d395ef041ae874bfb61026cc35d8a3d214bd2fadc7a05e38db2",
     "crates/lomi-remote-protocol/src/browser_framing.rs": "b0bf0e2199204a466ec8f36da59c9ad063e5914294624bc269fa523a83a39a45",
     "crates/lomi-remote-protocol/src/chat.rs": "efab2e4f66f3a08adbaefff10bdf97c331108d88f63e4502b204a122c4878033",
@@ -102,7 +102,7 @@
     "crates/lomi-remote-protocol/src/primitives.rs": "3c96780a156b6294847a40717a3761a73fd48c6faf1c73d7fcfb62bc522df390",
     "crates/lomi-remote-protocol/src/rpc.rs": "f149b984eab96c03f4f6fe949bc3b4a5cae9b3243fa28f7c284d0553fde40b56",
     "crates/lomi-remote-protocol/src/streams.rs": "6cbc855f64d6a3e61fee9ee890db69119c9a5c9a3fe473622befabdf08f43650",
-    "crates/lomi-remote-protocol/src/tunnel.rs": "285041f65b50652a458916f45a2bc5c8304cdac43767e29e0544472de3d01ad9",
+    "crates/lomi-remote-protocol/src/tunnel.rs": "6271130494730315eb39be66851cc2885c4463ea1a30b12776594265ea14cef2",
     "packages/authority-crypto-wasm/README.md": "e62cc53c580d6c2a29f500ac3a474805b3673af4046160cc919fa94b71e8cbf0",
     "packages/authority-crypto-wasm/THIRD_PARTY_NOTICES.json": "9d2c400df0d6e055b49a77c9112a11ab3bb858794dceae0931dfb8ab0181f44c",
     "packages/authority-crypto-wasm/package.json": "4f900276907c85da41670453f5cfab7ff6364151f02c0dafec25f6968c1f067d",

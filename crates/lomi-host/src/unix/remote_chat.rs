@@ -177,7 +177,7 @@ fn map_failure(message: &str) -> RemoteError {
 
 // ---- DTO conversion -------------------------------------------------------
 
-fn to_thread(t: &ThreadSummary) -> Result<ChatThread, RemoteError> {
+pub(super) fn to_thread(t: &ThreadSummary) -> Result<ChatThread, RemoteError> {
     let bad = |_| error(ErrorCode::ServiceUnavailable);
     Ok(ChatThread {
         thread_id: ChatThreadId::try_from(t.thread_id.clone()).map_err(bad)?,
@@ -1140,6 +1140,18 @@ impl Chat {
         Self {
             root: Some(root),
             ..Self::default()
+        }
+    }
+    /// A service that starts `resolve`'s CLIs instead of the installed ones.
+    #[cfg(test)]
+    pub(super) fn with_resolver(
+        root: PathBuf,
+        resolve: impl Fn(&str) -> Option<PathBuf> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            root: Some(root),
+            resolve: Some(Arc::new(resolve)),
+            handle: Mutex::new(None),
         }
     }
     fn handle(&self) -> Result<Arc<Handle>, RemoteError> {

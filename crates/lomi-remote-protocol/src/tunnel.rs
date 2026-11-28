@@ -3,9 +3,10 @@
 //! A frame is `streamId(u32 BE) | type(u8) | flags(u8) | length(u16 BE) | data`.
 //! Every `Err` returned for peer input is a protocol error: the caller closes the tunnel.
 //! Scheduling (P3a.7) is not here; `StreamKind::class` only tells the scheduler what to use.
-use crate::rpc::{EncodedPathId, TerminalDimension, text_type};
+use crate::rpc::{DisplayText, EncodedPathId, PaneState, SplitAxis, TerminalDimension, text_type};
 use crate::{
-    ChatMessageId, ChatThreadId, PaneId, RequestId, SessionEpoch, TimeoutMs, WorkspaceId,
+    CapabilitySet, ChatMessageId, ChatModelId, ChatPermissions, ChatProviderId, ChatThreadId,
+    ChatTitle, PaneId, RequestId, SessionEpoch, TabId, TimeoutMs, WorkspaceEpoch, WorkspaceId,
     message_framing::{MAX_MESSAGE_LEN, MAX_PLAINTEXT_FRAME_LEN},
     rpc::{BoundedList, RpcCall, dto},
 };
@@ -733,12 +734,134 @@ impl HostGreeting {
 // Stream 0 envelope: the unversioned successor of `RpcRequest` (which keeps `v`/`type` until
 // the old path is removed). Every call already carries its `workspaceId` inside its `context`
 // (WorkspaceContext / mutation contexts), so no separate top-level field is added.
+// `workspace_id` is only needed by calls that carry no workspace of their own (chat); the
+// Host denies a call whose own workspace differs from it.
 dto!(RpcEnvelope {
     request_id: RequestId,
     timeout_ms: TimeoutMs,
+    workspace_id: Option<WorkspaceId>,
     #[serde(deserialize_with = "crate::rpc::deserialize_object")]
     call: RpcCall
 });
+
+impl RpcEnvelope {
+    /// Same strictness as `rpc::decode_request`: raw JSON limits, then the call's own checks.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        crate::json_wire::check_raw_bytes(bytes).map_err(str::to_owned)?;
+        let envelope: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        envelope.call.validate().map_err(str::to_owned)?;
+        Ok(envelope)
+    }
+}
+
+// `directory` stream (postcard, externally tagged: postcard cannot read internal tags). The first
+// message is `Snapshot`; every later one is a `Change` with the next `seq`. A change replaces or
+// removes one whole workspace entry, so the device needs no diff logic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryHost {
+    pub name: DisplayText,
+    pub platform: DisplayText,
+    pub version: DisplayText,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DirectoryLayout {
+    Pane(PaneId),
+    Split {
+        axis: SplitAxis,
+        first: Box<DirectoryLayout>,
+        second: Box<DirectoryLayout>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryTab {
+    pub tab_id: TabId,
+    pub name: DisplayText,
+    pub layout: DirectoryLayout,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryTerminal {
+    pub pane_id: PaneId,
+    pub tab_id: TabId,
+    pub title: DisplayText,
+    pub state: PaneState,
+    /// `None` while the pane has no live session.
+    pub session_epoch: Option<SessionEpoch>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DirectoryChatState {
+    Idle,
+    Generating,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryChat {
+    pub thread_id: ChatThreadId,
+    pub title: ChatTitle,
+    pub provider: ChatProviderId,
+    pub model: ChatModelId,
+    pub mode: ChatPermissions,
+    pub state: DirectoryChatState,
+    /// Unix milliseconds.
+    pub last_activity_at: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryWorkspace {
+    pub id: WorkspaceId,
+    pub epoch: WorkspaceEpoch,
+    pub name: DisplayText,
+    /// What this device may do there (ceiling of the workspace, limited by the device grant).
+    pub capabilities: CapabilitySet,
+    pub tabs: Vec<DirectoryTab>,
+    pub terminals: Vec<DirectoryTerminal>,
+    pub chats: Vec<DirectoryChat>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorySnapshot {
+    pub seq: u64,
+    pub host: DirectoryHost,
+    pub workspaces: Vec<DirectoryWorkspace>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectoryChange {
+    /// Added or changed.
+    Workspace(DirectoryWorkspace),
+    /// No longer shared with this device, or gone.
+    Removed(WorkspaceId),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryUpdate {
+    pub seq: u64,
+    pub change: DirectoryChange,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectoryMessage {
+    Snapshot(DirectorySnapshot),
+    Change(DirectoryUpdate),
+}
+impl DirectoryMessage {
+    pub fn encode(&self) -> Result<Vec<u8>, TunnelError> {
+        let out = postcard::to_allocvec(self).map_err(|_| TunnelError::BadPayload)?;
+        if out.len() > MAX_LOGICAL_MESSAGE {
+            Err(TunnelError::MessageTooLarge)
+        } else {
+            Ok(out)
+        }
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, TunnelError> {
+        if bytes.len() > MAX_LOGICAL_MESSAGE {
+            return Err(TunnelError::MessageTooLarge);
+        }
+        from_postcard(bytes)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1302,5 +1425,61 @@ mod tests {
         assert!(matches!(env.call, RpcCall::WorkspaceGet(_)));
         let with_v = format!(r#"{{"v":2,"requestId":"r1","timeoutMs":1000,"call":{call}}}"#);
         assert!(serde_json::from_str::<RpcEnvelope>(&with_v).is_err());
+    }
+
+    #[test]
+    fn directory_messages_round_trip_in_postcard() {
+        const U: &str = "11111111-1111-4111-8111-111111111111";
+        let id = |s: &str| s.to_owned();
+        let text = |s: &str| DisplayText::try_from(id(s)).unwrap();
+        let pane = PaneId::try_from(id(U)).unwrap();
+        let ws = DirectoryWorkspace {
+            id: WorkspaceId::try_from(id(U)).unwrap(),
+            epoch: WorkspaceEpoch::try_from(id(U)).unwrap(),
+            name: text("app"),
+            capabilities: crate::CapabilitySet::control_with_workspace_tools(),
+            tabs: vec![DirectoryTab {
+                tab_id: TabId::try_from(id(U)).unwrap(),
+                name: text("main"),
+                layout: DirectoryLayout::Split {
+                    axis: SplitAxis::Horizontal,
+                    first: Box::new(DirectoryLayout::Pane(pane)),
+                    second: Box::new(DirectoryLayout::Pane(pane)),
+                },
+            }],
+            terminals: vec![DirectoryTerminal {
+                pane_id: pane,
+                tab_id: TabId::try_from(id(U)).unwrap(),
+                title: text("main"),
+                state: PaneState::Running,
+                session_epoch: Some(SessionEpoch::try_from(id(U)).unwrap()),
+            }],
+            chats: Vec::new(),
+        };
+        for m in [
+            DirectoryMessage::Snapshot(DirectorySnapshot {
+                seq: 0,
+                host: DirectoryHost {
+                    name: text("Mac"),
+                    platform: text("macos"),
+                    version: text("0.1.0"),
+                },
+                workspaces: vec![ws.clone()],
+            }),
+            DirectoryMessage::Change(DirectoryUpdate {
+                seq: 1,
+                change: DirectoryChange::Workspace(ws.clone()),
+            }),
+            DirectoryMessage::Change(DirectoryUpdate {
+                seq: 2,
+                change: DirectoryChange::Removed(ws.id),
+            }),
+        ] {
+            let bytes = m.encode().unwrap();
+            assert_eq!(DirectoryMessage::decode(&bytes).unwrap(), m);
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(DirectoryMessage::decode(&extra).is_err());
+        }
     }
 }

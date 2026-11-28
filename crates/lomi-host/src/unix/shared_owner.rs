@@ -33,6 +33,8 @@ mod git;
 pub(super) mod host_metadata;
 #[path = "shared_owner/operations.rs"]
 mod operations;
+#[path = "shared_owner/tunnel.rs"]
+mod tunnel;
 #[path = "shared_owner/workspace_removal.rs"]
 mod workspace_removal;
 pub(super) use git::{
@@ -44,6 +46,7 @@ pub(super) use host_metadata::suggested_host_display_name;
 pub(super) use operations::{
     RemoteOperationAuthorization, RemoteOperationCancelProgress, RemoteOperationDisclosure,
 };
+pub(super) use tunnel::TunnelView;
 pub(super) use workspace_removal::{
     WorkspaceRemovalBeginFailure, WorkspaceRemovalBeginWrite, WorkspaceRemovalCheckpointWrite,
     WorkspaceRemovalCompletion, WorkspaceRemovalFinalizeWrite, WorkspaceRemovalUncertainWrite,

@@ -82,6 +82,16 @@ impl<S: SecretStorage + ?Sized> HostAuth<'_, S> {
         crypto(Identity::import_secret_seed_blob(&record.seed.0, signed))
     }
 
+    /// The Host's own identity for the device tunnel handshake, with its host id. Same record
+    /// and freshness rules as `public_host_identity`; the caller keeps the secret in memory only.
+    pub fn tunnel_identity(&self, now: u64) -> Result<(Identity, HostId)> {
+        let (record, signed, credentials, _) = self.crypto_ready(now)?;
+        Ok((
+            crypto(Identity::import_secret_seed_blob(&record.seed.0, signed))?,
+            credentials.host,
+        ))
+    }
+
     pub fn public_host_identity(&self, now: u64) -> Result<PublicHostIdentity> {
         let (_, signed, credentials, epoch) = self.crypto_ready(now)?;
         Ok(PublicHostIdentity {

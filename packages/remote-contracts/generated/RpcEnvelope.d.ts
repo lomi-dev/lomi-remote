@@ -262,6 +262,7 @@ export interface RpcEnvelope {
   call: RpcCall;
   requestId: RequestId;
   timeoutMs: TimeoutMs;
+  workspaceId?: WorkspaceId | null;
 }
 export interface WorkspaceReadParams {
   context: WorkspaceContext;

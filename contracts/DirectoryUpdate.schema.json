@@ -1,0 +1,378 @@
+{
+  "$defs": {
+    "Capability": {
+      "enum": [
+        "workspace.read",
+        "terminal.observe",
+        "terminal.control",
+        "terminal.manage",
+        "files.read",
+        "files.write",
+        "git.read",
+        "git.write",
+        "git.network",
+        "git.execute",
+        "chat.read",
+        "chat.send",
+        "chat.permissions.edit",
+        "chat.permissions.full"
+      ],
+      "type": "string"
+    },
+    "CapabilitySet": {
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "type": "array"
+    },
+    "ChatModelId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "ChatPermissions": {
+      "enum": [
+        "read-only",
+        "edit",
+        "full"
+      ],
+      "type": "string"
+    },
+    "ChatProviderId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 128
+    },
+    "ChatThreadId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatTitle": {
+      "maxLength": 200,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string"
+    },
+    "DirectoryChange": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Added or changed.",
+          "properties": {
+            "workspace": {
+              "$ref": "#/$defs/DirectoryWorkspace"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No longer shared with this device, or gone.",
+          "properties": {
+            "removed": {
+              "$ref": "#/$defs/WorkspaceId"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DirectoryChat": {
+      "properties": {
+        "lastActivityAt": {
+          "description": "Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/ChatPermissions"
+        },
+        "model": {
+          "$ref": "#/$defs/ChatModelId"
+        },
+        "provider": {
+          "$ref": "#/$defs/ChatProviderId"
+        },
+        "state": {
+          "$ref": "#/$defs/DirectoryChatState"
+        },
+        "threadId": {
+          "$ref": "#/$defs/ChatThreadId"
+        },
+        "title": {
+          "$ref": "#/$defs/ChatTitle"
+        }
+      },
+      "required": [
+        "threadId",
+        "title",
+        "provider",
+        "model",
+        "mode",
+        "state",
+        "lastActivityAt"
+      ],
+      "type": "object"
+    },
+    "DirectoryChatState": {
+      "enum": [
+        "Idle",
+        "Generating"
+      ],
+      "type": "string"
+    },
+    "DirectoryLayout": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Pane": {
+              "$ref": "#/$defs/PaneId"
+            }
+          },
+          "required": [
+            "Pane"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Split": {
+              "properties": {
+                "axis": {
+                  "$ref": "#/$defs/SplitAxis"
+                },
+                "first": {
+                  "$ref": "#/$defs/DirectoryLayout"
+                },
+                "second": {
+                  "$ref": "#/$defs/DirectoryLayout"
+                }
+              },
+              "required": [
+                "axis",
+                "first",
+                "second"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Split"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DirectoryTab": {
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/DirectoryLayout"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabId": {
+          "$ref": "#/$defs/TabId"
+        }
+      },
+      "required": [
+        "tabId",
+        "name",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "DirectoryTerminal": {
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "sessionEpoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionEpoch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` while the pane has no live session."
+        },
+        "state": {
+          "$ref": "#/$defs/PaneState"
+        },
+        "tabId": {
+          "$ref": "#/$defs/TabId"
+        },
+        "title": {
+          "$ref": "#/$defs/DisplayText"
+        }
+      },
+      "required": [
+        "paneId",
+        "tabId",
+        "title",
+        "state"
+      ],
+      "type": "object"
+    },
+    "DirectoryWorkspace": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitySet",
+          "description": "What this device may do there (ceiling of the workspace, limited by the device grant)."
+        },
+        "chats": {
+          "items": {
+            "$ref": "#/$defs/DirectoryChat"
+          },
+          "type": "array"
+        },
+        "epoch": {
+          "$ref": "#/$defs/WorkspaceEpoch"
+        },
+        "id": {
+          "$ref": "#/$defs/WorkspaceId"
+        },
+        "name": {
+          "$ref": "#/$defs/DisplayText"
+        },
+        "tabs": {
+          "items": {
+            "$ref": "#/$defs/DirectoryTab"
+          },
+          "type": "array"
+        },
+        "terminals": {
+          "items": {
+            "$ref": "#/$defs/DirectoryTerminal"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "epoch",
+        "name",
+        "capabilities",
+        "tabs",
+        "terminals",
+        "chats"
+      ],
+      "type": "object"
+    },
+    "DisplayText": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 4096
+    },
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "PaneState": {
+      "enum": [
+        "starting",
+        "publishing",
+        "running",
+        "exited",
+        "stopped",
+        "lost"
+      ],
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SplitAxis": {
+      "enum": [
+        "horizontal",
+        "vertical"
+      ],
+      "type": "string"
+    },
+    "TabId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "change": {
+      "$ref": "#/$defs/DirectoryChange"
+    },
+    "seq": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "seq",
+    "change"
+  ],
+  "title": "DirectoryUpdate",
+  "type": "object"
+}

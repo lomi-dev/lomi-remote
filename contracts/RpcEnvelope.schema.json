@@ -2584,6 +2584,16 @@
     },
     "timeoutMs": {
       "$ref": "#/$defs/TimeoutMs"
+    },
+    "workspaceId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceId"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

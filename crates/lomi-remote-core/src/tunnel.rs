@@ -679,7 +679,13 @@ fn rpc_request_id(payload: &[u8]) -> Option<String> {
     let serde_json::Value::Object(o) = serde_json::from_slice(payload).ok()? else {
         return None;
     };
-    if o.len() != 3
+    // `workspaceId` is optional: only calls without a workspace of their own (chat) need it.
+    let workspace = o.get("workspaceId");
+    if o.len() != 3 + usize::from(workspace.is_some())
+        || workspace.is_some_and(|w| {
+            !w.as_str()
+                .is_some_and(|w| lomi_remote_protocol::WorkspaceId::try_from(w.to_owned()).is_ok())
+        })
         || !o.get("call")?.is_object()
         || !(1..=120_000).contains(&o.get("timeoutMs")?.as_u64()?)
     {
@@ -699,6 +705,10 @@ mod envelope_tests {
     fn envelope_shape() {
         let ok = br#"{"requestId":"r1","timeoutMs":5000,"call":{"method":"x"}}"#;
         assert_eq!(rpc_request_id(ok).as_deref(), Some("r1"));
+        let scoped = br#"{"requestId":"r1","timeoutMs":5000,"workspaceId":"11111111-1111-4111-8111-111111111111","call":{}}"#;
+        assert_eq!(rpc_request_id(scoped).as_deref(), Some("r1"));
+        let bad_workspace = br#"{"requestId":"r1","timeoutMs":5000,"workspaceId":"x","call":{}}"#;
+        assert!(rpc_request_id(bad_workspace).is_none());
         for bad in [
             &br#"{"requestId":"r1","timeoutMs":0,"call":{}}"#[..],
             br#"{"requestId":"r1","timeoutMs":5,"call":1}"#,

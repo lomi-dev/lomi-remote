@@ -2198,6 +2198,7 @@ dependencies = [
  "lomi-native-git",
  "lomi-native-project-files",
  "lomi-platform",
+ "lomi-remote-core",
  "lomi-remote-crypto",
  "lomi-remote-protocol",
  "lomi-terminal",

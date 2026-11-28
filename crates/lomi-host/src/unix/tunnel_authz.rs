@@ -37,6 +37,29 @@ impl DeviceAccess {
             .collect();
         Self::new(grant, sharing)
     }
+    /// What this device may do in `workspace`: the ceiling, without the control-only
+    /// capabilities until the grant controls (the set stays dependency-closed).
+    pub(super) fn capabilities(&self, workspace: &WorkspaceId) -> Option<CapabilitySet> {
+        let ceiling = self.sharing.get(workspace)?;
+        if self.controls() {
+            return Some(ceiling.clone());
+        }
+        const CONTROL_ONLY: [Capability; 8] = [
+            Capability::TerminalControl,
+            Capability::TerminalManage,
+            Capability::FilesWrite,
+            Capability::GitWrite,
+            Capability::GitNetwork,
+            Capability::ChatSend,
+            Capability::ChatPermissionsEdit,
+            Capability::ChatPermissionsFull,
+        ];
+        let kept: Vec<Capability> = Capability::ALL
+            .into_iter()
+            .filter(|c| ceiling.contains(*c) && !CONTROL_ONLY.contains(c))
+            .collect();
+        CapabilitySet::try_from(kept).ok()
+    }
     /// Control needs both the account ceiling and the code confirmation on this Host.
     fn controls(&self) -> bool {
         self.grant.ceiling == Permissions::Control && self.grant.control_confirmed_at.is_some()
@@ -235,7 +258,7 @@ pub(super) fn needs_control(method: Method) -> bool {
 }
 
 /// Workspace embedded in the call; `None` for chat and operation calls.
-fn call_workspace(call: &RpcCall) -> Option<&WorkspaceId> {
+pub(super) fn call_workspace(call: &RpcCall) -> Option<&WorkspaceId> {
     use RpcCall::*;
     Some(match call {
         WorkspaceGet(p) | WorkspaceCapabilities(p) | GitRepositories(p) => &p.context.workspace_id,
