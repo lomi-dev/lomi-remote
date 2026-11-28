@@ -32,6 +32,8 @@ export type ChatProviderId = string;
 export type DirectoryChatState = "Idle" | "Generating";
 export type ChatThreadId = string;
 export type ChatTitle = string;
+export type DecimalU64 = string;
+export type RuntimeId = string;
 export type WorkspaceEpoch = string;
 export type WorkspaceId = string;
 export type DisplayText = string;
@@ -59,6 +61,7 @@ export interface DirectoryUpdate {
 export interface DirectoryWorkspace {
   capabilities: CapabilitySet;
   chats: DirectoryChat[];
+  context: DirectoryContext;
   epoch: WorkspaceEpoch;
   id: WorkspaceId;
   name: DisplayText;
@@ -76,6 +79,16 @@ export interface DirectoryChat {
   state: DirectoryChatState;
   threadId: ChatThreadId;
   title: ChatTitle;
+}
+/**
+ * The rest of the `WorkspaceContext` that rpc calls on this workspace carry (`id` and `epoch`
+ * above are its `workspaceId` and `workspaceEpoch`). A change is sent as an update.
+ */
+export interface DirectoryContext {
+  grantRevision: DecimalU64;
+  hostAccessEpoch: DecimalU64;
+  runtimeGeneration: DecimalU64;
+  runtimeId: RuntimeId;
 }
 export interface DirectoryTab {
   layout: DirectoryLayout;

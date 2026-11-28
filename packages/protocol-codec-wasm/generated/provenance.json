@@ -32,7 +32,7 @@
     "crates/lomi-remote-protocol/src/primitives.rs": "3c96780a156b6294847a40717a3761a73fd48c6faf1c73d7fcfb62bc522df390",
     "crates/lomi-remote-protocol/src/rpc.rs": "f149b984eab96c03f4f6fe949bc3b4a5cae9b3243fa28f7c284d0553fde40b56",
     "crates/lomi-remote-protocol/src/streams.rs": "6cbc855f64d6a3e61fee9ee890db69119c9a5c9a3fe473622befabdf08f43650",
-    "crates/lomi-remote-protocol/src/tunnel.rs": "5cde41b69bcf9dd67997fdffdbb5ba63f5fcaa1440d64dfdfb47457555cbf709",
+    "crates/lomi-remote-protocol/src/tunnel.rs": "7307a21de25796ab7c76005197f721e853d12ebac9762ef3b5e5c020dfff046c",
     "packages/protocol-codec-wasm/README.md": "b38d6e782773d1a47e2d770e8317961c1c1c45fda12b94eeef1a89db7740826c",
     "packages/protocol-codec-wasm/package.json": "08b0abf8ca30dcfea29ca3573f515082f821186092f62fdb87b94486a6113765",
     "packages/protocol-codec-wasm/scripts/build.mjs": "66e1a5a8b4f6b7782dbe2fbf224e41b9fd8068db202f6f00b0ecd6973dfcc0fa",
