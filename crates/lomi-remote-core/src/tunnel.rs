@@ -23,10 +23,10 @@ use lomi_remote_crypto::{
     Identity, MAX_TUNNEL_PLAINTEXT, SignedBundle, Tunnel as Noise, TunnelHandshake, TunnelPath,
     TunnelPrologue,
 };
+use lomi_remote_protocol::RequestId;
 use lomi_remote_protocol::tunnel::{
     APPROVAL_DEADLINE_MS, FrameType, Hello, HostGreeting, MAX_FRAME_DATA, MAX_LOGICAL_MESSAGE,
-    OlderSide, OpenParams, RpcEnvelope, Side, StaleEpoch, StreamKind, StreamTable, TunnelFrame,
-    decode_frames,
+    OlderSide, OpenParams, Side, StaleEpoch, StreamKind, StreamTable, TunnelFrame, decode_frames,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -506,7 +506,7 @@ impl Tunnel {
         Ok((id, out))
     }
 
-    /// Queues one logical message (any size up to 1 MiB; stream 0 takes an [`RpcEnvelope`] as JSON)
+    /// Queues one logical message (any size up to 1 MiB; stream 0 takes an `RpcEnvelope` as JSON)
     /// and sends what the windows allow; the rest follows when the Host grants credit.
     pub fn send(&mut self, stream: u32, payload: &[u8]) -> Result<Vec<Out>, String> {
         self.ensure_open()?;
@@ -524,9 +524,7 @@ impl Tunnel {
             return Err("backpressure".into());
         }
         if stream == 0 {
-            let env: RpcEnvelope = serde_json::from_slice(payload).map_err(|_| "badRpc")?;
-            env.call.validate().map_err(|_| "badRpc")?;
-            let id = env.request_id.as_str().to_owned();
+            let id = rpc_request_id(payload).ok_or("badRpc")?;
             if self.rpc.contains(&id) {
                 return Err("duplicateRequest".into());
             }
@@ -673,4 +671,42 @@ pub fn open_params(kind: &str, params: Value) -> Result<OpenParams, String> {
 /// Wire name of a stream kind (`terminal`, `files.watch`, ...).
 pub fn kind_name(k: StreamKind) -> Value {
     json!(k)
+}
+
+/// Envelope shape and request id only. Decoding `RpcCall` here would pull its whole serde
+/// decoder (~200 KB) into the web WASM; the Host validates the call itself.
+fn rpc_request_id(payload: &[u8]) -> Option<String> {
+    let serde_json::Value::Object(o) = serde_json::from_slice(payload).ok()? else {
+        return None;
+    };
+    if o.len() != 3
+        || !o.get("call")?.is_object()
+        || !(1..=120_000).contains(&o.get("timeoutMs")?.as_u64()?)
+    {
+        return None;
+    }
+    let id = o.get("requestId")?.as_str()?;
+    RequestId::try_from(id.to_owned())
+        .ok()
+        .map(|r| r.as_str().to_owned())
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::rpc_request_id;
+
+    #[test]
+    fn envelope_shape() {
+        let ok = br#"{"requestId":"r1","timeoutMs":5000,"call":{"method":"x"}}"#;
+        assert_eq!(rpc_request_id(ok).as_deref(), Some("r1"));
+        for bad in [
+            &br#"{"requestId":"r1","timeoutMs":0,"call":{}}"#[..],
+            br#"{"requestId":"r1","timeoutMs":5,"call":1}"#,
+            br#"{"requestId":"r1","timeoutMs":5,"call":{},"v":2}"#,
+            br#"{"requestId":"","timeoutMs":5,"call":{}}"#,
+            b"[]",
+        ] {
+            assert!(rpc_request_id(bad).is_none());
+        }
+    }
 }

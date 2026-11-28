@@ -28,7 +28,7 @@ function sourceSnapshot() {
 const sources = sourceSnapshot();
 const cli = run('wasm-bindgen', ['--version']);
 if (cli !== 'wasm-bindgen 0.2.126') throw Error('wasm-bindgen CLI must be 0.2.126');
-run('cargo', ['rustc', '--locked', '-p', 'lomi-remote-core', '--lib', '--release', '--target', 'wasm32-unknown-unknown', '--features', 'browser', '--crate-type', 'cdylib']);
+run('cargo', ['rustc', '--locked', '-p', 'lomi-remote-core', '--lib', '--release', '--target', 'wasm32-unknown-unknown', '--features', 'browser', '--crate-type', 'cdylib', '--config', 'profile.release.opt-level="z"', '--config', 'profile.release.lto="fat"']);
 const target = process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : resolve(root, 'target');
 const binary = resolve(target, 'wasm32-unknown-unknown/release/lomi_remote_core.wasm');
 const temporary = mkdtempSync(join(tmpdir(), 'lomi-remote-core-'));
@@ -36,7 +36,7 @@ try {
   const inputBytes = readFileSync(binary);
   const inputSnapshot = join(temporary, 'input.wasm');
   writeFileSync(inputSnapshot, inputBytes, { flag: 'wx', mode: 0o600 });
-  run('wasm-bindgen', [inputSnapshot, '--target', 'web', '--out-dir', temporary, '--out-name', 'remote_core']);
+  run('wasm-bindgen', [inputSnapshot, '--target', 'web', '--out-dir', temporary, '--out-name', 'remote_core', '--remove-name-section', '--remove-producers-section']);
   rmSync(inputSnapshot);
   if (JSON.stringify(sourceSnapshot()) !== JSON.stringify(sources)) throw Error('core source changed during build');
   const artifacts = Object.fromEntries(readdirSync(temporary).sort().map(name => [name, sha(readFileSync(join(temporary,name)))]));

@@ -24,19 +24,19 @@
     "crates/lomi-remote-core/src/lib.rs": "4a456e4ef0b9333a2404dfcea5bfe1a7a1472171fdf9ce51b5b4be1b2bb56513",
     "crates/lomi-remote-core/src/link.rs": "7578b7d7c157bdd9cbe74c8563f94f941deef0c45ce9b9b16a807829ac61cca3",
     "crates/lomi-remote-core/src/session.rs": "14bb08b05867c6dd4d351aa2da33dbb0e3e0555f183469f47d7d7cfd2f87d0c7",
-    "crates/lomi-remote-core/src/tunnel.rs": "e4c3ce1c9fa16a6332ae0f6f1acf1d5851db17cac2f56b2fa0766d744860c039",
+    "crates/lomi-remote-core/src/tunnel.rs": "a2c96cd791667066107a0ce9cdd1d9b6e03153498797ce0e1e64cfbd606f9ae4",
     "packages/remote-core-wasm/README.md": "2cc409e5ea89aeaf139b167dff8f94d3c29215ba44f339623e6197b1ce512ff7",
     "packages/remote-core-wasm/package.json": "b9b621564ea100c46939361182edb8f2c5cd906e9aea5db097f59c33a4378a35",
-    "packages/remote-core-wasm/scripts/build.mjs": "e2cc5f63fc0403ceffc5ed25e2a7c62f14c8345fa68654408ddf07f9c1249bad",
+    "packages/remote-core-wasm/scripts/build.mjs": "98694af14e183f25ec5a3ad254013a30700bae337581dd3cab984a7e4cf633d9",
     "packages/remote-core-wasm/src/index.d.ts": "1e1c9c3e8077de2fc21035786d28295773c272d98fced92b4e789407712f5dab",
     "packages/remote-core-wasm/src/index.mjs": "b15ba8fadaf014851f2ae3158d4f1d5ff37db45b3bf78388afaf672a6933aa72",
     "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
   },
-  "inputWasmSha256": "4bb2101cc207fefb94ee6db707d1080b45c82e4507306338adf71123995b2f1d",
+  "inputWasmSha256": "52c8b196d87c21e1e3681abd11fe57162a88f95ec952afc8b64e553cd1760d58",
   "generatedSha256": {
     "remote_core.d.ts": "4744f1d17316d55a8dfcc01da827e0077c0176464097d3eb50b54fbda41d00d6",
     "remote_core.js": "a9f514f56f900dcf4cd037fc9c1fb057dd2f8194737eaa02406ee67a88fcbe3c",
-    "remote_core_bg.wasm": "685f9dd5ef023ec88c66cd8adc8cd254291145281cc7af37052563bbac95ddb4",
+    "remote_core_bg.wasm": "67daff67c0cd96146220da122b020e962c464e0fe1b812e405b20bedb5f7f4c1",
     "remote_core_bg.wasm.d.ts": "af3b384f6d97e08d9a15dfeeb1622562139ebedf4bc8ad110f673fe08f14f222"
   },
   "scope": "Sans-I/O client core: relay link frames, link state machine, session request/response and the sealed directory. No sockets, clocks, randomness or key storage; the platform supplies time, seed, keys and nonces.",
