@@ -267,6 +267,10 @@ pub enum Command {
     Deny {
         circuit: CircuitId,
     },
+    /// Closes every tunnel of the device (the owner revoked it on the Host).
+    CloseDevice {
+        fingerprint: [u8; 32],
+    },
 }
 impl Command {
     fn size(&self) -> usize {
@@ -762,6 +766,9 @@ impl Engine {
                 Command::Deny { circuit } => self.deny(circuit),
                 Command::SetLevel { fingerprint, level } => self.set_level(&fingerprint, level),
                 Command::CloseTunnel { circuit } => self.close_circuit(circuit),
+                Command::CloseDevice { fingerprint } => {
+                    self.close_where("revoked", |d| d.fingerprint == fingerprint)
+                }
                 Command::Send {
                     circuit,
                     stream,

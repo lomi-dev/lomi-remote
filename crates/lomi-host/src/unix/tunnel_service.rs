@@ -1482,8 +1482,15 @@ pub(super) fn install(
     let Some(owner) = coordinator.upgrade() else {
         return false;
     };
-    // D5 variant 2: read at once, control after the code is confirmed on the Host. No setting yet.
-    let consent = DeviceConsent::new(owner.owner.store_handle(), account, Mode::Auto);
+    // Default D5 variant 2 (`Auto`); the owner's saved choice wins.
+    let store = owner.owner.store_handle();
+    let mode = store
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .device_mode()
+        .map_or(Mode::Auto, Mode::from);
+    let consent = DeviceConsent::new(store, account, mode);
+    *owner.consent.lock().unwrap_or_else(PoisonError::into_inner) = Some(consent.clone());
     let cell = Arc::new(OnceLock::new());
     let service = HostService {
         coordinator: coordinator.clone(),

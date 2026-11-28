@@ -198,6 +198,34 @@ export type LocalCall =
       params: LocalChatAuditRead;
     }
   | {
+      method: "devices.list";
+      params: {};
+    }
+  | {
+      method: "devices.approve";
+      params: LocalDeviceTarget;
+    }
+  | {
+      method: "devices.deny";
+      params: LocalDeviceTarget;
+    }
+  | {
+      method: "devices.revoke";
+      params: LocalDeviceRevoke;
+    }
+  | {
+      method: "devices.mode.get";
+      params: {};
+    }
+  | {
+      method: "devices.mode.set";
+      params: LocalDeviceModeState;
+    }
+  | {
+      method: "devices.notices";
+      params: {};
+    }
+  | {
       method: "rpc";
       params: RpcRequest;
     }
@@ -338,6 +366,8 @@ export type WorkspaceEpoch = string;
 export type ChatLevel = "off" | "send" | "edit" | "full";
 export type ChatThreadId = string;
 export type PageLimit = number;
+export type LocalDeviceText = string;
+export type LocalDeviceMode = "auto" | "confirm";
 export type RpcCall =
   | {
       method: "workspace.get";
@@ -754,6 +784,15 @@ export interface LocalChatThreadDelete {
 }
 export interface LocalChatAuditRead {
   limit: PageLimit;
+}
+export interface LocalDeviceTarget {
+  circuit: LocalDeviceText;
+}
+export interface LocalDeviceRevoke {
+  fingerprint: LocalDeviceText;
+}
+export interface LocalDeviceModeState {
+  mode: LocalDeviceMode;
 }
 export interface RpcRequest {
   call: RpcCall;

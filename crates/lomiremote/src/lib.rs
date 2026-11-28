@@ -2,6 +2,7 @@ pub mod attach;
 pub mod bootstrap;
 pub mod browser;
 pub mod cli;
+pub mod devices;
 pub mod diagnostics;
 pub mod git_credentials;
 #[cfg(all(target_os = "linux", feature = "linux-setup-handoff"))]

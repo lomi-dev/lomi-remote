@@ -1662,6 +1662,15 @@ fn run() -> u8 {
     if let Some(("logs", args)) = arguments.subcommand() {
         return lomiremote::logs::run(&profile, args.get_flag("follow"), args.get_flag("json"));
     }
+    if let Some(("devices", args)) = arguments.subcommand() {
+        return lomiremote::devices::run(args, json, &mut |call| match request(&profile, call) {
+            Ok(response) => response.result.map_err(|error| {
+                eprintln!("{error:?}");
+                local_exit(error)
+            }),
+            Err(failure) => Err(print_failure(failure, json)),
+        });
+    }
     let (call, json) = match call_for(&arguments) {
         Ok(value) => value,
         Err(error) => return print_failure(error, json),

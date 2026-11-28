@@ -977,6 +977,73 @@ dto!(LocalStatus {
     runtime_id: RuntimeId,
     sharing: LocalSharing
 });
+local_text!(LocalDeviceText, 255);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDeviceMode {
+    /// New devices get read access at once; control waits for the code.
+    Auto,
+    /// Every new device waits for the owner.
+    Confirm,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDeviceLevel {
+    Read,
+    Control,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDeviceReason {
+    NewDevice,
+    Control,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDeviceNoticeKind {
+    NewDevice,
+    ControlRequested,
+    GrantsFull,
+    RateLimited,
+}
+dto!(LocalDeviceModeState {
+    mode: LocalDeviceMode
+});
+// Hex of the device bundle fingerprint (64 chars).
+dto!(LocalDeviceRevoke {
+    fingerprint: LocalDeviceText
+});
+// Hex of the tunnel circuit (32 chars), as listed in `LocalDeviceApproval`.
+dto!(LocalDeviceTarget {
+    circuit: LocalDeviceText
+});
+dto!(LocalDeviceGrant {
+    name: LocalDeviceText,
+    kind: LocalDeviceText,
+    fingerprint: LocalDeviceText,
+    level: LocalDeviceLevel,
+    granted_at: DecimalU64,
+    server_confirmed_at: DecimalU64,
+    valid: bool
+});
+dto!(LocalDeviceApproval {
+    circuit: LocalDeviceText,
+    device_name: LocalDeviceText,
+    fingerprint: LocalDeviceText,
+    code: LocalDeviceText,
+    reason: LocalDeviceReason,
+    at: DecimalU64
+});
+dto!(LocalDevices {
+    mode: LocalDeviceMode,
+    grants: BoundedList<LocalDeviceGrant, 16>,
+    pending: BoundedList<LocalDeviceApproval, 16>
+});
+dto!(LocalDeviceNotice {
+    kind: LocalDeviceNoticeKind,
+    device_name: LocalDeviceText,
+    code: Option<LocalDeviceText>
+});
 dto!(LocalHostNameSet {
     expected_name: Option<LocalHostName>,
     name: LocalHostName
@@ -1361,6 +1428,20 @@ pub enum LocalCall {
     ChatDelete(LocalChatThreadDelete),
     #[serde(rename = "chat.audit")]
     ChatAudit(LocalChatAuditRead),
+    #[serde(rename = "devices.list")]
+    DevicesList {},
+    #[serde(rename = "devices.approve")]
+    DevicesApprove(LocalDeviceTarget),
+    #[serde(rename = "devices.deny")]
+    DevicesDeny(LocalDeviceTarget),
+    #[serde(rename = "devices.revoke")]
+    DevicesRevoke(LocalDeviceRevoke),
+    #[serde(rename = "devices.mode.get")]
+    DevicesModeGet {},
+    #[serde(rename = "devices.mode.set")]
+    DevicesModeSet(LocalDeviceModeState),
+    #[serde(rename = "devices.notices")]
+    DevicesNotices {},
     #[serde(rename = "rpc")]
     Rpc(Box<RpcRequest>),
     #[serde(rename = "stream.ack")]
@@ -1431,6 +1512,9 @@ pub enum LocalResult {
     ChatThread(LocalChatThread),
     ChatDeleted {},
     ChatAudit(BoundedList<LocalChatAuditLine, 200>),
+    Devices(LocalDevices),
+    DeviceMode(LocalDeviceModeState),
+    DeviceNotices(BoundedList<LocalDeviceNotice, 32>),
     Rpc(Box<RpcResponse>),
     StreamAcknowledged(SubscriptionId),
     NativeLease(NativeLease),

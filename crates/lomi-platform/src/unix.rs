@@ -1507,6 +1507,16 @@ impl LocalClient {
             (LocalCall::ChatStop(p), R::ChatThread(t)) => p.thread_id == t.thread_id,
             (LocalCall::ChatDelete(_), R::ChatDeleted {})
             | (LocalCall::ChatAudit(_), R::ChatAudit(_)) => true,
+            (
+                LocalCall::DevicesList {}
+                | LocalCall::DevicesApprove(_)
+                | LocalCall::DevicesDeny(_)
+                | LocalCall::DevicesRevoke(_),
+                R::Devices(_),
+            )
+            | (LocalCall::DevicesModeGet {}, R::DeviceMode(_))
+            | (LocalCall::DevicesNotices {}, R::DeviceNotices(_)) => true,
+            (LocalCall::DevicesModeSet(p), R::DeviceMode(s)) => p == s,
             (LocalCall::WorkspaceAdd(p), R::Workspace(w)) => p.name == w.name,
             (LocalCall::WorkspaceImport(p), R::WorkspaceImported(receipt)) => {
                 p.workspace_id == receipt.import_id

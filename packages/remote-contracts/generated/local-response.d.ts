@@ -148,6 +148,18 @@ export type LocalResult =
       value: BoundedList8;
     }
   | {
+      type: "devices";
+      value: LocalDevices;
+    }
+  | {
+      type: "deviceMode";
+      value: LocalDeviceModeState;
+    }
+  | {
+      type: "deviceNotices";
+      value: BoundedList11;
+    }
+  | {
       type: "rpc";
       value: RpcResponse;
     }
@@ -363,6 +375,23 @@ export type LocalChatAuditLine = string;
  * @maxItems 200
  */
 export type BoundedList8 = LocalChatAuditLine[];
+export type LocalDeviceText = string;
+export type LocalDeviceLevel = "read" | "control";
+/**
+ * @maxItems 16
+ */
+export type BoundedList9 = LocalDeviceGrant[];
+export type LocalDeviceMode = "auto" | "confirm";
+export type LocalDeviceReason = "newDevice" | "control";
+/**
+ * @maxItems 16
+ */
+export type BoundedList10 = LocalDeviceApproval[];
+export type LocalDeviceNoticeKind = "newDevice" | "controlRequested" | "grantsFull" | "rateLimited";
+/**
+ * @maxItems 32
+ */
+export type BoundedList11 = LocalDeviceNotice[];
 export type RpcResponse =
   | {
       requestId: RequestId;
@@ -589,7 +618,7 @@ export type CapabilitySet = Capability[];
 /**
  * @maxItems 32
  */
-export type BoundedList9 = HostProfile[];
+export type BoundedList12 = HostProfile[];
 export type ChunkCount = number;
 export type EventCursor = string;
 export type SubscriptionId = string;
@@ -686,80 +715,80 @@ export type EncodedPathId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList10 = FileMetadata[];
+export type BoundedList13 = FileMetadata[];
 /**
  * @maxItems 1048576
  */
-export type BoundedList11 = number[];
+export type BoundedList14 = number[];
 export type FileEncoding = "utf8" | "utf16Le" | "utf16Be" | "binary" | "unknown";
 export type LineEndings = "lf" | "crLf" | "cr" | "mixed" | "none";
 export type RefId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList14 = RefId[];
+export type BoundedList17 = RefId[];
 export type RemoteId = string;
 export type GitRemoteSelectorKind = "head" | "fetch" | "push";
 /**
  * @maxItems 200
  */
-export type BoundedList15 = GitRemoteSelector[];
+export type BoundedList18 = GitRemoteSelector[];
 /**
  * @maxItems 32
  */
-export type BoundedList13 = GitRemote[];
+export type BoundedList16 = GitRemote[];
 export type RepositoryId = string;
 /**
  * @maxItems 32
  */
-export type BoundedList12 = GitRepository[];
+export type BoundedList15 = GitRepository[];
 export type GitChange =
   "unchanged" | "added" | "modified" | "deleted" | "renamed" | "copied" | "unmerged" | "untracked";
 /**
  * @maxItems 200
  */
-export type BoundedList16 = GitStatusEntry[];
+export type BoundedList19 = GitStatusEntry[];
 export type DiffLineKind = "context" | "added" | "removed";
 export type DiffLineText = string;
 /**
  * @maxItems 200
  */
-export type BoundedList19 = GitDiffLine[];
+export type BoundedList22 = GitDiffLine[];
 /**
  * @maxItems 200
  */
-export type BoundedList18 = GitDiffHunk[];
+export type BoundedList21 = GitDiffHunk[];
 /**
  * @maxItems 200
  */
-export type BoundedList17 = GitDiffFile[];
+export type BoundedList20 = GitDiffFile[];
 export type ObjectId = string;
 /**
  * @maxItems 200
  */
-export type BoundedList20 = GitCommitSummary[];
+export type BoundedList23 = GitCommitSummary[];
 export type ChatName = string;
 export type ChatEffort = string;
 /**
  * @maxItems 16
  */
-export type BoundedList23 = ChatEffort[];
+export type BoundedList26 = ChatEffort[];
 export type ChatKind = "api" | "cli";
 export type ChatModelId = string;
 /**
  * @maxItems 256
  */
-export type BoundedList22 = ChatModel[];
+export type BoundedList25 = ChatModel[];
 /**
  * @maxItems 32
  */
-export type BoundedList21 = ChatProvider[];
+export type BoundedList24 = ChatProvider[];
 export type ChatCursor = string;
 export type ChatWorkspaceMode = "project" | "private";
 /**
  * @maxItems 200
  */
-export type BoundedList24 = ChatThread[];
+export type BoundedList27 = ChatThread[];
 export type ChatMessageContent = string;
 export type ChatMessageId = string;
 export type ChatRole = "user" | "assistant";
@@ -769,7 +798,7 @@ export type ChatStopReason = string;
 /**
  * @maxItems 50
  */
-export type BoundedList25 = ChatMessage[];
+export type BoundedList28 = ChatMessage[];
 export type ApplicationMajor = 2;
 export type ErrorCode =
   | "INVALID_ARGUMENT"
@@ -986,9 +1015,39 @@ export interface LocalChatThread {
   updatedMs: DecimalU64;
   workspaceId: WorkspaceId;
 }
+export interface LocalDevices {
+  grants: BoundedList9;
+  mode: LocalDeviceMode;
+  pending: BoundedList10;
+}
+export interface LocalDeviceGrant {
+  fingerprint: LocalDeviceText;
+  grantedAt: DecimalU64;
+  kind: LocalDeviceText;
+  level: LocalDeviceLevel;
+  name: LocalDeviceText;
+  serverConfirmedAt: DecimalU64;
+  valid: boolean;
+}
+export interface LocalDeviceApproval {
+  at: DecimalU64;
+  circuit: LocalDeviceText;
+  code: LocalDeviceText;
+  deviceName: LocalDeviceText;
+  fingerprint: LocalDeviceText;
+  reason: LocalDeviceReason;
+}
+export interface LocalDeviceModeState {
+  mode: LocalDeviceMode;
+}
+export interface LocalDeviceNotice {
+  code?: LocalDeviceText | null;
+  deviceName: LocalDeviceText;
+  kind: LocalDeviceNoticeKind;
+}
 export interface WorkspaceCapabilitiesResult {
   capabilities: CapabilitySet;
-  profiles: BoundedList9;
+  profiles: BoundedList12;
 }
 export interface HostProfile {
   name: DisplayText;
@@ -1070,7 +1129,7 @@ export interface TerminalResizeResult {
   terminal: TerminalContext;
 }
 export interface FilesListResult {
-  entries: BoundedList10;
+  entries: BoundedList13;
   nextCursor?: EventCursor | null;
   truncated: boolean;
 }
@@ -1083,7 +1142,7 @@ export interface FileMetadata {
   size: DecimalU64;
 }
 export interface FilesReadResult {
-  bytes: BoundedList11;
+  bytes: BoundedList14;
   encoding: FileEncoding;
   lineEndings: LineEndings;
   metadata: FileMetadata;
@@ -1096,19 +1155,19 @@ export interface FilesWatchResult {
   throughSeq: DecimalU64;
 }
 export interface GitRepositoriesResult {
-  repositories: BoundedList12;
+  repositories: BoundedList15;
 }
 export interface GitRepository {
   displayName: DisplayText;
-  remotes: BoundedList13;
+  remotes: BoundedList16;
   repositoryId: RepositoryId;
 }
 export interface GitRemote {
   displayName: DisplayText;
-  refs: BoundedList14;
+  refs: BoundedList17;
   refsStateToken: RepoStateToken;
   remoteId: RemoteId;
-  selectors?: BoundedList15;
+  selectors?: BoundedList18;
 }
 export interface GitRemoteSelector {
   displayName: DisplayText;
@@ -1119,7 +1178,7 @@ export interface GitRemoteSelector {
   refId: RefId;
 }
 export interface GitStatusResult {
-  entries: BoundedList16;
+  entries: BoundedList19;
   head: RepoStateToken;
   index: RepoStateToken;
   nextCursor?: EventCursor | null;
@@ -1135,7 +1194,7 @@ export interface GitStatusEntry {
   worktree: GitChange;
 }
 export interface GitDiffResult {
-  files: BoundedList17;
+  files: BoundedList20;
   nextCursor?: EventCursor | null;
   stateToken: RepoStateToken;
   truncated: boolean;
@@ -1144,11 +1203,11 @@ export interface GitDiffFile {
   binary: boolean;
   displayName: DisplayText;
   entryId: EntryId;
-  hunks: BoundedList18;
+  hunks: BoundedList21;
   truncated: boolean;
 }
 export interface GitDiffHunk {
-  lines: BoundedList19;
+  lines: BoundedList22;
   newStart: DecimalU64;
   oldStart: DecimalU64;
 }
@@ -1157,7 +1216,7 @@ export interface GitDiffLine {
   text: DiffLineText;
 }
 export interface GitLogResult {
-  commits: BoundedList20;
+  commits: BoundedList23;
   nextCursor?: EventCursor | null;
   stateToken: RepoStateToken;
   truncated: boolean;
@@ -1173,14 +1232,14 @@ export interface GitShowResult {
   diff: GitDiffResult;
 }
 export interface ChatProvidersResult {
-  providers: BoundedList21;
+  providers: BoundedList24;
 }
 export interface ChatProvider {
   cli?: ChatName | null;
-  efforts: BoundedList23;
+  efforts: BoundedList26;
   kind: ChatKind;
   loggedIn?: boolean | null;
-  models: BoundedList22;
+  models: BoundedList25;
   name: ChatName;
   providerId: ChatProviderId;
   readOnlyEnforced: boolean;
@@ -1191,7 +1250,7 @@ export interface ChatModel {
 }
 export interface ChatThreadsListResult {
   nextCursor?: ChatCursor | null;
-  threads: BoundedList24;
+  threads: BoundedList27;
 }
 export interface ChatThread {
   createdMs: DecimalU64;
@@ -1209,7 +1268,7 @@ export interface ChatThread {
 }
 export interface ChatThreadGetResult {
   hasMore: boolean;
-  messages: BoundedList25;
+  messages: BoundedList28;
   thread: ChatThread;
 }
 export interface ChatMessage {

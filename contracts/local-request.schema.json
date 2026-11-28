@@ -2155,6 +2155,128 @@
           "additionalProperties": false,
           "properties": {
             "method": {
+              "const": "devices.list",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.approve",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LocalDeviceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.deny",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LocalDeviceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.revoke",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LocalDeviceRevoke"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.mode.get",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.mode.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LocalDeviceModeState"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "devices.notices",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
               "const": "rpc",
               "type": "string"
             },
@@ -2365,6 +2487,65 @@
         "threadId"
       ],
       "type": "object"
+    },
+    "LocalDeviceMode": {
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "New devices get read access at once; control waits for the code.",
+          "type": "string"
+        },
+        {
+          "const": "confirm",
+          "description": "Every new device waits for the owner.",
+          "type": "string"
+        }
+      ]
+    },
+    "LocalDeviceModeState": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/LocalDeviceMode"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceRevoke": {
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "$ref": "#/$defs/LocalDeviceText"
+        }
+      },
+      "required": [
+        "fingerprint"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "circuit": {
+          "$ref": "#/$defs/LocalDeviceText"
+        }
+      },
+      "required": [
+        "circuit"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceText": {
+      "maxLength": 255,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 255
     },
     "LocalDiagnosticLogsRead": {
       "additionalProperties": false,

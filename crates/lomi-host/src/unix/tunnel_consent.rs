@@ -24,7 +24,6 @@
 //! Control for an `Auto` device: the service calls `request_control(circuit)` when the check says
 //! `ControlNotConfirmed`; the owner `approve`s the same code, `confirm_control` is written and the
 //! device's live tunnels become `Control`.
-#![allow(dead_code)] // approve/deny/pending/take_notices wait for the owner UI
 
 use lomi_host_http::uplink::tunnels::{
     Admission, AttestedDevice, CircuitId, Closing, Command, DeviceEntry, DeviceEvent, Handle,
@@ -32,7 +31,10 @@ use lomi_host_http::uplink::tunnels::{
 };
 use lomi_host_store::{DeviceGrant, HostStore, MAX_DEVICE_GRANTS, StoreError};
 use lomi_remote_crypto::Permissions;
-use lomi_remote_protocol::tunnel::{DeviceKind, Hello, StaleEpoch};
+use lomi_remote_protocol::{
+    ipc::LocalDeviceMode,
+    tunnel::{DeviceKind, Hello, StaleEpoch},
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -55,6 +57,22 @@ pub(super) enum Mode {
     Auto,
     /// Every new device waits for the owner.
     Confirm,
+}
+impl From<LocalDeviceMode> for Mode {
+    fn from(m: LocalDeviceMode) -> Self {
+        match m {
+            LocalDeviceMode::Auto => Self::Auto,
+            LocalDeviceMode::Confirm => Self::Confirm,
+        }
+    }
+}
+impl From<Mode> for LocalDeviceMode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Auto => Self::Auto,
+            Mode::Confirm => Self::Confirm,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -371,6 +389,35 @@ impl DeviceConsent {
     /// The engine handle `install_tunnels` returned; approvals need it.
     pub(super) fn set_handle(&self, handle: Handle) {
         self.inner().handle = Some(handle);
+    }
+
+    pub(super) fn mode(&self) -> Mode {
+        self.inner().mode
+    }
+    /// Stores the mode, then applies it to the next new device.
+    pub(super) fn set_mode(&self, mode: Mode) -> bool {
+        let mut g = self.inner();
+        let saved = g.store().save_device_mode(mode.into()).is_ok();
+        if saved {
+            g.mode = mode;
+        }
+        saved
+    }
+    pub(super) fn grants(&self) -> Vec<DeviceGrant> {
+        self.inner().store().list_grants().unwrap_or_default()
+    }
+    /// The owner ends a grant: it is deleted and every live tunnel of the device is closed. The
+    /// account may still list the device; if so its next connection is a new device again.
+    pub(super) fn revoke(&self, key: &Key) -> bool {
+        let mut g = self.inner();
+        let Ok(existed) = g.store().revoke(key) else {
+            return false;
+        };
+        g.pending.retain(|p| p.grant.device_key != *key);
+        if let Some(h) = &g.handle {
+            let _ = h.push(Command::CloseDevice { fingerprint: *key });
+        }
+        existed
     }
 
     /// The service asks for control on `circuit` (check said `ControlNotConfirmed`). Returns the

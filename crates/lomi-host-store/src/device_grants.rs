@@ -197,6 +197,32 @@ impl HostStore {
         Ok(changed > 0)
     }
 
+    /// The owner's choice for new devices; `Auto` until one is saved.
+    pub fn device_mode(&self) -> Result<lomi_remote_protocol::ipc::LocalDeviceMode> {
+        let value: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM metadata WHERE key='device_consent_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value.map_or(Ok(lomi_remote_protocol::ipc::LocalDeviceMode::Auto), |v| {
+            serde_json::from_str(&v).map_err(|_| StoreError::Storage)
+        })
+    }
+    pub fn save_device_mode(
+        &mut self,
+        mode: lomi_remote_protocol::ipc::LocalDeviceMode,
+    ) -> Result<()> {
+        let value = serde_json::to_string(&mode).map_err(|_| StoreError::Invalid)?;
+        self.db.execute(
+            "INSERT INTO metadata(key,value) VALUES('device_consent_mode',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [value],
+        )?;
+        Ok(())
+    }
+
     /// Delete every grant of `account_id` whose key is not in `keep` (the
     /// server's current device list). Returns the number deleted.
     pub fn revoke_account_devices_not_in(
@@ -268,6 +294,17 @@ mod tests {
 
     fn open(dir: &Dir) -> HostStore {
         HostStore::open(&dir.db(), Limits::default()).expect("open store")
+    }
+
+    #[test]
+    fn device_mode_defaults_to_auto_and_persists() {
+        use lomi_remote_protocol::ipc::LocalDeviceMode as M;
+        let dir = Dir::new();
+        let mut store = open(&dir);
+        assert_eq!(store.device_mode().unwrap(), M::Auto);
+        store.save_device_mode(M::Confirm).unwrap();
+        drop(store);
+        assert_eq!(open(&dir).device_mode().unwrap(), M::Confirm);
     }
 
     #[test]

@@ -286,7 +286,8 @@ fn profile_purge_store_has_mutable_data(tx: &Transaction<'_>) -> Result<bool> {
         "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN(
             'local_start_mode','login_generation','authorization_verified_generation',
             'authorization_rejection','deferred_login_intent','cloud_runtime_state',
-            'host_publication_intent','host_acknowledged_publication','host_display_name'
+            'host_publication_intent','host_acknowledged_publication','host_display_name',
+            'device_consent_mode'
          ) OR key GLOB 'shell_profile/*'
            OR key GLOB 'shell_profile_cwd/*'
            OR key GLOB 'workspace_import/*'
@@ -689,7 +690,7 @@ impl HostStore {
                 'local_start_mode','login_generation','authorization_verified_generation',
                 'authorization_rejection','deferred_login_intent','cloud_runtime_state',
                 'host_publication_intent','host_acknowledged_publication',
-                'host_display_name'
+                'host_display_name','device_consent_mode'
              ) OR key GLOB 'shell_profile/*'
                OR key GLOB 'shell_profile_cwd/*'
                OR key GLOB 'workspace_import/*'

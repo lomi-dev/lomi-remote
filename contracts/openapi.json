@@ -9107,6 +9107,128 @@
                 "additionalProperties": false,
                 "properties": {
                   "method": {
+                    "const": "devices.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.approve",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceTarget"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.deny",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceTarget"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.revoke",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceRevoke"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.mode.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.mode.set",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceModeState"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "devices.notices",
+                    "type": "string"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
                     "const": "rpc",
                     "type": "string"
                   },
@@ -9317,6 +9439,65 @@
               "threadId"
             ],
             "type": "object"
+          },
+          "LocalDeviceMode": {
+            "oneOf": [
+              {
+                "const": "auto",
+                "description": "New devices get read access at once; control waits for the code.",
+                "type": "string"
+              },
+              {
+                "const": "confirm",
+                "description": "Every new device waits for the owner.",
+                "type": "string"
+              }
+            ]
+          },
+          "LocalDeviceModeState": {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceMode"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceRevoke": {
+            "additionalProperties": false,
+            "properties": {
+              "fingerprint": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceText"
+              }
+            },
+            "required": [
+              "fingerprint"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceTarget": {
+            "additionalProperties": false,
+            "properties": {
+              "circuit": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceText"
+              }
+            },
+            "required": [
+              "circuit"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceText": {
+            "maxLength": 255,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 255
           },
           "LocalDiagnosticLogsRead": {
             "additionalProperties": false,
@@ -11792,12 +11973,33 @@
           },
           "BoundedList10": {
             "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceApproval"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "BoundedList11": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceNotice"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "BoundedList12": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/HostProfile"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "BoundedList13": {
+            "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/FileMetadata"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList11": {
+          "BoundedList14": {
             "items": {
               "format": "uint8",
               "maximum": 255,
@@ -11807,58 +12009,37 @@
             "maxItems": 1048576,
             "type": "array"
           },
-          "BoundedList12": {
+          "BoundedList15": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRepository"
             },
             "maxItems": 32,
             "type": "array"
           },
-          "BoundedList13": {
+          "BoundedList16": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRemote"
             },
             "maxItems": 32,
             "type": "array"
           },
-          "BoundedList14": {
+          "BoundedList17": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/RefId"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList15": {
+          "BoundedList18": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/GitRemoteSelector"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList16": {
-            "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitStatusEntry"
-            },
-            "maxItems": 200,
-            "type": "array"
-          },
-          "BoundedList17": {
-            "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffFile"
-            },
-            "maxItems": 200,
-            "type": "array"
-          },
-          "BoundedList18": {
-            "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffHunk"
-            },
-            "maxItems": 200,
-            "type": "array"
-          },
           "BoundedList19": {
             "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffLine"
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitStatusEntry"
             },
             "maxItems": 200,
             "type": "array"
@@ -11872,40 +12053,61 @@
           },
           "BoundedList20": {
             "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/GitCommitSummary"
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffFile"
             },
             "maxItems": 200,
             "type": "array"
           },
           "BoundedList21": {
             "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffHunk"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList22": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitDiffLine"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList23": {
+            "items": {
+              "$ref": "#/components/schemas/LocalResponse/$defs/GitCommitSummary"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList24": {
+            "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/ChatProvider"
             },
             "maxItems": 32,
             "type": "array"
           },
-          "BoundedList22": {
+          "BoundedList25": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/ChatModel"
             },
             "maxItems": 256,
             "type": "array"
           },
-          "BoundedList23": {
+          "BoundedList26": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/ChatEffort"
             },
             "maxItems": 16,
             "type": "array"
           },
-          "BoundedList24": {
+          "BoundedList27": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
             },
             "maxItems": 200,
             "type": "array"
           },
-          "BoundedList25": {
+          "BoundedList28": {
             "items": {
               "$ref": "#/components/schemas/LocalResponse/$defs/ChatMessage"
             },
@@ -11956,9 +12158,9 @@
           },
           "BoundedList9": {
             "items": {
-              "$ref": "#/components/schemas/LocalResponse/$defs/HostProfile"
+              "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceGrant"
             },
-            "maxItems": 32,
+            "maxItems": 16,
             "type": "array"
           },
           "Capability": {
@@ -12168,7 +12370,7 @@
                 ]
               },
               "efforts": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList23"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList26"
               },
               "kind": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/ChatKind"
@@ -12180,7 +12382,7 @@
                 ]
               },
               "models": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList22"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList25"
               },
               "name": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/ChatName"
@@ -12216,7 +12418,7 @@
             "additionalProperties": false,
             "properties": {
               "providers": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList21"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList24"
               }
             },
             "required": [
@@ -12346,7 +12548,7 @@
                 "type": "boolean"
               },
               "messages": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList25"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList28"
               },
               "thread": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/ChatThread"
@@ -12394,7 +12596,7 @@
                 ]
               },
               "threads": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList24"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList27"
               }
             },
             "required": [
@@ -12772,7 +12974,7 @@
             "additionalProperties": false,
             "properties": {
               "entries": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList10"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList13"
               },
               "nextCursor": {
                 "anyOf": [
@@ -12798,7 +13000,7 @@
             "additionalProperties": false,
             "properties": {
               "bytes": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList11"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList14"
               },
               "encoding": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/FileEncoding"
@@ -12896,7 +13098,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/EntryId"
               },
               "hunks": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList18"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList21"
               },
               "truncated": {
                 "type": "boolean"
@@ -12915,7 +13117,7 @@
             "additionalProperties": false,
             "properties": {
               "lines": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList19"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList22"
               },
               "newStart": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
@@ -12951,7 +13153,7 @@
             "additionalProperties": false,
             "properties": {
               "files": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList17"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList20"
               },
               "nextCursor": {
                 "anyOf": [
@@ -12981,7 +13183,7 @@
             "additionalProperties": false,
             "properties": {
               "commits": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList20"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList23"
               },
               "nextCursor": {
                 "anyOf": [
@@ -13014,7 +13216,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/DisplayText"
               },
               "refs": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList14"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList17"
               },
               "refsStateToken": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepoStateToken"
@@ -13023,7 +13225,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/RemoteId"
               },
               "selectors": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList15"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList18"
               }
             },
             "required": [
@@ -13078,7 +13280,7 @@
             "additionalProperties": false,
             "properties": {
               "repositories": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList12"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList15"
               }
             },
             "required": [
@@ -13093,7 +13295,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/DisplayText"
               },
               "remotes": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList13"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList16"
               },
               "repositoryId": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepositoryId"
@@ -13158,7 +13360,7 @@
             "additionalProperties": false,
             "properties": {
               "entries": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList16"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList19"
               },
               "head": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/RepoStateToken"
@@ -13402,6 +13604,178 @@
               "permissions",
               "streaming",
               "updatedMs"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceApproval": {
+            "additionalProperties": false,
+            "properties": {
+              "at": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "circuit": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "code": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "deviceName": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "fingerprint": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceReason"
+              }
+            },
+            "required": [
+              "circuit",
+              "deviceName",
+              "fingerprint",
+              "code",
+              "reason",
+              "at"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceGrant": {
+            "additionalProperties": false,
+            "properties": {
+              "fingerprint": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "grantedAt": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "level": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceLevel"
+              },
+              "name": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "serverConfirmedAt": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/DecimalU64"
+              },
+              "valid": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "fingerprint",
+              "level",
+              "grantedAt",
+              "serverConfirmedAt",
+              "valid"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceLevel": {
+            "enum": [
+              "read",
+              "control"
+            ],
+            "type": "string"
+          },
+          "LocalDeviceMode": {
+            "oneOf": [
+              {
+                "const": "auto",
+                "description": "New devices get read access at once; control waits for the code.",
+                "type": "string"
+              },
+              {
+                "const": "confirm",
+                "description": "Every new device waits for the owner.",
+                "type": "string"
+              }
+            ]
+          },
+          "LocalDeviceModeState": {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceMode"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceNotice": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "deviceName": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceNoticeKind"
+              }
+            },
+            "required": [
+              "kind",
+              "deviceName"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceNoticeKind": {
+            "enum": [
+              "newDevice",
+              "controlRequested",
+              "grantsFull",
+              "rateLimited"
+            ],
+            "type": "string"
+          },
+          "LocalDeviceReason": {
+            "enum": [
+              "newDevice",
+              "control"
+            ],
+            "type": "string"
+          },
+          "LocalDeviceText": {
+            "maxLength": 255,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 255
+          },
+          "LocalDevices": {
+            "additionalProperties": false,
+            "properties": {
+              "grants": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList9"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceMode"
+              },
+              "pending": {
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList10"
+              }
+            },
+            "required": [
+              "mode",
+              "grants",
+              "pending"
             ],
             "type": "object"
           },
@@ -14399,6 +14773,57 @@
                   },
                   "value": {
                     "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList8"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "devices",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalDevices"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "deviceMode",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceModeState"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "deviceNotices",
+                    "type": "string"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList11"
                   }
                 },
                 "required": [
@@ -16525,7 +16950,7 @@
                 "$ref": "#/components/schemas/LocalResponse/$defs/CapabilitySet"
               },
               "profiles": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList9"
+                "$ref": "#/components/schemas/LocalResponse/$defs/BoundedList12"
               }
             },
             "required": [

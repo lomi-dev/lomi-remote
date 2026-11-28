@@ -93,7 +93,7 @@
     "crates/lomi-remote-protocol/src/chat.rs": "efab2e4f66f3a08adbaefff10bdf97c331108d88f63e4502b204a122c4878033",
     "crates/lomi-remote-protocol/src/errors.rs": "fad6947d8a44a5d77484afbe4e83cccc512d93fcb9dac59a4ecaa703055a0075",
     "crates/lomi-remote-protocol/src/http.rs": "3a6c3560bc7384cfcfc809c2293e768bbc4b00e33c54ff074a6479d5a26b7a88",
-    "crates/lomi-remote-protocol/src/ipc.rs": "d080e65fe9d4ec7adb4ec34080d7495f53bb0894c432a7de20977a6413771486",
+    "crates/lomi-remote-protocol/src/ipc.rs": "de4511ae8b7704348f5203b2ace38d2a59831d80bcfee79b89708737eee58592",
     "crates/lomi-remote-protocol/src/json_wire.rs": "27aa02cd33ac1533ea38ba7b1ada3eaea9734ee7060f5b1feb1d60e376499e9f",
     "crates/lomi-remote-protocol/src/lib.rs": "6895c2d638cc9633bf9e7c8757792de8eb73dc476e4f2849e1f5515cd4f2f463",
     "crates/lomi-remote-protocol/src/limits.rs": "96cbb1442d784ca0e22c48562282384253f039b130db3710599d0ce976c6809f",

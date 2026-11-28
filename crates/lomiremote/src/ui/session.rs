@@ -284,12 +284,11 @@ mod tests {
         );
         backend.calls.clear();
         session.poll(&mut backend);
-        assert!(
-            backend
-                .calls
-                .iter()
-                .all(|call| matches!(call, LocalCall::LoginStatus {}))
-        );
+        // Device notices are polled with the login status; nothing reloads.
+        assert!(backend.calls.iter().all(|call| matches!(
+            call,
+            LocalCall::LoginStatus {} | LocalCall::DevicesNotices {}
+        )));
     }
 
     #[test]
@@ -341,7 +340,11 @@ impl Session {
         let changed = self.sign_in.poll(backend);
         let ready = self.sign_in.ready();
         if ready == self.authenticated {
-            return !ready && changed;
+            return if ready {
+                self.dashboard.poll_devices(backend)
+            } else {
+                changed
+            };
         }
         self.authenticated = ready;
         if ready {

@@ -23,7 +23,7 @@
     "crates/lomi-remote-protocol/src/chat.rs": "efab2e4f66f3a08adbaefff10bdf97c331108d88f63e4502b204a122c4878033",
     "crates/lomi-remote-protocol/src/errors.rs": "fad6947d8a44a5d77484afbe4e83cccc512d93fcb9dac59a4ecaa703055a0075",
     "crates/lomi-remote-protocol/src/http.rs": "3a6c3560bc7384cfcfc809c2293e768bbc4b00e33c54ff074a6479d5a26b7a88",
-    "crates/lomi-remote-protocol/src/ipc.rs": "d080e65fe9d4ec7adb4ec34080d7495f53bb0894c432a7de20977a6413771486",
+    "crates/lomi-remote-protocol/src/ipc.rs": "de4511ae8b7704348f5203b2ace38d2a59831d80bcfee79b89708737eee58592",
     "crates/lomi-remote-protocol/src/json_wire.rs": "27aa02cd33ac1533ea38ba7b1ada3eaea9734ee7060f5b1feb1d60e376499e9f",
     "crates/lomi-remote-protocol/src/lib.rs": "6895c2d638cc9633bf9e7c8757792de8eb73dc476e4f2849e1f5515cd4f2f463",
     "crates/lomi-remote-protocol/src/limits.rs": "96cbb1442d784ca0e22c48562282384253f039b130db3710599d0ce976c6809f",
@@ -40,11 +40,11 @@
     "packages/protocol-codec-wasm/src/index.mjs": "995017c04d4a221ee5645f32f5c494c50f36017342205e8b7b260af62f637ccb",
     "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
   },
-  "inputWasmSha256": "cdf6027c57ba2b9c92b64cb85817930d774a1568f30e13b6a9a043d6c75cfe95",
+  "inputWasmSha256": "c81869b7dd4ce2a935c4d8353373f01e7707af5d2718b6cd73957ff1ea2835ca",
   "generatedSha256": {
     "protocol_codec.d.ts": "73b24bf673c4dccf91d016a431698af6fb6a44c2714dba3e5edc3ecabab5b3b7",
     "protocol_codec.js": "7e466fbe6c40eb933cb86cecbc91e68c0c347360f45ce09bc4b4eb8a2e080474",
-    "protocol_codec_bg.wasm": "ff4cbd6bb378463dd6ec49ffa0367172d3eb9f731b743dc41647cd6e869767fd",
+    "protocol_codec_bg.wasm": "2099aaa2d7d83e89bbf4c6e8177d3ba60e9af71f93f3f8e84a1d42258abeae90",
     "protocol_codec_bg.wasm.d.ts": "9e6944ae4cfd772a476245fb7e5d221e5a656f7ce5e0981eb5466ddd1247a9f7"
   },
   "scope": "Pure wire validation and generic logical-message framing; no authentication, cryptography, database state, authority, freshness or semantic domain stream application.",

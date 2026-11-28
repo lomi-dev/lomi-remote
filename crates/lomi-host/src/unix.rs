@@ -87,6 +87,7 @@ mod remote_terminal_rename;
 mod rpc;
 mod tunnel_authz;
 mod tunnel_consent;
+mod tunnel_devices;
 mod tunnel_service;
 mod workspace_removal;
 // Root integrates every writer before activating this common owner graph.
@@ -226,6 +227,8 @@ struct Coordinator {
         Arc<Mutex<std::collections::BTreeMap<WorkspaceId, std::sync::Weak<Mutex<()>>>>>,
     files: remote_files::Roots,
     chat: remote_chat::Chat,
+    /// Set once the device tunnel is installed (needs the Host identity).
+    consent: Mutex<Option<tunnel_consent::DeviceConsent>>,
     git_reads: remote_git::Reads,
     git_mutations: remote_git_mutations::Mutations,
     native_editor: Mutex<Option<Arc<native_editor::NativeEditorHost>>>,
@@ -256,6 +259,7 @@ impl Coordinator {
             workspace_locks: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             files: remote_files::Roots::default(),
             chat: remote_chat::Chat::default(),
+            consent: Mutex::new(None),
             git_reads,
             git_mutations,
             native_editor: Mutex::new(None),
@@ -843,6 +847,13 @@ impl Coordinator {
                     level: target.level,
                 }))
             }
+            LocalCall::DevicesList {}
+            | LocalCall::DevicesApprove(_)
+            | LocalCall::DevicesDeny(_)
+            | LocalCall::DevicesRevoke(_)
+            | LocalCall::DevicesModeGet {}
+            | LocalCall::DevicesModeSet(_)
+            | LocalCall::DevicesNotices {} => self.devices_call(call),
             LocalCall::ChatThreads(target) => {
                 let project = rpc::owner_call(operation, || {
                     self.owner.workspace(operation, target.workspace_id)

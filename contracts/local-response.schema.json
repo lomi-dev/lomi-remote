@@ -13,12 +13,33 @@
     },
     "BoundedList10": {
       "items": {
+        "$ref": "#/$defs/LocalDeviceApproval"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "BoundedList11": {
+      "items": {
+        "$ref": "#/$defs/LocalDeviceNotice"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList12": {
+      "items": {
+        "$ref": "#/$defs/HostProfile"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "BoundedList13": {
+      "items": {
         "$ref": "#/$defs/FileMetadata"
       },
       "maxItems": 200,
       "type": "array"
     },
-    "BoundedList11": {
+    "BoundedList14": {
       "items": {
         "format": "uint8",
         "maximum": 255,
@@ -28,58 +49,37 @@
       "maxItems": 1048576,
       "type": "array"
     },
-    "BoundedList12": {
+    "BoundedList15": {
       "items": {
         "$ref": "#/$defs/GitRepository"
       },
       "maxItems": 32,
       "type": "array"
     },
-    "BoundedList13": {
+    "BoundedList16": {
       "items": {
         "$ref": "#/$defs/GitRemote"
       },
       "maxItems": 32,
       "type": "array"
     },
-    "BoundedList14": {
+    "BoundedList17": {
       "items": {
         "$ref": "#/$defs/RefId"
       },
       "maxItems": 200,
       "type": "array"
     },
-    "BoundedList15": {
+    "BoundedList18": {
       "items": {
         "$ref": "#/$defs/GitRemoteSelector"
       },
       "maxItems": 200,
       "type": "array"
     },
-    "BoundedList16": {
-      "items": {
-        "$ref": "#/$defs/GitStatusEntry"
-      },
-      "maxItems": 200,
-      "type": "array"
-    },
-    "BoundedList17": {
-      "items": {
-        "$ref": "#/$defs/GitDiffFile"
-      },
-      "maxItems": 200,
-      "type": "array"
-    },
-    "BoundedList18": {
-      "items": {
-        "$ref": "#/$defs/GitDiffHunk"
-      },
-      "maxItems": 200,
-      "type": "array"
-    },
     "BoundedList19": {
       "items": {
-        "$ref": "#/$defs/GitDiffLine"
+        "$ref": "#/$defs/GitStatusEntry"
       },
       "maxItems": 200,
       "type": "array"
@@ -93,40 +93,61 @@
     },
     "BoundedList20": {
       "items": {
-        "$ref": "#/$defs/GitCommitSummary"
+        "$ref": "#/$defs/GitDiffFile"
       },
       "maxItems": 200,
       "type": "array"
     },
     "BoundedList21": {
       "items": {
+        "$ref": "#/$defs/GitDiffHunk"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList22": {
+      "items": {
+        "$ref": "#/$defs/GitDiffLine"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList23": {
+      "items": {
+        "$ref": "#/$defs/GitCommitSummary"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "BoundedList24": {
+      "items": {
         "$ref": "#/$defs/ChatProvider"
       },
       "maxItems": 32,
       "type": "array"
     },
-    "BoundedList22": {
+    "BoundedList25": {
       "items": {
         "$ref": "#/$defs/ChatModel"
       },
       "maxItems": 256,
       "type": "array"
     },
-    "BoundedList23": {
+    "BoundedList26": {
       "items": {
         "$ref": "#/$defs/ChatEffort"
       },
       "maxItems": 16,
       "type": "array"
     },
-    "BoundedList24": {
+    "BoundedList27": {
       "items": {
         "$ref": "#/$defs/ChatThread"
       },
       "maxItems": 200,
       "type": "array"
     },
-    "BoundedList25": {
+    "BoundedList28": {
       "items": {
         "$ref": "#/$defs/ChatMessage"
       },
@@ -177,9 +198,9 @@
     },
     "BoundedList9": {
       "items": {
-        "$ref": "#/$defs/HostProfile"
+        "$ref": "#/$defs/LocalDeviceGrant"
       },
-      "maxItems": 32,
+      "maxItems": 16,
       "type": "array"
     },
     "Capability": {
@@ -389,7 +410,7 @@
           ]
         },
         "efforts": {
-          "$ref": "#/$defs/BoundedList23"
+          "$ref": "#/$defs/BoundedList26"
         },
         "kind": {
           "$ref": "#/$defs/ChatKind"
@@ -401,7 +422,7 @@
           ]
         },
         "models": {
-          "$ref": "#/$defs/BoundedList22"
+          "$ref": "#/$defs/BoundedList25"
         },
         "name": {
           "$ref": "#/$defs/ChatName"
@@ -437,7 +458,7 @@
       "additionalProperties": false,
       "properties": {
         "providers": {
-          "$ref": "#/$defs/BoundedList21"
+          "$ref": "#/$defs/BoundedList24"
         }
       },
       "required": [
@@ -567,7 +588,7 @@
           "type": "boolean"
         },
         "messages": {
-          "$ref": "#/$defs/BoundedList25"
+          "$ref": "#/$defs/BoundedList28"
         },
         "thread": {
           "$ref": "#/$defs/ChatThread"
@@ -615,7 +636,7 @@
           ]
         },
         "threads": {
-          "$ref": "#/$defs/BoundedList24"
+          "$ref": "#/$defs/BoundedList27"
         }
       },
       "required": [
@@ -993,7 +1014,7 @@
       "additionalProperties": false,
       "properties": {
         "entries": {
-          "$ref": "#/$defs/BoundedList10"
+          "$ref": "#/$defs/BoundedList13"
         },
         "nextCursor": {
           "anyOf": [
@@ -1019,7 +1040,7 @@
       "additionalProperties": false,
       "properties": {
         "bytes": {
-          "$ref": "#/$defs/BoundedList11"
+          "$ref": "#/$defs/BoundedList14"
         },
         "encoding": {
           "$ref": "#/$defs/FileEncoding"
@@ -1117,7 +1138,7 @@
           "$ref": "#/$defs/EntryId"
         },
         "hunks": {
-          "$ref": "#/$defs/BoundedList18"
+          "$ref": "#/$defs/BoundedList21"
         },
         "truncated": {
           "type": "boolean"
@@ -1136,7 +1157,7 @@
       "additionalProperties": false,
       "properties": {
         "lines": {
-          "$ref": "#/$defs/BoundedList19"
+          "$ref": "#/$defs/BoundedList22"
         },
         "newStart": {
           "$ref": "#/$defs/DecimalU64"
@@ -1172,7 +1193,7 @@
       "additionalProperties": false,
       "properties": {
         "files": {
-          "$ref": "#/$defs/BoundedList17"
+          "$ref": "#/$defs/BoundedList20"
         },
         "nextCursor": {
           "anyOf": [
@@ -1202,7 +1223,7 @@
       "additionalProperties": false,
       "properties": {
         "commits": {
-          "$ref": "#/$defs/BoundedList20"
+          "$ref": "#/$defs/BoundedList23"
         },
         "nextCursor": {
           "anyOf": [
@@ -1235,7 +1256,7 @@
           "$ref": "#/$defs/DisplayText"
         },
         "refs": {
-          "$ref": "#/$defs/BoundedList14"
+          "$ref": "#/$defs/BoundedList17"
         },
         "refsStateToken": {
           "$ref": "#/$defs/RepoStateToken"
@@ -1244,7 +1265,7 @@
           "$ref": "#/$defs/RemoteId"
         },
         "selectors": {
-          "$ref": "#/$defs/BoundedList15"
+          "$ref": "#/$defs/BoundedList18"
         }
       },
       "required": [
@@ -1299,7 +1320,7 @@
       "additionalProperties": false,
       "properties": {
         "repositories": {
-          "$ref": "#/$defs/BoundedList12"
+          "$ref": "#/$defs/BoundedList15"
         }
       },
       "required": [
@@ -1314,7 +1335,7 @@
           "$ref": "#/$defs/DisplayText"
         },
         "remotes": {
-          "$ref": "#/$defs/BoundedList13"
+          "$ref": "#/$defs/BoundedList16"
         },
         "repositoryId": {
           "$ref": "#/$defs/RepositoryId"
@@ -1379,7 +1400,7 @@
       "additionalProperties": false,
       "properties": {
         "entries": {
-          "$ref": "#/$defs/BoundedList16"
+          "$ref": "#/$defs/BoundedList19"
         },
         "head": {
           "$ref": "#/$defs/RepoStateToken"
@@ -1623,6 +1644,178 @@
         "permissions",
         "streaming",
         "updatedMs"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceApproval": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "circuit": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "code": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "deviceName": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "reason": {
+          "$ref": "#/$defs/LocalDeviceReason"
+        }
+      },
+      "required": [
+        "circuit",
+        "deviceName",
+        "fingerprint",
+        "code",
+        "reason",
+        "at"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "grantedAt": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "kind": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "level": {
+          "$ref": "#/$defs/LocalDeviceLevel"
+        },
+        "name": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "serverConfirmedAt": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "fingerprint",
+        "level",
+        "grantedAt",
+        "serverConfirmedAt",
+        "valid"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceLevel": {
+      "enum": [
+        "read",
+        "control"
+      ],
+      "type": "string"
+    },
+    "LocalDeviceMode": {
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "New devices get read access at once; control waits for the code.",
+          "type": "string"
+        },
+        {
+          "const": "confirm",
+          "description": "Every new device waits for the owner.",
+          "type": "string"
+        }
+      ]
+    },
+    "LocalDeviceModeState": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/LocalDeviceMode"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceNotice": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalDeviceText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deviceName": {
+          "$ref": "#/$defs/LocalDeviceText"
+        },
+        "kind": {
+          "$ref": "#/$defs/LocalDeviceNoticeKind"
+        }
+      },
+      "required": [
+        "kind",
+        "deviceName"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceNoticeKind": {
+      "enum": [
+        "newDevice",
+        "controlRequested",
+        "grantsFull",
+        "rateLimited"
+      ],
+      "type": "string"
+    },
+    "LocalDeviceReason": {
+      "enum": [
+        "newDevice",
+        "control"
+      ],
+      "type": "string"
+    },
+    "LocalDeviceText": {
+      "maxLength": 255,
+      "minLength": 1,
+      "not": {
+        "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+      },
+      "type": "string",
+      "x-lomi-maxUtf8Bytes": 255
+    },
+    "LocalDevices": {
+      "additionalProperties": false,
+      "properties": {
+        "grants": {
+          "$ref": "#/$defs/BoundedList9"
+        },
+        "mode": {
+          "$ref": "#/$defs/LocalDeviceMode"
+        },
+        "pending": {
+          "$ref": "#/$defs/BoundedList10"
+        }
+      },
+      "required": [
+        "mode",
+        "grants",
+        "pending"
       ],
       "type": "object"
     },
@@ -2620,6 +2813,57 @@
             },
             "value": {
               "$ref": "#/$defs/BoundedList8"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "devices",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalDevices"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "deviceMode",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/LocalDeviceModeState"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "deviceNotices",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/BoundedList11"
             }
           },
           "required": [
@@ -4746,7 +4990,7 @@
           "$ref": "#/$defs/CapabilitySet"
         },
         "profiles": {
-          "$ref": "#/$defs/BoundedList9"
+          "$ref": "#/$defs/BoundedList12"
         }
       },
       "required": [

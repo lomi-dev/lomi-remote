@@ -32,6 +32,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod devices;
+#[cfg(test)]
+mod devices_tests;
 mod directory_picker;
 pub(crate) mod interaction;
 #[cfg(test)]
@@ -263,6 +266,7 @@ pub struct Dashboard {
     login_status: Option<LocalLoginStatus>,
     login_presentation: Option<LocalLoginPresentation>,
     login_message: Option<&'static str>,
+    devices: devices::Devices,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -327,6 +331,11 @@ impl Dashboard {
         self.bind_workspace_panel(backend, true);
     }
 
+    /// Device notices and approvals; true when the screen changed.
+    pub(super) fn poll_devices(&mut self, backend: &mut impl Backend) -> bool {
+        self.devices.poll(backend)
+    }
+
     fn visible_workspace_indices(&self) -> Vec<usize> {
         let query = self.search_query.to_lowercase();
         self.workspaces
@@ -362,7 +371,9 @@ impl Dashboard {
         self.frame_area.set(frame.area());
         self.controls.begin();
         self.draw_dashboard(frame);
-        if self.help {
+        if self.devices.open {
+            self.devices.draw(frame);
+        } else if self.help {
             self.help_max_scroll
                 .set(shortcuts::draw(frame, self.help_scroll, &self.controls));
             self.controls.highlight(frame);
@@ -379,6 +390,21 @@ impl Dashboard {
             picker.draw(frame);
         } else {
             self.controls.highlight(frame);
+        }
+        if !self.devices.open
+            && let Some(banner) = self.devices.banner()
+        {
+            let area = frame.area();
+            let line = Rect::new(area.x, area.y, area.width, 1.min(area.height));
+            frame.render_widget(
+                Paragraph::new(format!(" {banner}")).style(
+                    Style::default()
+                        .fg(theme::ON_ACCENT)
+                        .bg(theme::WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                line,
+            );
         }
     }
 
@@ -753,6 +779,10 @@ impl Dashboard {
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
         ) {
             self.controls.blur();
+        }
+        if self.devices.open {
+            self.devices.handle_key(key, backend);
+            return true;
         }
         if self.help {
             if matches!(
@@ -1534,6 +1564,11 @@ impl Dashboard {
             KeyCode::Down => self.select_workspace(self.selected.saturating_add(1), backend),
             KeyCode::Home => self.select_workspace(0, backend),
             KeyCode::End => self.select_workspace(usize::MAX, backend),
+            KeyCode::Char('i') => {
+                self.controls.reset();
+                self.devices.open = true;
+                self.devices.refresh(backend);
+            }
             KeyCode::Char('?') => {
                 self.controls.reset();
                 self.help = true;

@@ -965,3 +965,183 @@ fn a_stream_for_an_unshared_workspace_is_refused_for_every_kind() {
     assert_eq!(ctl.reset_code(watch), Some(u64::from(RESET_UNSHARED)));
     assert_eq!(ctl.reset_code(chat), Some(u64::from(RESET_UNSHARED)));
 }
+
+// ---- owner-local devices.* calls (P3a.12) -----------------------------------------------------
+
+use lomi_remote_protocol::ipc::{
+    LocalCall, LocalDeviceMode, LocalDeviceModeState, LocalDeviceNoticeKind, LocalDeviceReason,
+    LocalDeviceRevoke, LocalDeviceTarget, LocalDeviceText, LocalDevices, LocalError, LocalResult,
+};
+
+fn local(fx: &Fx, call: LocalCall) -> Result<LocalResult, LocalError> {
+    let cancelled = AtomicBool::new(false);
+    let operation = Operation::new(Instant::now() + Duration::from_secs(5), &cancelled);
+    fx.coordinator.dispatch_with_connection(
+        &operation,
+        call,
+        None,
+        #[cfg(target_os = "macos")]
+        None,
+    )
+}
+fn devices(fx: &Fx, call: LocalCall) -> LocalDevices {
+    match local(fx, call) {
+        Ok(LocalResult::Devices(d)) => d,
+        other => panic!("{other:?}"),
+    }
+}
+fn text(s: &str) -> LocalDeviceText {
+    LocalDeviceText::try_from(s.to_owned()).unwrap()
+}
+/// The control device connects through a consent installed on the coordinator. `new_device`
+/// removes its stored grant first, so the Host has not seen it.
+fn connect(fx: &mut Fx, mode: Mode, new_device: bool) -> (DeviceConsent, Rig, [u8; 32]) {
+    let device = fx.devices[1].take().unwrap();
+    let key = device.public_bundle().bundle.fingerprint().unwrap();
+    if new_device {
+        fx.store(|s| s.revoke(&key).unwrap());
+    }
+    let consent = DeviceConsent::new(fx.coordinator.owner.store_handle(), ACCOUNT, mode);
+    *fx.coordinator.consent.lock().unwrap() = Some(consent.clone());
+    consent.roster().apply(&DeviceEvent::Ready {
+        host_access_epoch: 2,
+        runtime_generation: 3,
+        devices: Some(vec![DeviceEntry {
+            device_id: [0xc4; 16],
+            fingerprint: key,
+            client_class: None,
+            auth_epoch: 1,
+            expires_at: now() + 3_600_000,
+        }]),
+    });
+    let mut rig = Rig::with_consent(fx, device, [0xc4; 16], Some(consent.clone()));
+    rig.start();
+    (consent, rig, key)
+}
+
+#[test]
+fn devices_calls_need_the_tunnel() {
+    let fx = Fx::new(false);
+    assert_eq!(
+        local(&fx, LocalCall::DevicesList {}),
+        Err(LocalError::Unavailable)
+    );
+}
+
+#[test]
+fn devices_list_approve_and_notices_follow_confirm_mode() {
+    let mut fx = Fx::new(false);
+    let (_consent, mut rig, key) = connect(&mut fx, Mode::Confirm, true);
+    assert_eq!(rig.engine.len(), 1, "the tunnel waits for the owner");
+    let d = devices(&fx, LocalCall::DevicesList {});
+    assert_eq!(d.mode, LocalDeviceMode::Confirm);
+    // the account list names only this device, so Ready dropped the observer's grant
+    assert!(d.grants.0.is_empty(), "{d:?}");
+    assert_eq!(d.pending.0.len(), 1);
+    let a = &d.pending.0[0];
+    assert_eq!(a.reason, LocalDeviceReason::NewDevice);
+    assert_eq!(a.device_name.as_str(), "Phone");
+    assert_eq!(a.fingerprint.as_str(), hex(&key));
+    assert_eq!(a.code.as_str().len(), 6, "{}", a.code.as_str());
+
+    let Ok(LocalResult::DeviceNotices(notices)) = local(&fx, LocalCall::DevicesNotices {}) else {
+        panic!("notices")
+    };
+    assert_eq!(notices.0.len(), 1);
+    assert_eq!(notices.0[0].kind, LocalDeviceNoticeKind::NewDevice);
+    let Ok(LocalResult::DeviceNotices(again)) = local(&fx, LocalCall::DevicesNotices {}) else {
+        panic!("notices")
+    };
+    assert!(again.0.is_empty(), "drained");
+
+    let target = LocalDeviceTarget {
+        circuit: a.circuit.clone(),
+    };
+    let d = devices(&fx, LocalCall::DevicesApprove(target.clone()));
+    assert!(d.pending.0.is_empty());
+    assert_eq!(d.grants.0.len(), 1);
+    rig.settle(Vec::new());
+    assert_eq!(rig.engine.len(), 1, "approved, still connected");
+    assert_eq!(
+        local(&fx, LocalCall::DevicesApprove(target)),
+        Err(LocalError::Conflict)
+    );
+    assert_eq!(
+        local(
+            &fx,
+            LocalCall::DevicesApprove(LocalDeviceTarget {
+                circuit: text("zz")
+            })
+        ),
+        Err(LocalError::InvalidArgument)
+    );
+}
+
+#[test]
+fn devices_deny_closes_the_waiting_tunnel() {
+    let mut fx = Fx::new(false);
+    let (_consent, mut rig, key) = connect(&mut fx, Mode::Confirm, true);
+    let circuit = devices(&fx, LocalCall::DevicesList {}).pending.0[0]
+        .circuit
+        .clone();
+    let d = devices(&fx, LocalCall::DevicesDeny(LocalDeviceTarget { circuit }));
+    assert!(d.pending.0.is_empty());
+    rig.settle(Vec::new());
+    assert_eq!(rig.engine.len(), 0);
+    assert!(
+        fx.store(|s| s.get_grant(&key).unwrap().is_none()),
+        "nothing stored"
+    );
+}
+
+#[test]
+fn devices_revoke_removes_the_grant_and_closes_live_tunnels() {
+    let mut fx = Fx::new(false);
+    let (_consent, mut rig, key) = connect(&mut fx, Mode::Auto, false);
+    assert_eq!(rig.engine.len(), 1);
+    let before = devices(&fx, LocalCall::DevicesList {});
+    assert_eq!(before.grants.0.len(), 1);
+    let request = LocalCall::DevicesRevoke(LocalDeviceRevoke {
+        fingerprint: text(&hex(&key)),
+    });
+    let after = devices(&fx, request.clone());
+    assert!(after.grants.0.is_empty());
+    rig.settle(Vec::new());
+    assert_eq!(rig.engine.len(), 0, "the device's tunnel is closed at once");
+    assert!(fx.store(|s| s.get_grant(&key).unwrap().is_none()));
+    assert_eq!(local(&fx, request), Err(LocalError::Conflict));
+    assert_eq!(
+        local(
+            &fx,
+            LocalCall::DevicesRevoke(LocalDeviceRevoke {
+                fingerprint: text("abcd")
+            })
+        ),
+        Err(LocalError::InvalidArgument)
+    );
+}
+
+#[test]
+fn devices_mode_is_applied_and_persisted() {
+    let mut fx = Fx::new(false);
+    let (consent, _rig, _key) = connect(&mut fx, Mode::Auto, false);
+    let get = |fx: &Fx| match local(fx, LocalCall::DevicesModeGet {}) {
+        Ok(LocalResult::DeviceMode(m)) => m.mode,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(get(&fx), LocalDeviceMode::Auto);
+    let set = LocalDeviceModeState {
+        mode: LocalDeviceMode::Confirm,
+    };
+    assert_eq!(
+        local(&fx, LocalCall::DevicesModeSet(set.clone())),
+        Ok(LocalResult::DeviceMode(set))
+    );
+    assert_eq!(get(&fx), LocalDeviceMode::Confirm);
+    assert_eq!(consent.mode(), Mode::Confirm, "applied live");
+    assert_eq!(
+        fx.store(|s| s.device_mode().unwrap()),
+        LocalDeviceMode::Confirm,
+        "persisted for the next start"
+    );
+}
