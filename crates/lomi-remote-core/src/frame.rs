@@ -2,8 +2,8 @@
 //! message is one type byte followed by a strict UTF-8 JSON object. Writers emit
 //! the canonical form (fixed key order, no whitespace); readers accept any key
 //! order but apply the rejection rules of the shared vectors
-//! (`test-vectors/relay-frames.v1.json`). `0x10 DATA` is reserved for P3 and is
-//! rejected here.
+//! (`test-vectors/relay-frames.v1.json`). `0x10 DATA` is rejected here:
+//! the link handles it itself (`link::TYPE_DATA`).
 
 use crate::json::{self, Object};
 use serde_json::{Number, Value, json};

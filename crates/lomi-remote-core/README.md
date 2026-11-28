@@ -1,6 +1,7 @@
 # lomi-remote-core
 
-Sans-I/O client core (relay link state machine, session request/response, sealed Host directory).
+Sans-I/O client core (relay link state machine, session request/response, sealed Host directory,
+client tunnel).
 One boundary serves every platform: `bridge::call(handle, op, args, payload)` and `bridge::free(handle)`.
 
 | Platform | Binding | Artifact |
@@ -15,14 +16,16 @@ with `scripts/test-remote-core-targets.sh`.
 ## Calling convention
 
 * `handle`: `u32`, 0 for stateless operations and for operations that create an instance. Instances
-  (`link.new`, `directory.new`, `directory.open`) return `{"handle": n}`. Call `free(handle)` when done
+  (`link.new`, `directory.new`, `directory.open`, `tunnel.new`) return `{"handle": n}`. Call `free(handle)` when done
   (idempotent). At most 64 live instances (`handleLimit`).
 * `args`: strict JSON object (UTF-8, empty = `{}`; integers only, safe-integer range, depth <= 8).
 * `payload`: raw bytes, meaning per operation.
 * Result: first byte `0` = ok, then data; first byte `1` = error, then JSON `{"code": ...}`.
 
 All times come from the platform: `monoMs` (monotonic) and `wallMs` (Unix ms) in `args` of every link
-operation that takes time; the core has no clock, socket, RNG or timer. The link seed is a platform
+operation that takes time; the core has no clock, socket, RNG or timer (the one exception: Noise
+ephemeral keys inside the tunnel handshake come from the OS RNG, `getrandom`, which on the web is
+`globalThis.crypto.getRandomValues`). The link seed is a platform
 random integer (`link.new`).
 
 ## Operations
@@ -41,7 +44,54 @@ backoffMinMs?, backoffMaxMs?, refreshLeadMs?, minRefreshIntervalMs?, silenceMs?}
 this connection, `null` when not connected). Data is a record list: `tag u8 | len u32 BE | body`; 1 connect, 2 send
 (body = bytes to put on the socket), 3 close, 4 event (JSON, `type` = `ready`, `server`, `callStarted`,
 `callDone`, `tokenRefreshNeeded`, `tokenRefreshed`, `tokenRefreshFailed`, `stale`, `tokenNeeded`, `disconnected`,
-`stopped`). The platform executes connect/send/close and re-arms its timer from `link.nextDeadline`.
+`stopped`, plus the tunnel events below), 5 stream message (tunnel, below). The platform executes
+connect/send/close and re-arms its timer from `link.nextDeadline`, which also covers the link's tunnels
+(`link.tick` ticks them too).
+
+Tunnel (client side of `03-protokol.md` sections 3-6, `src/tunnel.rs`). A tunnel runs on a Ready link and the
+bridge wires them together: every link operation (`onMessage`, `onClose`, `tick`, `stop`, ...) also feeds the
+link's circuit traffic (`0x10 DATA` frames, `circuit.closed` events, the results of the tunnel's own
+`circuit.open`/`circuit.close` calls, link loss) to the tunnels attached to it and returns their records in the
+same list, and everything a tunnel sends (calls, DATA) leaves as ordinary `send` records of the link. So the
+platform has no `tunnel.onRelay`: it keeps calling `link.onMessage` with every WebSocket message and executes the
+records. The tunnel's own call results are not shown as `callDone`; unclaimed `circuit.closed` is shown as `server`.
+
+* `tunnel.new {link, deviceBundle, hostBundle, hostFingerprint, contractHash, accountId, hostId, hello}` +
+  payload = the 97-byte device identity seed blob (wipe your copy after the call; the core keeps only a
+  zeroizing `Identity` until the tunnel is open or closed). Returns `{handle}`. Bundles are the serde JSON of
+  `SignedBundle`; `hostFingerprint` (hex 64) is the pinned Host; `accountId`/`hostId` hex 32; `hello` =
+  `{deviceName, deviceKind: web|mobile|desktop, authEpoch, hostAccessEpoch, runtimeGeneration,
+  resume: [{kind, cursor}], sendDirectory}` (`deviceBundle` is filled in by the core, as serde JSON of the bundle).
+* `tunnel.start {random, +now}`: `random` = 64 hex chars (32 platform random bytes: circuit id, nonce). Sends
+  `CALL circuit.open` and Noise message 1 as two back-to-back sends. Fails with `started` when run twice.
+* `tunnel.tick {+now}`, `tunnel.nextDeadline` (`{deadline}`), `tunnel.close {+now}` (asks the relay to drop the
+  circuit, reason `requested`), `tunnel.openStream {kind, params?, +now}` (`terminal`, `chat`, `files.watch`,
+  `transfer`; `params` camelCase as in the protocol DTOs; first record is the event `streamStarted {stream}`),
+  `tunnel.send {stream, +now}` + payload (one logical message up to 1 MiB; stream 0 takes an `RpcEnvelope` as JSON;
+  what the stream/tunnel windows do not allow yet is queued, up to 1 MiB per stream, then `backpressure`),
+  `tunnel.closeStream {stream, +now}`, `tunnel.cursors` (no args: `{cursors: [{stream, kind, cursor}]}`; with
+  `{stream, cursor}`: records the cursor of a live stream). Errors: `notOpen`, `unknownStream`, `tooLarge`,
+  `backpressure`, `badRpc`, `duplicateRequest`, `unknownKind`, `badParams` and the protocol error names
+  (`kindNotAllowed`, `tooManyStreams`, ...). There is no `tunnel.credit`: the core returns credit to the Host as
+  it hands data to the platform (a message larger than one 64 KiB window could not finish otherwise).
+* Events (type, `tunnel` = handle): `tunnelState {state}` with `opening`, `handshake`, `awaitingGreeting`,
+  `approvalPending` (+`code`, `deadline` = monotonic ms), `open` (+`directory`), `closed` (+`reason`);
+  `updateRequired {olderSide}`; `staleEpoch {authEpoch, hostAccessEpoch, runtimeGeneration}`; `outcomeUnknown
+  {requestId}` (one per rpc request still unanswered when the tunnel closed; never resent); `streamOpened {stream,
+  kind, requestId?}` (Host-opened: `directory`, `transfer`); `streamClosed`; `streamReset {stream, code}`. A complete
+  logical message is record tag 5: `stream u32 BE | bytes` (stream 0 = rpc response JSON).
+* Close reasons: `requested`, `handshake`, `handshakeTimeout` (10 s from `start`), `approvalTimeout` (120 s),
+  `codeMismatch`, `staleEpoch` (second one), `updateRequired`, `decrypt`, `encrypt`, `protocol`, `linkDown`, the
+  relay's `circuit.closed` reason (`peer_closed`, `link_closed`, `stale_authority`) and the lowercased
+  `circuit.open` error (`unavailable`, `busy`, `rate_limited`, `invalid_argument`, `timeout`). A closed tunnel
+  stays closed: open a new one (`tunnel.new`); nothing is replayed.
+* `StaleEpoch`: the core takes the Host's epochs into `hello`, sends `circuit.close` for the old circuit and
+  retries once on a new circuit. Circuit id and nonce of the retry are derived (SHA-256) from the same 32
+  random bytes, so no second randomness round trip is needed.
+* Resume: the core cannot read stream payloads, so the platform's stream decoder reports cursors with
+  `tunnel.cursors {stream, cursor}`; read them back (also after `closed`) to fill `hello.resume` of the next
+  `tunnel.new`. A cursor is dropped when its stream closes or resets.
+* Message 4 (the Host's first transport message) is a postcard `HostGreeting`, not a frame batch.
 
 Directory: `directory.new {accountId, deviceId}`; `directory.open {accountId, deviceId, minKeyId}`;
 `directory.applySession` (payload = the 200 response body), `applyReadyState {state}`,
@@ -72,6 +122,9 @@ wipe the payload of `directory.seal` / `directory.open` for you (so build a fres
 and the JNI layer and the core wipe their own copies. Swift cannot wipe the `Data` copy the Expo
 bridge makes, so on iOS only the JS array and the core's copy are cleared. A WASM module cannot reach its input copy in
 linear memory, so the web key lives in the worker only for the duration of the call.
+
+`tunnel.new` takes the identity seed blob as payload like the keys above: wipe it after the call (the platform
+wrappers still have to be taught this op).
 
 Handles are process-global: every caller in the process (every worker, module or script sharing the
 library) can use or free any handle, so all of them must be in one trust domain. Do not load the

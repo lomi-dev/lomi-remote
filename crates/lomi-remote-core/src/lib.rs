@@ -5,6 +5,7 @@
 //! * [`session`]: the `POST /remote/session` startup request and response.
 //! * [`bridge`]: the one handle-based byte/JSON boundary every platform binds (WASM, C ABI in
 //!   [`ffi`], JNI).
+//! * [`tunnel`]: client tunnel (Noise handshake, streams, resume cursors) over a link circuit.
 //! * [`directory`]: on-device Host directory, merged with server data, sealed at rest.
 
 pub mod bridge;
@@ -15,6 +16,7 @@ pub mod frame;
 pub mod json;
 pub mod link;
 pub mod session;
+pub mod tunnel;
 
 /// Core version, identical to the crate version.
 pub fn version() -> &'static str {

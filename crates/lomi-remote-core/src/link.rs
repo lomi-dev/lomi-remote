@@ -78,7 +78,16 @@ pub enum Output {
     /// Close the socket; do not call `on_close` for it.
     Close,
     Event(LinkEvent),
+    /// `0x10 DATA` from the relay while Ready: opaque tunnel bytes of one circuit.
+    /// Routed to the tunnels by the bridge; the codec itself still rejects DATA.
+    Data {
+        circuit_id: [u8; 16],
+        bytes: Vec<u8>,
+    },
 }
+
+/// Frame type of `DATA` (`0x10 | circuitId(16) | opaque bytes`), handled here, not in `frame`.
+pub const TYPE_DATA: u8 = 0x10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallError {
@@ -295,6 +304,23 @@ impl Link {
         if !matches!(self.state, State::Authenticating(_) | State::Ready) {
             return out; // late message for a socket we already gave up on
         }
+        if bytes.first() == Some(&TYPE_DATA) {
+            // Only a Ready link carries circuits; anything shorter than the header is malformed.
+            if self.state != State::Ready
+                || bytes.len() < 17
+                || bytes.len() > frame::MAX_FRAME_BYTES
+            {
+                return self.violation(now, out);
+            }
+            self.last_frame = Some(now.mono_ms);
+            let mut circuit_id = [0u8; 16];
+            circuit_id.copy_from_slice(&bytes[1..17]);
+            out.push(Output::Data {
+                circuit_id,
+                bytes: bytes[17..].to_vec(),
+            });
+            return out;
+        }
         let frame = match frame::decode_frame(bytes, Direction::Relay, frame::MAX_FRAME_BYTES) {
             Ok(f) => f,
             Err(_) => return self.violation(now, out),
@@ -365,6 +391,24 @@ impl Link {
             return Err(CallError::UnknownCall);
         }
         self.send_call(name, args, Kind::Call, now)
+    }
+
+    /// Sends opaque tunnel bytes on a circuit (`0x10 | circuitId | bytes`, at most 65535 in total).
+    pub fn send_data(
+        &mut self,
+        circuit_id: &[u8; 16],
+        bytes: &[u8],
+    ) -> Result<Vec<Output>, CallError> {
+        if self.state != State::Ready {
+            return Err(CallError::NotReady);
+        }
+        if 17 + bytes.len() > frame::MAX_FRAME_BYTES {
+            return Err(CallError::BadFrame);
+        }
+        let mut out = vec![TYPE_DATA];
+        out.extend_from_slice(circuit_id);
+        out.extend_from_slice(bytes);
+        Ok(vec![Output::Send(out)])
     }
 
     /// Hands the relay a fresh token (after `TokenRefreshNeeded`) without dropping the link.

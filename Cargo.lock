@@ -2335,6 +2335,8 @@ version = "0.1.0"
 dependencies = [
  "chacha20poly1305 0.10.1",
  "jni 0.21.1",
+ "lomi-remote-crypto",
+ "lomi-remote-protocol",
  "serde_json",
  "sha2 0.10.9",
  "wasm-bindgen",

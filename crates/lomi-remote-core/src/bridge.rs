@@ -12,7 +12,10 @@
 //!
 //! Link record list: repeated `tag u8 | len u32 BE | body`. Tag 1 `Connect`, 2 `Send`
 //! (body = one WebSocket binary message), 3 `Close`, 4 `Event` (body = JSON with a
-//! `type` field). So frames travel as raw bytes and only events are JSON.
+//! `type` field), 5 `Stream message` (body = `stream u32 BE | bytes`, one complete logical
+//! message of a tunnel stream). So frames travel as raw bytes and only events are JSON.
+//! Tunnels (`Tunnel`) sit on a link: every link operation also routes the link's circuit traffic
+//! into the attached tunnels and returns their records in the same list (`settle`).
 
 use crate::directory::{self, Directory, Key, NONCE_LEN};
 use crate::frame::{Direction, MAX_FRAME_BYTES, decode_frame, encode_frame, frame_to_json};
@@ -24,6 +27,9 @@ use crate::session::{
     self, Credential, DeviceState, HostEntry, RelayToken, SessionError, SessionOutcome,
     SessionResponse,
 };
+use crate::tunnel::{self, Tunnel};
+use lomi_remote_crypto::{Identity, SignedBundle};
+use lomi_remote_protocol::tunnel::Hello;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -36,6 +42,8 @@ const KEY_LEN: usize = 32;
 enum Slot {
     Link(Box<Link>),
     Dir(Box<Directory>),
+    /// Link handle it runs on, and the tunnel.
+    Tunnel(u32, Box<Tunnel>),
 }
 
 struct Registry {
@@ -93,13 +101,6 @@ fn insert(slot: Slot) -> R {
     r.next = r.next.wrapping_add(1).max(1);
     r.slots.insert(h, slot);
     Ok(to_bytes(&json!({ "handle": h })))
-}
-
-fn with_link<T>(h: u32, f: impl FnOnce(&mut Link) -> R<T>) -> R<T> {
-    match registry().slots.get_mut(&h) {
-        Some(Slot::Link(l)) => f(l),
-        _ => Err(fail("badHandle")),
-    }
 }
 
 fn with_dir<T>(h: u32, f: impl FnOnce(&mut Directory) -> R<T>) -> R<T> {
@@ -200,6 +201,8 @@ fn dispatch(h: u32, op: &str, args: &[u8], payload: &[u8]) -> R {
             arg_str(&a, "deviceId")?,
         )))),
         "directory.open" => directory_open(&a, payload),
+        "tunnel.new" => tunnel_new(&a, payload),
+        _ if op.starts_with("tunnel.") => tunnel_op(h, op, &a, payload),
         _ if op.starts_with("link.") => link_op(h, op, &a, payload),
         _ if op.starts_with("directory.") => directory_op(h, op, &a, payload),
         _ => Err(fail("unknownOp")),
@@ -406,51 +409,314 @@ fn record(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-fn records(outputs: &[Output]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for o in outputs {
-        match o {
-            Output::Connect => record(&mut out, 1, &[]),
-            Output::Send(b) => record(&mut out, 2, b),
-            Output::Close => record(&mut out, 3, &[]),
-            Output::Event(e) => record(&mut out, 4, &to_bytes(&event_json(e))),
-        }
+fn link_record(out: &mut Vec<u8>, o: &Output) {
+    match o {
+        Output::Connect => record(out, 1, &[]),
+        Output::Send(b) => record(out, 2, b),
+        Output::Close => record(out, 3, &[]),
+        Output::Event(e) => record(out, 4, &to_bytes(&event_json(e))),
+        Output::Data { .. } => {} // circuit traffic nobody claimed (e.g. a closed tunnel's circuit)
     }
-    out
 }
 
+const NO_TIME: Now = Now {
+    mono_ms: 0,
+    wall_ms: 0,
+};
+
 fn link_op(h: u32, op: &str, a: &Object, payload: &[u8]) -> R {
-    with_link(h, |l| {
-        Ok(match op {
-            "link.start" => records(&l.start(relay_token(a)?, now(a)?)),
-            "link.stop" => records(&l.stop()),
-            "link.onOpen" => records(&l.on_open(now(a)?)),
-            "link.onClose" => records(&l.on_close(now(a)?)),
-            "link.onMessage" => records(&l.on_message(payload, now(a)?)),
-            "link.tick" => records(&l.tick(now(a)?)),
-            "link.call" => {
-                let (id, out) = l
-                    .call(arg_str(a, "name")?, arg_obj(a, "args")?, now(a)?)
-                    .map_err(|e| call_err(&e))?;
-                let mut r = Vec::new();
-                record(
-                    &mut r,
-                    4,
-                    &to_bytes(&json!({ "type": "callStarted", "callId": id })),
-                );
-                r.extend(records(&out));
-                r
+    let mut r = registry();
+    let Some(Slot::Link(l)) = r.slots.get_mut(&h) else {
+        return Err(fail("badHandle"));
+    };
+    let mut tick = false;
+    // Records that precede the link's own (`callStarted`), then the link outputs.
+    let (prefix, outs) = match op {
+        "link.start" => (Vec::new(), l.start(relay_token(a)?, now(a)?)),
+        "link.stop" => (Vec::new(), l.stop()),
+        "link.onOpen" => (Vec::new(), l.on_open(now(a)?)),
+        "link.onClose" => (Vec::new(), l.on_close(now(a)?)),
+        "link.onMessage" => (Vec::new(), l.on_message(payload, now(a)?)),
+        "link.tick" => {
+            tick = true;
+            (Vec::new(), l.tick(now(a)?))
+        }
+        "link.call" => {
+            let (id, out) = l
+                .call(arg_str(a, "name")?, arg_obj(a, "args")?, now(a)?)
+                .map_err(|e| call_err(&e))?;
+            let mut p = Vec::new();
+            record(
+                &mut p,
+                4,
+                &to_bytes(&json!({ "type": "callStarted", "callId": id })),
+            );
+            (p, out)
+        }
+        "link.refreshToken" => (
+            Vec::new(),
+            l.refresh_token(relay_token(a)?, now(a)?)
+                .map_err(|e| call_err(&e))?,
+        ),
+        // Earliest of the link and its tunnels, so the platform arms one timer.
+        "link.nextDeadline" => {
+            let own = l.next_deadline();
+            let d = tunnels_of(&r, h)
+                .into_iter()
+                .filter_map(|t| tunnel_ref(&r, t)?.next_deadline())
+                .chain(own)
+                .min();
+            return Ok(to_bytes(&json!({ "deadline": d })));
+        }
+        "link.isReady" => return Ok(to_bytes(&json!({ "ready": l.is_ready() }))),
+        "link.lastServerFrame" => {
+            return Ok(to_bytes(
+                &json!({ "monoMs": l.last_server_frame_mono_ms() }),
+            ));
+        }
+        _ => return Err(fail("unknownOp")),
+    };
+    let t = now(a).unwrap_or(NO_TIME);
+    let mut ticks = Vec::new();
+    if tick {
+        for th in tunnels_of(&r, h) {
+            let outs = tunnel_mut(&mut r, th).map(|x| x.tick(t.mono_ms));
+            ticks.extend(outs.into_iter().flatten().map(|o| (th, o)));
+        }
+    }
+    let mut res = prefix;
+    res.extend(settle(&mut r, h, t, outs, ticks));
+    Ok(res)
+}
+
+// ---- tunnel ----
+
+fn tunnels_of(r: &Registry, link: u32) -> Vec<u32> {
+    r.slots
+        .iter()
+        .filter_map(|(h, s)| matches!(s, Slot::Tunnel(l, _) if *l == link).then_some(*h))
+        .collect()
+}
+
+fn tunnel_ref(r: &Registry, h: u32) -> Option<&Tunnel> {
+    match r.slots.get(&h) {
+        Some(Slot::Tunnel(_, t)) => Some(t),
+        _ => None,
+    }
+}
+
+fn tunnel_mut(r: &mut Registry, h: u32) -> Option<&mut Tunnel> {
+    match r.slots.get_mut(&h) {
+        Some(Slot::Tunnel(_, t)) => Some(t),
+        _ => None,
+    }
+}
+
+fn link_mut(r: &mut Registry, h: u32) -> Option<&mut Link> {
+    match r.slots.get_mut(&h) {
+        Some(Slot::Link(l)) => Some(l),
+        _ => None,
+    }
+}
+
+fn tunnel_event_json(th: u32, e: &tunnel::Event) -> Value {
+    use tunnel::Event::*;
+    let mut v = match e {
+        State(s) => json!({ "type": "tunnelState", "state": s }),
+        ApprovalPending { code, deadline } => {
+            json!({ "type": "tunnelState", "state": "approvalPending", "code": code, "deadline": deadline })
+        }
+        Open { directory } => {
+            json!({ "type": "tunnelState", "state": "open", "directory": directory })
+        }
+        Closed { reason } => json!({ "type": "tunnelState", "state": "closed", "reason": reason }),
+        UpdateRequired { older } => json!({ "type": "updateRequired", "olderSide": older }),
+        StaleEpoch(s) => json!({
+            "type": "staleEpoch", "authEpoch": s.auth_epoch,
+            "hostAccessEpoch": s.host_access_epoch, "runtimeGeneration": s.runtime_generation,
+        }),
+        OutcomeUnknown { request_id } => {
+            json!({ "type": "outcomeUnknown", "requestId": request_id })
+        }
+        StreamOpened { stream, params } => {
+            let mut v = json!({ "type": "streamOpened", "stream": stream, "kind": tunnel::kind_name(params.kind()) });
+            if let lomi_remote_protocol::tunnel::OpenParams::Transfer(t) = params {
+                v["requestId"] = json!(t.request_id.as_str());
             }
-            "link.refreshToken" => records(
-                &l.refresh_token(relay_token(a)?, now(a)?)
-                    .map_err(|e| call_err(&e))?,
-            ),
-            "link.nextDeadline" => to_bytes(&json!({ "deadline": l.next_deadline() })),
-            "link.isReady" => to_bytes(&json!({ "ready": l.is_ready() })),
-            "link.lastServerFrame" => to_bytes(&json!({ "monoMs": l.last_server_frame_mono_ms() })),
-            _ => return Err(fail("unknownOp")),
-        })
-    })
+            v
+        }
+        Message { stream, .. } => json!({ "type": "streamMessage", "stream": stream }),
+        StreamClosed { stream } => json!({ "type": "streamClosed", "stream": stream }),
+        StreamReset { stream, code } => {
+            json!({ "type": "streamReset", "stream": stream, "code": code })
+        }
+    };
+    v["tunnel"] = json!(th);
+    v
+}
+
+fn tunnel_record(out: &mut Vec<u8>, th: u32, e: &tunnel::Event) {
+    match e {
+        // The bytes travel raw (tag 5), not in JSON.
+        tunnel::Event::Message { stream, data } => {
+            let mut body = stream.to_be_bytes().to_vec();
+            body.extend_from_slice(data);
+            record(out, 5, &body);
+        }
+        _ => record(out, 4, &to_bytes(&tunnel_event_json(th, e))),
+    }
+}
+
+/// Runs tunnel outputs through the link and link outputs through the tunnels attached to it until
+/// nothing is left to do, and returns the platform-facing records. A relay call or DATA the link
+/// refuses (not Ready) closes the tunnel; link outputs a tunnel consumes (its circuit's DATA and
+/// events, its own calls' results) are not shown to the platform.
+fn settle(
+    r: &mut Registry,
+    lh: u32,
+    now: Now,
+    mut link_out: Vec<Output>,
+    mut tun_out: Vec<(u32, tunnel::Out)>,
+) -> Vec<u8> {
+    let mut rec = Vec::new();
+    while !link_out.is_empty() || !tun_out.is_empty() {
+        for (th, o) in std::mem::take(&mut tun_out) {
+            let sent = match &o {
+                tunnel::Out::Event(e) => {
+                    tunnel_record(&mut rec, th, e);
+                    continue;
+                }
+                tunnel::Out::Call { name, args } => match link_mut(r, lh) {
+                    Some(l) => l
+                        .call(name, args.clone(), now)
+                        .map(|(id, out)| (Some(id), out)),
+                    None => Err(CallError::NotReady),
+                },
+                tunnel::Out::Data { circuit, bytes } => match link_mut(r, lh) {
+                    Some(l) => l.send_data(circuit, bytes).map(|out| (None, out)),
+                    None => Err(CallError::NotReady),
+                },
+            };
+            let Some(t) = tunnel_mut(r, th) else { continue };
+            match sent {
+                Ok((id, out)) => {
+                    if let (Some(id), tunnel::Out::Call { name, .. }) = (id, &o) {
+                        t.call_started(name, id);
+                    }
+                    link_out.extend(out);
+                }
+                Err(_) => tun_out.extend(t.fail("linkDown").into_iter().map(|x| (th, x))),
+            }
+        }
+        for o in std::mem::take(&mut link_out) {
+            let mut consumed = false;
+            for th in tunnels_of(r, lh) {
+                if let Some(t) = tunnel_mut(r, th) {
+                    let (c, outs) = t.on_link(&o, now.mono_ms);
+                    consumed |= c;
+                    tun_out.extend(outs.into_iter().map(|x| (th, x)));
+                }
+            }
+            if !consumed {
+                link_record(&mut rec, &o);
+            }
+        }
+    }
+    rec
+}
+
+fn hex_arg<const N: usize>(a: &Object, k: &str) -> R<[u8; N]> {
+    tunnel::unhex(arg_str(a, k)?).ok_or_else(|| fail("badArgs"))
+}
+
+fn bundle_arg(a: &Object, k: &str) -> R<SignedBundle> {
+    serde_json::from_value(Value::Object(arg_obj(a, k)?)).map_err(|_| fail("badArgs"))
+}
+
+/// `tunnel.new` payload: the 97-byte device identity seed blob (the platform wipes its copy).
+fn tunnel_new(a: &Object, payload: &[u8]) -> R {
+    let lh = u32::try_from(arg_u64(a, "link")?).map_err(|_| fail("badArgs"))?;
+    if !matches!(registry().slots.get(&lh), Some(Slot::Link(_))) {
+        return Err(fail("badHandle"));
+    }
+    let (device, host) = (bundle_arg(a, "deviceBundle")?, bundle_arg(a, "hostBundle")?);
+    let identity =
+        Identity::import_secret_seed_blob(payload, &device).map_err(|_| fail("badIdentity"))?;
+    let mut hello = arg_obj(a, "hello")?;
+    hello.insert("deviceBundle".into(), json!([]));
+    let mut hello: Hello =
+        serde_json::from_value(Value::Object(hello)).map_err(|_| fail("badArgs"))?;
+    hello.device_bundle.0 = serde_json::to_vec(&device).map_err(|_| fail("badArgs"))?;
+    let t = Tunnel::new(tunnel::Params {
+        identity,
+        host,
+        pinned_host_fingerprint: hex_arg(a, "hostFingerprint")?,
+        contract_hash: hex_arg(a, "contractHash")?,
+        account_id: hex_arg(a, "accountId")?,
+        host_id: hex_arg(a, "hostId")?,
+        hello,
+    });
+    insert(Slot::Tunnel(lh, Box::new(t)))
+}
+
+fn stream_arg(a: &Object) -> R<u32> {
+    u32::try_from(arg_u64(a, "stream")?).map_err(|_| fail("badArgs"))
+}
+
+fn tunnel_op(h: u32, op: &str, a: &Object, payload: &[u8]) -> R {
+    let mut r = registry();
+    let Some(Slot::Tunnel(lh, t)) = r.slots.get_mut(&h) else {
+        return Err(fail("badHandle"));
+    };
+    let lh = *lh;
+    let err = |e: String| fail(&e);
+    match op {
+        "tunnel.nextDeadline" => return Ok(to_bytes(&json!({ "deadline": t.next_deadline() }))),
+        // With `stream` + `cursor`: record a cursor. Without: list `{stream, kind, cursor}`.
+        "tunnel.cursors" if a.contains_key("stream") => {
+            t.set_cursor(stream_arg(a)?, arg_u64(a, "cursor")?)
+                .map_err(err)?;
+            return Ok(Vec::new());
+        }
+        "tunnel.cursors" => {
+            let list: Vec<Value> = t
+                .cursors()
+                .into_iter()
+                .map(|(s, k, c)| json!({ "stream": s, "kind": tunnel::kind_name(k), "cursor": c }))
+                .collect();
+            return Ok(to_bytes(&json!({ "cursors": list })));
+        }
+        _ => {}
+    }
+    let n = now(a)?;
+    let mut prefix = Vec::new();
+    let outs = match op {
+        "tunnel.start" => t.start(hex_arg(a, "random")?, n.mono_ms).map_err(err)?,
+        "tunnel.tick" => t.tick(n.mono_ms),
+        "tunnel.openStream" => {
+            let params = a.get("params").cloned().unwrap_or_else(|| json!({}));
+            let params = tunnel::open_params(arg_str(a, "kind")?, params).map_err(err)?;
+            let (id, out) = t.open_stream(&params).map_err(err)?;
+            record(
+                &mut prefix,
+                4,
+                &to_bytes(&json!({ "type": "streamStarted", "stream": id, "tunnel": h })),
+            );
+            out
+        }
+        "tunnel.send" => t.send(stream_arg(a)?, payload).map_err(err)?,
+        "tunnel.closeStream" => t.close_stream(stream_arg(a)?).map_err(err)?,
+        "tunnel.close" => t.close(),
+        _ => return Err(fail("unknownOp")),
+    };
+    prefix.extend(settle(
+        &mut r,
+        lh,
+        n,
+        Vec::new(),
+        outs.into_iter().map(|o| (h, o)).collect(),
+    ));
+    Ok(prefix)
 }
 
 // ---- directory ----
