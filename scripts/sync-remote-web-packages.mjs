@@ -343,7 +343,13 @@ async function syncMobileCore() {
   for (const path of await listFiles(source)) {
     const bytes = await readFile(join(source, path));
     if (path === 'Cargo.toml') {
-      const cargo = (await nativeProtocolCargo(bytes)).toString('utf8').replace(/\n+$/, '\n');
+      // Path deps resolve to the crypto module's vendored crates (already synced above), not copies.
+      const cargo = (await nativeProtocolCargo(bytes)).toString('utf8').replace(/\n+$/, '\n')
+        .replace('path = "../lomi-remote-crypto"', 'path = "../../../lomi-remote-crypto/vendor/core"')
+        .replace('path = "../lomi-remote-protocol"', 'path = "../../../lomi-remote-crypto/vendor/lomi-remote-protocol"');
+      if (!cargo.includes('lomi-remote-crypto/vendor/core') || !cargo.includes('lomi-remote-crypto/vendor/lomi-remote-protocol')) {
+        throw new Error('Core path dependencies on crypto/protocol need review');
+      }
       expected.set('vendor/core/Cargo.toml', Buffer.from(`${cargo}\n[workspace]\n\n[profile.release]\nlto = "thin"\ncodegen-units = 1\nstrip = "debuginfo"\n`));
     } else if (path.startsWith('src/')) expected.set(`vendor/core/${path}`, bytes);
     else if (path.startsWith('include/')) expected.set(path, bytes);
@@ -372,18 +378,21 @@ async function syncMobileCore() {
 // The standalone mobile build must resolve exactly the workspace's versions: prune the workspace
 // lockfile to the crate's own dependency graph with cargo (no version changes, no network updates).
 async function deriveCoreLock(files) {
-  const { mkdtemp, rm: remove } = await import('node:fs/promises');
+  const { mkdtemp, rm: remove, cp } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { execFileSync } = await import('node:child_process');
   const dir = await mkdtemp(join(tmpdir(), 'lomi-core-lock-'));
   try {
+    // Mirror the mobile layout so the relative path deps resolve to the vendored crypto/protocol.
+    const core = join(dir, 'modules/lomi-remote-core/vendor/core');
     for (const [path, bytes] of files) {
       if (!path.startsWith('vendor/core/')) continue;
-      await mkdir(dirname(join(dir, path.slice('vendor/core/'.length))), { recursive: true });
-      await writeFile(join(dir, path.slice('vendor/core/'.length)), bytes);
+      await mkdir(dirname(join(core, path.slice('vendor/core/'.length))), { recursive: true });
+      await writeFile(join(core, path.slice('vendor/core/'.length)), bytes);
     }
-    await writeFile(join(dir, 'Cargo.lock'), await readFile(join(root, 'Cargo.lock')));
-    execFileSync('cargo', ['metadata', '--format-version', '1', '--manifest-path', join(dir, 'Cargo.toml')], { stdio: ['ignore', 'ignore', 'inherit'] });
-    return await readFile(join(dir, 'Cargo.lock'));
+    await cp(join(mobile, 'modules/lomi-remote-crypto/vendor'), join(dir, 'modules/lomi-remote-crypto/vendor'), { recursive: true, filter: (src) => !/[\\/]target$/.test(src) });
+    await writeFile(join(core, 'Cargo.lock'), await readFile(join(root, 'Cargo.lock')));
+    execFileSync('cargo', ['metadata', '--format-version', '1', '--manifest-path', join(core, 'Cargo.toml')], { stdio: ['ignore', 'ignore', 'inherit'] });
+    return await readFile(join(core, 'Cargo.lock'));
   } finally { await remove(dir, { recursive: true, force: true }); }
 }
