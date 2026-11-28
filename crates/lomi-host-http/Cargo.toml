@@ -9,6 +9,7 @@ publish = false
 lomi-host-auth = { path = "../lomi-host-auth" }
 lomi-remote-protocol = { path = "../lomi-remote-protocol" }
 lomi-remote-core = { path = "../lomi-remote-core" }
+lomi-remote-crypto = { path = "../lomi-remote-crypto" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.8.2"

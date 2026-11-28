@@ -152,6 +152,27 @@ socket plus a wake pipe (publication job, token hand-off); no `sleep` or
 reset after a link that lived 10 s. Other HTTP paths keep their single-attempt
 rule; only this thread retries.
 
+## Device tunnels (P3a.7)
+
+`uplink/tunnels.rs` is the sans-I/O Host engine for device circuits (one Noise tunnel per
+circuit, many streams). `drive` routes EVENT `circuit.open` / `circuit.closed` and binary DATA
+(`0x10 | circuitId | bytes`, handled before `decode_frame`) into it, writes what it returns
+(DATA frames, `CALL circuit.close` whose reply is ignored) and uses its deadline for the poll
+timeout. A dropped link closes every tunnel. `uplink::install_tunnels` hands it the Host identity,
+a `Policy` (P3a.10) and a `TunnelService` (P3a.9); nothing is installed by default, so today's
+behaviour is unchanged, and release builds still never create the uplink.
+
+- Per circuit: handshake (10 s) -> optional approval (120 s) -> live. Limits: 8 devices, 8
+  tunnels per device, 16 tunnels not yet live.
+- Sending order: urgent frames (OPEN, CREDIT, RESET), then interactive, control, bulk streams,
+  round-robin inside a class, packed into Noise messages up to `MAX_TUNNEL_PLAINTEXT`, within the
+  stream and tunnel windows. A frame that does not fit ends the message (no overtaking).
+- Service threads push through `Handle` (queue plus the uplink wake pipe); callbacks run on the
+  uplink thread and must not block.
+- Credit is returned as soon as a message is handed to the service, so a slow service must bound
+  its own queue.
+- Tests: `tests/tunnel_engine.rs` runs the real device core against the engine.
+
 ## Windows (P2.16)
 
 The module has no Windows-only code: the wake pipe and `poll(2)` are

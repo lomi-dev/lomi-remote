@@ -695,3 +695,30 @@ fn link_reset_drops_the_link_at_once() {
 fn half_open_window_is_longer_than_the_relays_two_second_cadence() {
     assert!(HALF_OPEN >= Duration::from_secs(6) && HALF_OPEN > FRESH_MAX_AGE);
 }
+
+#[test]
+fn circuit_close_replies_are_ignored_but_unknown_replies_still_close() {
+    let mut session = Session::new(Zeroizing::new(TOKEN.to_owned()));
+    let bytes = session.circuit_close(&[7; 16]).unwrap();
+    let Frame::Call {
+        call_id,
+        name,
+        args,
+    } = decode_frame(&bytes, Direction::Client, MAX_FRAME_BYTES).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (name.as_str(), args["circuitId"].as_str()),
+        ("circuit.close", Some("07070707070707070707070707070707"))
+    );
+    let err = Frame::ReplyErr {
+        call_id,
+        code: "UNKNOWN_CIRCUIT".into(),
+    };
+    assert!(session.on_frame(err.clone()).is_empty());
+    assert!(
+        matches!(session.on_frame(err)[..], [Effect::Close]),
+        "answered once"
+    );
+}

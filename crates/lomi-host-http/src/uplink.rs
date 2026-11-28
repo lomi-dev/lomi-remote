@@ -30,6 +30,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+pub mod tunnels;
+
 // Development switch: debug builds only until a proper configuration field exists.
 #[cfg(debug_assertions)]
 const ENV: &str = "LOMI_REMOTE_UPLINK";
@@ -145,6 +147,8 @@ struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     wake: Wake,
+    /// Device tunnels (P3a.7); only the uplink thread works on it while a link is up.
+    tunnels: Mutex<Option<tunnels::Engine>>,
 }
 
 #[cfg_attr(not(debug_assertions), allow(dead_code))] // release builds never create it
@@ -155,8 +159,33 @@ impl Shared {
             state: Mutex::default(),
             changed: Condvar::new(),
             wake: Wake::new(),
+            tunnels: Mutex::new(None),
         }
     }
+}
+
+/// Monotonic ms for the tunnel engine.
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Hands the uplink the Host's tunnel engine (identity, policy, service); `None` while the uplink
+/// is off. Tunnels exist only while a link is up and all close when it drops.
+pub fn install_tunnels(
+    config: tunnels::Config,
+    policy: Box<dyn tunnels::Policy>,
+    service: Box<dyn tunnels::TunnelService>,
+) -> Option<tunnels::Handle> {
+    let sh = shared()?;
+    let handle = tunnels::Handle::new(move || sh.wake.wake());
+    let engine = tunnels::Engine::new(config, policy, service, handle.clone()).ok()?;
+    *lock(&sh.tunnels) = Some(engine);
+    Some(handle)
+}
+/// The relay contract hash this uplink runs with (the engine's prologue needs the same bytes).
+pub fn contract_hash() -> Option<[u8; 32]> {
+    lomi_remote_core::tunnel::unhex(&shared()?.contract_hash)
 }
 
 static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
@@ -776,6 +805,8 @@ struct Session {
     sent_token: Zeroizing<String>,
     inflight: Option<Inflight>,
     job: Option<(Arc<Job>, usize)>,
+    /// `circuit.close` calls whose reply is ignored (the circuit may already be gone).
+    close_calls: VecDeque<u32>,
 }
 enum Effect {
     /// `authority.fresh`, with the relay-confirmed server lease left (ms) if it carried one.
@@ -794,7 +825,21 @@ impl Session {
             sent_token: token,
             inflight: None,
             job: None,
+            close_calls: VecDeque::new(),
         }
+    }
+    fn circuit_close(&mut self, circuit: &tunnels::CircuitId) -> Option<Vec<u8>> {
+        let mut args = Object::new();
+        args.insert(
+            "circuitId".into(),
+            lomi_remote_core::tunnel::hex(circuit).into(),
+        );
+        let (call_id, bytes) = self.call("circuit.close", args)?;
+        if self.close_calls.len() == 256 {
+            self.close_calls.pop_front();
+        }
+        self.close_calls.push_back(call_id);
+        Some(bytes)
     }
     fn call(&mut self, name: &str, args: Object) -> Option<(u32, Vec<u8>)> {
         self.call_id = self.call_id.checked_add(1)?;
@@ -868,9 +913,15 @@ impl Session {
                 "channel.pending" => vec![Effect::Wake(Pending::Channels)],
                 "pairing.pending" => vec![Effect::Wake(Pending::Pairings)],
                 "host.revoked" => vec![Effect::Close],
-                // device.revoked / devices.changed / circuit.*: consumed by P3; ignored here.
+                // device.revoked / devices.changed: P3a.10. circuit.* never gets here (see `drive`).
                 _ => vec![],
             },
+            Frame::ReplyOk { call_id, .. } | Frame::ReplyErr { call_id, .. }
+                if self.close_calls.contains(&call_id) =>
+            {
+                self.close_calls.retain(|c| *c != call_id);
+                vec![]
+            }
             Frame::ReplyOk { call_id, data }
                 if self.inflight.as_ref().map(Inflight::call_id) == Some(call_id) =>
             {
@@ -1082,6 +1133,9 @@ fn connect_and_drive(
     let mut session = Session::new(token);
     let _ = drive(sh, &mut conn, &mut session, binding, generation);
     conn.close();
+    if let Some(engine) = lock(&sh.tunnels).as_mut() {
+        engine.link_down();
+    }
     let mut st = lock(&sh.state);
     st.live = None;
     session.fail_jobs(&mut st.jobs);
@@ -1100,8 +1154,29 @@ fn drive(
         let mut progressed = false;
         while let Poll::Ready(bytes) = conn.poll_binary(Instant::now() + IO, &check)? {
             progressed = true;
+            if bytes.first() == Some(&tunnels::DATA) {
+                if bytes.len() < 17 {
+                    return Err(Error::InvalidResponse);
+                }
+                if let Some(engine) = lock(&sh.tunnels).as_mut() {
+                    engine.on_data(&bytes[1..], now_ms());
+                }
+                continue;
+            }
             let frame = decode_frame(&bytes, Direction::Relay, MAX_FRAME_BYTES)
                 .map_err(|_| Error::InvalidResponse)?;
+            if let Frame::Event { name, data } = &frame
+                && matches!(name.as_str(), "circuit.open" | "circuit.closed")
+            {
+                if let Some(engine) = lock(&sh.tunnels).as_mut() {
+                    if name == "circuit.open" {
+                        engine.on_circuit_open(data, now_ms());
+                    } else {
+                        engine.on_circuit_closed(data);
+                    }
+                }
+                continue;
+            }
             for effect in session.on_frame(frame) {
                 let mut st = lock(&sh.state);
                 match effect {
@@ -1136,6 +1211,7 @@ fn drive(
                 }
             }
         }
+        flush_tunnels(sh, conn, session)?;
         let (token, idle, same_binding, silent) = {
             let st = lock(&sh.state);
             if st.reset_gen != generation {
@@ -1178,11 +1254,45 @@ fn drive(
         if progressed {
             continue;
         }
+        let tunnel_left = lock(&sh.tunnels)
+            .as_ref()
+            .and_then(tunnels::Engine::next_deadline)
+            .map(|d| Duration::from_millis(d.saturating_sub(now_ms())));
         let limit = (OFFER_TTL - idle)
             .min(HALF_OPEN - silent)
-            .min(session.next_timeout().unwrap_or(OFFER_TTL));
+            .min(session.next_timeout().unwrap_or(OFFER_TTL))
+            .min(tunnel_left.unwrap_or(OFFER_TTL));
         sh.wake.wait(conn, limit);
     }
+}
+
+/// Runs engine deadlines and service commands, then writes what the engine has to send.
+fn flush_tunnels(
+    sh: &'static Shared,
+    conn: &mut RelayConnection,
+    session: &mut Session,
+) -> Result<()> {
+    let check = || -> std::result::Result<(), BudgetStop> { Ok(()) };
+    let outs = match lock(&sh.tunnels).as_mut() {
+        Some(engine) => {
+            engine.drain_commands();
+            engine.tick(now_ms());
+            engine.take_out()
+        }
+        None => return Ok(()),
+    };
+    for out in outs {
+        let bytes = match out {
+            tunnels::Out::Data { circuit, bytes } => {
+                [&[tunnels::DATA][..], &circuit, &bytes].concat()
+            }
+            tunnels::Out::Close { circuit } => {
+                session.circuit_close(&circuit).ok_or(Error::RelayClosed)?
+            }
+        };
+        conn.send_binary(&bytes, Instant::now() + IO, &check)?;
+    }
+    Ok(())
 }
 
 /// Wakes the uplink thread out of its readiness wait (publication job, token hand-off).

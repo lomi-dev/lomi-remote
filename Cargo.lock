@@ -2232,6 +2232,7 @@ dependencies = [
  "log",
  "lomi-host-auth",
  "lomi-remote-core",
+ "lomi-remote-crypto",
  "lomi-remote-protocol",
  "rustls",
  "serde",
