@@ -540,7 +540,13 @@ fn tunnel_event_json(th: u32, e: &tunnel::Event) -> Value {
         Open { directory } => {
             json!({ "type": "tunnelState", "state": "open", "directory": directory })
         }
-        Closed { reason } => json!({ "type": "tunnelState", "state": "closed", "reason": reason }),
+        Closed { reason, detail } => {
+            let mut v = json!({ "type": "tunnelState", "state": "closed", "reason": reason });
+            if let Some(d) = detail {
+                v["detail"] = json!(d);
+            }
+            v
+        }
         UpdateRequired { older } => json!({ "type": "updateRequired", "olderSide": older }),
         StaleEpoch(s) => json!({
             "type": "staleEpoch", "authEpoch": s.auth_epoch,

@@ -95,8 +95,11 @@ pub enum Event {
     Open {
         directory: bool,
     },
+    /// `reason` is the relay's (`peer_closed`, ...) or a local one (`protocol`, ...); `detail` names
+    /// the stream table's error behind a local `protocol`.
     Closed {
         reason: String,
+        detail: Option<String>,
     },
     UpdateRequired {
         older: OlderSide,
@@ -172,6 +175,8 @@ pub struct Tunnel {
     /// Chunks (one frame each, `fin` on the last of a message) waiting for credit.
     queues: BTreeMap<u32, VecDeque<(Vec<u8>, bool)>>,
     rpc: Vec<String>,
+    /// The error behind a local `protocol` close, for the `Closed` event.
+    detail: Option<String>,
     cursors: BTreeMap<u32, (StreamKind, u64)>,
     open_call: Option<u32>,
     close_calls: Vec<u32>,
@@ -203,6 +208,7 @@ impl Tunnel {
             table: StreamTable::new(Side::Device),
             queues: BTreeMap::new(),
             rpc: Vec::new(),
+            detail: None,
             cursors: BTreeMap::new(),
             open_call: None,
             close_calls: Vec::new(),
@@ -477,8 +483,12 @@ impl Tunnel {
                     None => return self.finish("protocol", true, out),
                 }
             }
-            let Ok(ev) = self.table.on_frame(f) else {
-                return self.finish("protocol", true, out);
+            let ev = match self.table.on_frame(f) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    self.detail = Some(format!("{e:?}"));
+                    return self.finish("protocol", true, out);
+                }
             };
             let n = f.data.len() as u32;
             if f.kind == FrameType::Data && n > 0 {
@@ -683,6 +693,7 @@ impl Tunnel {
         }
         out.push(Out::Event(Event::Closed {
             reason: reason.to_owned(),
+            detail: self.detail.take(),
         }));
         if notify && started {
             out.push(self.close_call());

@@ -19,7 +19,7 @@ use lomi_remote_crypto::{
 use lomi_remote_protocol::tunnel::{
     APPROVAL_DEADLINE_MS, ApprovalPending, Event, FRAME_HEADER_LEN, FrameType, Hello, HostGreeting,
     MAX_FRAME_DATA, MAX_LOGICAL_MESSAGE, OpenParams, Side, StaleEpoch, StreamClass, StreamTable,
-    TunnelFrame, Welcome, decode_frames,
+    TunnelError, TunnelFrame, Welcome, decode_frames,
 };
 use serde_json::Value;
 use std::{
@@ -375,6 +375,11 @@ struct Live {
     /// Last stream served per class (round-robin cursor).
     cursor: [u32; 3],
     drained: Vec<u32>,
+    /// For the close log: the last frame seen from the device and the table error that ended it.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    last: Option<(FrameType, u32)>,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    fault: Option<TunnelError>,
 }
 impl Live {
     fn open(&mut self, p: &OpenParams) -> Result<u32, &'static str> {
@@ -887,6 +892,16 @@ impl Engine {
     }
     fn finish(&mut self, circuit: CircuitId, t: Tunnel, why: &str, notify: bool) {
         self.policy.closed(circuit);
+        // Debug builds only; no payload or key material, just ids, frame type and error variant.
+        #[cfg(debug_assertions)]
+        if let Phase::Live(l) = &t.phase {
+            eprintln!(
+                "lomi-uplink: tunnel {} closed: {why}; last frame {:?}; error {:?}",
+                &lomi_remote_core::tunnel::hex(&circuit)[..8],
+                l.last,
+                l.fault
+            );
+        }
         if matches!(t.phase, Phase::Live(_)) {
             self.service.on_tunnel_close(circuit, why);
         }
@@ -958,7 +973,11 @@ impl Engine {
                 let plain = live.noise.decrypt(data).map_err(|_| "decrypt")?;
                 let frames = decode_frames(&plain).map_err(|_| "protocol")?;
                 for f in &frames {
-                    let ev = live.table.on_frame(f).map_err(|_| "protocol")?;
+                    live.last = Some((f.kind, f.stream_id));
+                    let ev = live.table.on_frame(f).map_err(|e| {
+                        live.fault = Some(e);
+                        "protocol"
+                    })?;
                     let n = f.data.len() as u32;
                     if f.kind == FrameType::Data && n > 0 {
                         // Everything goes to the service at once: windows reopen now.
@@ -1028,6 +1047,8 @@ impl Engine {
             queues: BTreeMap::new(),
             cursor: [0; 3],
             drained: Vec::new(),
+            last: None,
+            fault: None,
         });
         t.deadline = None;
         self.service.on_tunnel_open(

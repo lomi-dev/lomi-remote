@@ -88,6 +88,8 @@ records. The tunnel's own call results are not shown as `callDone`; unclaimed `c
   {requestId}` (one per rpc request still unanswered when the tunnel closed; never resent); `streamOpened {stream,
   kind, requestId?}` (Host-opened: `directory`, `transfer`); `streamClosed`; `streamReset {stream, code}`. A complete
   logical message is record tag 5: `tunnel u32 BE | stream u32 BE | bytes` (stream 0 = rpc response JSON).
+* A `tunnelState` `closed` event has `reason`: the relay's (`peer_closed`, ...) when its `circuit.closed` ended the
+  tunnel, or a local one below. A local `protocol` close also has `detail`, the stream table's error (`UnknownStream`, ...).
 * Close reasons: `requested`, `handshake`, `handshakeTimeout` (10 s from `start`), `approvalTimeout` (120 s),
   `codeMismatch`, `staleEpoch` (second one), `updateRequired`, `decrypt`, `encrypt`, `protocol`, `linkDown`, the
   relay's `circuit.closed` reason (`peer_closed`, `link_closed`, `stale_authority`) and the lowercased
