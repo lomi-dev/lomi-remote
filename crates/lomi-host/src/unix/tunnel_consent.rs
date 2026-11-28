@@ -47,6 +47,13 @@ pub(super) const MAX_PENDING: usize = 3;
 pub(super) const MAX_PROMPTS_PER_HOUR: usize = 10;
 const HOUR_MS: u64 = 3_600_000;
 const MAX_NOTICES: usize = 32;
+/// Wrong codes typed in `approve` within `WRONG_WINDOW_MS` lock `approve` for `LOCKOUT_MS` and
+/// deny what waits (the code has only 20 bits).
+const MAX_WRONG_CODES: usize = 5;
+const WRONG_WINDOW_MS: u64 = 600_000;
+const LOCKOUT_MS: u64 = 60_000;
+/// A control request waits this long, like a new device (`APPROVAL_DEADLINE_MS`).
+const CONTROL_APPROVAL_MS: u64 = 120_000;
 /// A device's server confirmation is refreshed at most this often.
 const CONFIRM_EVERY_MS: u64 = 60_000;
 
@@ -133,6 +140,9 @@ struct Inner {
     /// Welcomed tunnels: device and the code both sides display.
     live: BTreeMap<CircuitId, (Key, String)>,
     prompts: VecDeque<u64>,
+    /// Times of wrong codes in `approve`, and until when `approve` is refused.
+    wrong: VecDeque<u64>,
+    locked_until: u64,
     notices: VecDeque<Notice>,
 }
 impl Inner {
@@ -145,8 +155,15 @@ impl Inner {
         }
         self.notices.push_back(n);
     }
+    /// The engine times out a new device's tunnel itself; a control request has no tunnel to lose.
+    fn expire(&mut self, now: u64) {
+        self.pending.retain(|p| {
+            p.kind == Kind::NewDevice || now.saturating_sub(p.at) < CONTROL_APPROVAL_MS
+        });
+    }
     /// One outstanding approval per device, `MAX_PENDING` per account, `MAX_PROMPTS_PER_HOUR`.
     fn allow_prompt(&mut self, device: &Key, now: u64) -> bool {
+        self.expire(now);
         self.prompts.retain(|t| now.saturating_sub(*t) < HOUR_MS);
         if self.pending.len() >= MAX_PENDING
             || self.prompts.len() >= MAX_PROMPTS_PER_HOUR
@@ -443,6 +460,8 @@ impl DeviceConsent {
             pending: Vec::new(),
             live: BTreeMap::new(),
             prompts: VecDeque::new(),
+            wrong: VecDeque::new(),
+            locked_until: 0,
             notices: VecDeque::new(),
         })))
     }
@@ -483,8 +502,12 @@ impl DeviceConsent {
     pub(super) fn revoke(&self, key: &Key) -> bool {
         let mut g = self.inner();
         let now = (g.clock)();
+        // Only a device that had a grant is marked: an unknown key would evict real tombstones.
+        let Ok(had_grant) = g.store().get_grant(key).map(|x| x.is_some()) else {
+            return false;
+        };
         // The mark first: without it the device would come back at Read in `Auto` mode.
-        if g.store().tombstone_device(key, now).is_err() {
+        if had_grant && g.store().tombstone_device(key, now).is_err() {
             return false;
         }
         let Ok(existed) = g.store().revoke(key) else {
@@ -545,13 +568,36 @@ impl DeviceConsent {
     pub(super) fn approve(&self, typed: &str) -> bool {
         let mut g = self.inner();
         let now = (g.clock)();
+        g.expire(now);
+        if now < g.locked_until {
+            return false;
+        }
         let mut hits = g
             .pending
             .iter()
             .enumerate()
             .filter(|(_, p)| !typed.is_empty() && p.code == typed);
-        let (Some((i, _)), None, Some(handle)) = (hits.next(), hits.next(), g.handle.clone())
-        else {
+        let hit = match (hits.next(), hits.next()) {
+            (Some((i, _)), None) => Some(i),
+            _ => None,
+        };
+        let Some(i) = hit else {
+            g.wrong.retain(|t| now.saturating_sub(*t) < WRONG_WINDOW_MS);
+            g.wrong.push_back(now);
+            if g.wrong.len() >= MAX_WRONG_CODES {
+                g.wrong.clear();
+                g.locked_until = now + LOCKOUT_MS;
+                for p in std::mem::take(&mut g.pending) {
+                    if p.kind == Kind::NewDevice
+                        && let Some(h) = &g.handle
+                    {
+                        let _ = h.push(Command::Deny { circuit: p.circuit });
+                    }
+                }
+            }
+            return false;
+        };
+        let Some(handle) = g.handle.clone() else {
             return false;
         };
         let a = g.pending[i].clone();
@@ -609,8 +655,16 @@ impl DeviceConsent {
         }
         true
     }
+    /// True while `approve` is refused after too many wrong codes.
+    pub(super) fn approve_locked(&self) -> bool {
+        let g = self.inner();
+        (g.clock)() < g.locked_until
+    }
     pub(super) fn pending(&self) -> Vec<Approval> {
-        self.inner().pending.clone()
+        let mut g = self.inner();
+        let now = (g.clock)();
+        g.expire(now);
+        g.pending.clone()
     }
     pub(super) fn take_notices(&self) -> Vec<Notice> {
         self.inner().notices.drain(..).collect()
@@ -1166,6 +1220,58 @@ mod tests {
             ),
             (6, e.expires_at, T0 + HOUR_MS)
         );
+    }
+
+    #[test]
+    fn five_wrong_codes_deny_everything_and_lock_approve_for_a_minute() {
+        let mut r = rig(Mode::Confirm);
+        r.ready(Some(vec![entry(1)]));
+        assert_eq!(admit(&r, 1, 1), Admission::Pending);
+        for _ in 0..5 {
+            assert!(!r.c.approve("000000"));
+        }
+        assert!(r.c.pending().is_empty(), "pending approvals are denied");
+        assert!(matches!(r.commands()[..], [Command::Deny { .. }]));
+        assert!(r.c.approve_locked());
+        // locked: even the right code is refused, until the minute is over
+        r.clock.store(T0 + 1000, Ordering::SeqCst);
+        assert_eq!(admit(&r, 1, 2), Admission::Pending);
+        assert!(!r.c.approve("123456") && r.c.approve_locked());
+        r.clock.store(T0 + LOCKOUT_MS, Ordering::SeqCst);
+        assert!(!r.c.approve_locked());
+        assert!(r.c.approve("123456"));
+    }
+
+    #[test]
+    fn wrong_codes_older_than_ten_minutes_do_not_count() {
+        let r = rig(Mode::Confirm);
+        for _ in 0..4 {
+            assert!(!r.c.approve("1"));
+        }
+        r.clock.store(T0 + WRONG_WINDOW_MS, Ordering::SeqCst);
+        assert!(!r.c.approve("1"));
+        assert!(!r.c.approve_locked());
+    }
+
+    #[test]
+    fn a_control_approval_expires_after_120_seconds() {
+        let mut r = rig(Mode::Auto);
+        r.ready(Some(vec![entry(1)]));
+        assert_eq!(admit(&r, 1, 1), READ);
+        assert!(r.c.request_control([1; 16]).is_ok());
+        r.clock
+            .store(T0 + CONTROL_APPROVAL_MS - 1, Ordering::SeqCst);
+        assert_eq!(r.c.pending().len(), 1);
+        r.clock.store(T0 + CONTROL_APPROVAL_MS, Ordering::SeqCst);
+        assert!(!r.c.approve("123456"));
+        assert!(r.c.pending().is_empty());
+    }
+
+    #[test]
+    fn revoking_an_unknown_device_writes_no_tombstone() {
+        let r = rig(Mode::Auto);
+        assert!(!r.c.revoke(&[9; 32]));
+        assert!(!r.store.lock().unwrap().is_tombstoned(&[9; 32]).unwrap());
     }
 
     #[test]

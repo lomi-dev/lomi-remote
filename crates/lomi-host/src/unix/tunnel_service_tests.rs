@@ -1677,3 +1677,51 @@ fn a_stalled_terminal_stream_does_not_block_the_watch_stream() {
     assert_eq!(delivered(&ctl), stalled_at);
     assert_eq!(ctl.reset_code(term), None);
 }
+
+#[test]
+fn recheck_without_streams_forgets_a_stale_blind_window() {
+    let (jobs, _rx) = sync_channel(1);
+    let device = AttestedDevice {
+        account_id: [1; 16],
+        device_id: [2; 16],
+        client_class: None,
+        fingerprint: [3; 32],
+        auth_epoch: 1,
+        expires_at: 0,
+    };
+    let ctx = Arc::new(Ctx {
+        coordinator: Weak::new(),
+        handle: Handle::new(|| {}),
+        circuit: [1; 16],
+        principal: AuthenticatedConnection::new(
+            ConsumerAuthorizationId::from_bytes(device.device_id).unwrap(),
+        ),
+        device,
+        consent: None,
+        view: Mutex::new(None),
+        jobs: jobs.clone(),
+        life: Mutex::new(VecDeque::new()),
+        closed: AtomicBool::new(false),
+        busy: Mutex::new(HashMap::new()),
+        transfers: AtomicUsize::new(0),
+    });
+    let wake = Arc::new(Wake {
+        pending: AtomicBool::new(false),
+        jobs,
+    });
+    let mut hub = Hub {
+        ctx,
+        subs: BTreeMap::new(),
+        pipes: HashMap::new(),
+        resets: VecDeque::new(),
+        blocked: false,
+        wake,
+        watches: 0,
+        dir: None,
+        checked: None,
+        blind: Some(Instant::now()),
+        gone: VecDeque::new(),
+    };
+    hub.recheck();
+    assert!(hub.blind.is_none());
+}

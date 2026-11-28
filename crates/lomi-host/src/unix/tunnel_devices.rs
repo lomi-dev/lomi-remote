@@ -111,7 +111,12 @@ impl Coordinator {
             // wrong: Conflict.
             LocalCall::DevicesApprove(t) => {
                 if !consent.approve(t.code.as_str()) {
-                    return Err(LocalError::Conflict);
+                    // Locked after too many wrong codes: say so instead of "nothing waits".
+                    return Err(if consent.approve_locked() {
+                        LocalError::PermissionDenied
+                    } else {
+                        LocalError::Conflict
+                    });
                 }
             }
             LocalCall::DevicesDeny(t) => {

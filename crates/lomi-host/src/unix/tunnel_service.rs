@@ -104,6 +104,8 @@ const MAX_TRANSFERS: usize = 4;
 const MAX_CALLS: usize = 16;
 /// Concurrent calls of one device over all its tunnels, and of the whole Host.
 const MAX_CALLS_PER_DEVICE: usize = 32;
+// shortcut: two devices at 32 calls each starve a third; no per-device fair share, add one if
+// that shows up in practice.
 const MAX_CALLS_PER_HOST: usize = 64;
 /// Open streams are reset when the view could not be read for this long.
 const RECHECK_BLIND: Duration = Duration::from_secs(5);
@@ -684,6 +686,8 @@ fn rpc_call(ctx: &Ctx, envelope: &RpcEnvelope) -> Outcome {
             };
             let grant = ctx.chat_grant(&view, &workspace)?;
             let deadline = Instant::now() + Duration::from_millis(envelope.timeout_ms.get());
+            // shortcut: `chat.execute` has no cancellation hook, so a closed tunnel (`ctx.closed`)
+            // does not stop this call; it ends at the request's `timeoutMs`. Add a hook if needed.
             return coordinator
                 .chat
                 .execute(call, &grant, &scope, deadline, &mut None)
@@ -1431,6 +1435,8 @@ impl Hub {
     /// longer shared, a revoked grant or an ended session resets the stream.
     fn recheck(&mut self) {
         if self.subs.is_empty() {
+            // No streams, no blindness: a stale mark would reset the next ones at once.
+            self.blind = None;
             return;
         }
         let view = match self.ctx.view(false) {

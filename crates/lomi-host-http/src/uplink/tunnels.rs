@@ -300,6 +300,7 @@ impl Command {
                 | Self::CloseTunnel { .. }
                 | Self::SetLevel { .. }
                 | Self::Approve { .. }
+                | Self::ControlPending { .. }
         )
     }
     fn size(&self) -> usize {

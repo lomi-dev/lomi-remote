@@ -674,6 +674,10 @@ fn control_commands_pass_a_full_inbox_and_a_refused_send_reports_writable() {
     for c in [
         Command::CloseTunnel { circuit: [1; 16] },
         Command::Deny { circuit: [1; 16] },
+        Command::ControlPending {
+            circuit: [1; 16],
+            code: 1,
+        },
         Command::CloseDevice {
             fingerprint: [1; 32],
         },
