@@ -1,0 +1,59 @@
+[package]
+name = "lomi-remote-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lomi-remote-protocol = { path = "../crates/lomi-remote-protocol" }
+lomi-remote-core = { path = "../crates/lomi-remote-core" }
+lomi-remote-crypto = { path = "../crates/lomi-remote-crypto" }
+
+# Not part of the root workspace: nightly-only, never built by `cargo build --workspace`.
+[workspace]
+
+[[bin]]
+name = "tunnel_frames"
+path = "fuzz_targets/tunnel_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream_table"
+path = "fuzz_targets/stream_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payloads"
+path = "fuzz_targets/payloads.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_frame"
+path = "fuzz_targets/relay_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "noise"
+path = "fuzz_targets/noise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bridge_call"
+path = "fuzz_targets/bridge_call.rs"
+test = false
+doc = false
+bench = false

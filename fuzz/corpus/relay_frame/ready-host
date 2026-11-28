@@ -1,0 +1,1 @@
+{"ok":true,"role":"host","expiresAt":1795000000000,"state":{"runtime":{"generation":"7","hostAccessEpoch":"12"},"devices":[{"deviceId":"22222222-2222-4222-8222-222222222222","authorizationEpoch":"3","expiresAt":1795003600000}]}}
