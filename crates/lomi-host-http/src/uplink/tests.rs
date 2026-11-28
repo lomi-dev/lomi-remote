@@ -164,10 +164,18 @@ fn events_map_to_wake_hints_and_close() {
     ));
     assert!(matches!(
         s.on_frame(event("host.revoked"))[..],
+        [
+            Effect::Device(tunnels::DeviceEvent::HostRevoked),
+            Effect::Close
+        ]
+    ));
+    // the older `devices.changed {seq}` (from grant.changed) says nothing we can act on
+    assert!(s.on_frame(event("devices.changed")).is_empty());
+    // a revocation we cannot read is not ignored: reconnect, READY reconciles
+    assert!(matches!(
+        s.on_frame(event("device.revoked"))[..],
         [Effect::Close]
     ));
-    assert!(s.on_frame(event("devices.changed")).is_empty());
-    assert!(s.on_frame(event("device.revoked")).is_empty());
     // a reply nobody asked for is a protocol violation
     assert!(matches!(
         s.on_frame(reply_ok(77, json!({})))[..],
@@ -721,4 +729,106 @@ fn circuit_close_replies_are_ignored_but_unknown_replies_still_close() {
         matches!(session.on_frame(err)[..], [Effect::Close]),
         "answered once"
     );
+}
+
+const FP: &str = "ab00000000000000000000000000000000000000000000000000000000000001";
+fn device_json(n: u64) -> Value {
+    json!({"deviceId": uuid(n), "fingerprint": FP, "clientClass": "native",
+           "authEpoch": "7", "expiresAt": 1_900_000_000_000u64})
+}
+fn event_with(name: &str, data: Value) -> Frame {
+    let Value::Object(data) = data else { panic!() };
+    Frame::Event {
+        name: name.into(),
+        data,
+    }
+}
+fn entry(n: u64) -> tunnels::DeviceEntry {
+    tunnels::DeviceEntry {
+        device_id: tunnels::DeviceEntry::parse(device_json(n).as_object().unwrap())
+            .unwrap()
+            .device_id,
+        fingerprint: lomi_remote_core::tunnel::unhex(FP).unwrap(),
+        client_class: Some("native".into()),
+        auth_epoch: 7,
+        expires_at: 1_900_000_000_000,
+    }
+}
+
+#[test]
+fn device_events_become_effects() {
+    let mut s = Session::new(Zeroizing::new(TOKEN.into()));
+    let changed = s.on_frame(event_with("devices.changed", device_json(5)));
+    assert!(
+        matches!(&changed[..], [Effect::Device(tunnels::DeviceEvent::Changed(e))] if *e == entry(5))
+    );
+    let revoked = s.on_frame(event_with("device.revoked", json!({"deviceId": uuid(5)})));
+    assert!(matches!(
+        &revoked[..],
+        [Effect::Device(tunnels::DeviceEvent::Revoked {
+            fingerprint: None,
+            ..
+        })]
+    ));
+    let revoked = s.on_frame(event_with(
+        "device.revoked",
+        json!({"deviceId": uuid(5), "fingerprint": FP}),
+    ));
+    assert!(matches!(
+        &revoked[..],
+        [Effect::Device(tunnels::DeviceEvent::Revoked {
+            fingerprint: Some(_),
+            ..
+        })]
+    ));
+    // legacy {seq} only, or unreadable: devices.changed is ignored
+    assert!(
+        s.on_frame(event_with("devices.changed", json!({"seq": "3"})))
+            .is_empty()
+    );
+    assert!(
+        s.on_frame(event_with(
+            "devices.changed",
+            json!({"deviceId": uuid(5), "fingerprint": "zz"})
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn ready_carries_the_device_list_only_when_the_server_sent_a_readable_one() {
+    let ready = |devices: Option<Value>| {
+        let mut state = json!({"hostId": HOST, "runtime": {"runtimeId": RUNTIME, "runtimeGeneration": "5", "hostAccessEpoch": "6"}, "leaseMs": "29988", "publicationSeq": "9"});
+        if let Some(d) = devices {
+            state["devices"] = d;
+        }
+        let Value::Object(state) = state else {
+            panic!()
+        };
+        relay_frame(&Frame::ReadyOk {
+            role: Role::Host,
+            expires_at: 1_900_000_000_000,
+            state,
+        })
+    };
+    let devices = |v| parse_ready(&ready(v), &binding()).unwrap().devices;
+    assert_eq!(devices(None), None, "flag off: unknown, not empty");
+    assert_eq!(
+        devices(Some(json!([]))),
+        Some(vec![]),
+        "an empty list is a list"
+    );
+    assert_eq!(devices(Some(json!([device_json(1)]))), Some(vec![entry(1)]));
+    assert_eq!(
+        devices(Some(json!([device_json(1), {"deviceId": "x"}]))),
+        None,
+        "one unreadable entry makes the list unknown, never shorter"
+    );
+}
+
+#[test]
+fn tunnels_survive_a_three_second_delay_but_not_eight() {
+    assert!(tunnels_fresh(Duration::from_secs(3)));
+    assert!(tunnels_fresh(Duration::from_secs(8)));
+    assert!(!tunnels_fresh(Duration::from_millis(8_001)));
 }

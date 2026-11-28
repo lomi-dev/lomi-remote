@@ -450,3 +450,151 @@ fn close_follows_queued_data_and_reset_drops_it() {
         ]
     );
 }
+
+fn fingerprint(id: &Identity) -> [u8; 32] {
+    id.public_bundle().bundle.fingerprint().unwrap()
+}
+
+#[test]
+fn closing_by_device_reaches_every_phase_at_once_and_only_that_device() {
+    let mut w = world();
+    w.policy.0.lock().unwrap().push_back(Admission::Pending);
+    let (mut p, outs) = handshake(&mut w, &device(1), 1, 1, false, 0);
+    greeting(&mut p, &outs);
+    let mut live = open_dev(&mut w, 2);
+    open_dev(&mut w, 3);
+    assert_eq!(w.e.len(), 3);
+    // a live tunnel: closed on receipt of the event, input afterwards goes nowhere
+    w.e.close_where("deviceRevoked", |d| d.device_id == [2; 16]);
+    assert_eq!(w.e.take_out(), [Out::Close { circuit: [2; 16] }]);
+    assert_eq!(log(&w).last().unwrap(), "close deviceRevoked");
+    let (id, open) = live.table.open(&terminal()).unwrap();
+    let data = live.table.send_data(id, b"x", true).unwrap();
+    live.send(&mut w, &[open, data], 1);
+    assert!(w.e.take_out().is_empty());
+    assert!(!log(&w).iter().any(|l| l.starts_with("stream")));
+    // one still waiting for approval
+    w.e.close_where("deviceRevoked", |d| d.device_id == [1; 16]);
+    assert_eq!(w.e.take_out(), [Out::Close { circuit: [1; 16] }]);
+    assert_eq!(w.e.len(), 1);
+}
+
+#[test]
+fn a_tunnel_ends_at_its_attested_expiry_and_a_new_attestation_moves_it() {
+    let mut w = world();
+    let id = device(1);
+    let (mut d, outs) = handshake(&mut w, &id, 1, 1, false, 0); // attests expiresAt 9
+    assert_eq!(greeting(&mut d, &outs), welcome());
+    assert_eq!(w.e.next_expiry(), Some(9));
+    w.e.expire(8);
+    assert!(w.e.take_out().is_empty());
+    w.e.refresh_device(&DeviceEntry {
+        device_id: [1; 16],
+        fingerprint: fingerprint(&id),
+        client_class: None,
+        auth_epoch: 2,
+        expires_at: 100,
+    });
+    w.e.expire(99);
+    assert!(w.e.take_out().is_empty());
+    w.e.expire(100);
+    assert_eq!(w.e.take_out(), [Out::Close { circuit: [1; 16] }]);
+    assert_eq!(log(&w).last().unwrap(), "close authorizationExpired");
+    assert_eq!(w.e.next_expiry(), None);
+}
+
+#[test]
+fn stale_authority_closes_everything_and_refuses_until_fresh_again() {
+    let mut w = world();
+    open_dev(&mut w, 1);
+    open_dev(&mut w, 2);
+    w.e.set_fresh(false);
+    let mut outs = w.e.take_out();
+    outs.sort_by_key(|o| match o {
+        Out::Close { circuit } => *circuit,
+        Out::Data { circuit, .. } => *circuit,
+    });
+    assert_eq!(
+        outs,
+        [
+            Out::Close { circuit: [1; 16] },
+            Out::Close { circuit: [2; 16] }
+        ]
+    );
+    assert_eq!(log(&w).last().unwrap(), "close staleAuthority");
+    w.e.on_circuit_open(&event([3; 16], &device(3), 1), 0);
+    assert_eq!(w.e.take_out(), [Out::Close { circuit: [3; 16] }]);
+    assert!(w.e.is_empty());
+    w.e.set_fresh(false); // already stale: nothing more to close
+    assert!(w.e.take_out().is_empty());
+    w.e.set_fresh(true);
+    open_dev(&mut w, 4);
+    assert_eq!(w.e.len(), 1);
+}
+
+#[test]
+fn set_level_command_raises_only_that_devices_live_tunnels() {
+    struct Spy(Arc<Mutex<Vec<(CircuitId, Level)>>>);
+    impl TunnelService for Spy {
+        fn on_stream_open(
+            &mut self,
+            _: &mut Streams<'_>,
+            _: u32,
+            _: &OpenParams,
+        ) -> Result<(), u16> {
+            Ok(())
+        }
+        fn on_message(&mut self, s: &mut Streams<'_>, _: u32, _: Vec<u8>) {
+            self.0.lock().unwrap().push((s.circuit(), s.level()));
+        }
+        fn on_tunnel_close(&mut self, _: CircuitId, _: &str) {}
+        fn directory(&mut self, _: &AttestedDevice) -> Vec<u8> {
+            Vec::new()
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut w = world();
+    let handle = Handle::new(|| {});
+    let host = Identity::generate(ACCOUNT, HOST_ID, Role::Host, 1).unwrap();
+    w.host = host.public_bundle();
+    w.e = Engine::new(
+        Config {
+            identity: host,
+            host_id: HOST_ID,
+            contract_hash: HASH,
+        },
+        Box::new(Scripted::default()),
+        Box::new(Spy(seen.clone())),
+        handle.clone(),
+    )
+    .unwrap();
+    let ids = [device(1), device(2)];
+    let mut devs: Vec<Dev> = ids
+        .iter()
+        .zip([1, 2])
+        .map(|(id, n)| {
+            let (mut d, outs) = handshake(&mut w, id, n, 1, false, 0);
+            assert_eq!(greeting(&mut d, &outs), welcome());
+            d
+        })
+        .collect();
+    let say = |w: &mut World, d: &mut Dev| {
+        let (id, open) = d.table.open(&terminal()).unwrap();
+        let data = d.table.send_data(id, b"x", true).unwrap();
+        d.send(w, &[open, data], 1);
+    };
+    handle
+        .push(Command::SetLevel {
+            fingerprint: fingerprint(&ids[0]),
+            level: Level::Control,
+        })
+        .unwrap();
+    w.e.drain_commands();
+    for d in &mut devs {
+        say(&mut w, d);
+    }
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [([1; 16], Level::Control), ([2; 16], Level::Read)]
+    );
+}

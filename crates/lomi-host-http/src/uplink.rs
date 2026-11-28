@@ -40,6 +40,9 @@ const OFFER_TTL: Duration = Duration::from_secs(10);
 /// Newest `authority.fresh` that still counts as fresh: 3 s plus the 5 s a heartbeat
 /// grants stays inside the 8 s the plan allows between relay confirmation and use.
 const FRESH_MAX_AGE: Duration = Duration::from_secs(3);
+/// Tunnels need a relay-confirmed authority this recent (`authority.fresh` comes every 2 s); past
+/// it every tunnel closes and no new one opens until the next one arrives.
+const TUNNEL_FRESH_MAX: Duration = Duration::from_secs(8);
 const FRESHNESS_MS: u64 = 5_000;
 /// A synthesized heartbeat needs at least this much confirmed server lease left (the heartbeat
 /// DTO requires `freshness_ms <= lease_ms`); below it the heartbeat goes to HTTP.
@@ -149,6 +152,8 @@ struct Shared {
     wake: Wake,
     /// Device tunnels (P3a.7); only the uplink thread works on it while a link is up.
     tunnels: Mutex<Option<tunnels::Engine>>,
+    /// Consent follows the account's device list (P3a.10). Lock order: never held with `tunnels`.
+    roster: Mutex<Option<Box<dyn tunnels::Roster>>>,
 }
 
 #[cfg_attr(not(debug_assertions), allow(dead_code))] // release builds never create it
@@ -160,6 +165,7 @@ impl Shared {
             changed: Condvar::new(),
             wake: Wake::new(),
             tunnels: Mutex::new(None),
+            roster: Mutex::new(None),
         }
     }
 }
@@ -182,6 +188,34 @@ pub fn install_tunnels(
     let engine = tunnels::Engine::new(config, policy, service, handle.clone()).ok()?;
     *lock(&sh.tunnels) = Some(engine);
     Some(handle)
+}
+/// Hands the uplink what keeps consent in step with device-list events; without it tunnels do not
+/// follow revocations, so install it together with the engine.
+pub fn install_roster(roster: Box<dyn tunnels::Roster>) {
+    if let Some(sh) = shared() {
+        *lock(&sh.roster) = Some(roster);
+    }
+}
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+/// A late `authority.fresh` (a 3 s network delay) is no reason to drop tunnels; 8 s is.
+fn tunnels_fresh(silent: Duration) -> bool {
+    silent <= TUNNEL_FRESH_MAX
+}
+/// Roster first (grants, list), then the engine closes what it names.
+fn apply_device(sh: &Shared, event: &tunnels::DeviceEvent) {
+    let closing = lock(&sh.roster).as_mut().and_then(|r| r.apply(event));
+    if let Some(engine) = lock(&sh.tunnels).as_mut() {
+        if let tunnels::DeviceEvent::Changed(entry) = event {
+            engine.refresh_device(entry);
+        }
+        if let Some(closing) = closing {
+            engine.close_where("deviceRevoked", closing);
+        }
+    }
 }
 /// The relay contract hash this uplink runs with (the engine's prologue needs the same bytes).
 pub fn contract_hash() -> Option<[u8; 32]> {
@@ -720,6 +754,8 @@ enum Refusal {
 struct Ready {
     lease_ms: u64,
     publication_seq: u64,
+    /// `None`: the server sent no list (flag off) or one we cannot read; never "no devices".
+    devices: Option<Vec<tunnels::DeviceEntry>>,
 }
 fn auth_frame(contract_hash: &str, token: &str, binding: &Binding) -> Option<Zeroizing<Vec<u8>>> {
     let frame = Frame::Auth {
@@ -761,6 +797,14 @@ fn parse_ready(bytes: &[u8], binding: &Binding) -> std::result::Result<Ready, Re
                 (true, Some(lease_ms), Some(publication_seq)) if lease_ms > 0 => Ok(Ready {
                     lease_ms,
                     publication_seq,
+                    devices: state
+                        .get("devices")
+                        .and_then(Value::as_array)
+                        .and_then(|a| {
+                            a.iter()
+                                .map(|v| tunnels::DeviceEntry::parse(v.as_object()?))
+                                .collect()
+                        }),
                 }),
                 _ => Err(Refusal::Invalid),
             }
@@ -812,6 +856,7 @@ enum Effect {
     /// `authority.fresh`, with the relay-confirmed server lease left (ms) if it carried one.
     Fresh(Option<u64>),
     Wake(Pending),
+    Device(tunnels::DeviceEvent),
     TokenAcked,
     /// The server's publication sequence after our publication: known, or lost track of.
     Published(Option<u64>),
@@ -912,8 +957,20 @@ impl Session {
                 )],
                 "channel.pending" => vec![Effect::Wake(Pending::Channels)],
                 "pairing.pending" => vec![Effect::Wake(Pending::Pairings)],
-                "host.revoked" => vec![Effect::Close],
-                // device.revoked / devices.changed: P3a.10. circuit.* never gets here (see `drive`).
+                "host.revoked" => vec![
+                    Effect::Device(tunnels::DeviceEvent::HostRevoked),
+                    Effect::Close,
+                ],
+                // A revocation we cannot read is not ignored: reconnect and reconcile at READY.
+                "device.revoked" => match tunnels::DeviceEvent::from_event(&name, &data) {
+                    Some(e) => vec![Effect::Device(e)],
+                    None => vec![Effect::Close],
+                },
+                "devices.changed" => tunnels::DeviceEvent::from_event(&name, &data)
+                    .map(Effect::Device)
+                    .into_iter()
+                    .collect(),
+                // circuit.* never gets here (see `drive`).
                 _ => vec![],
             },
             Frame::ReplyOk { call_id, .. } | Frame::ReplyErr { call_id, .. }
@@ -1130,6 +1187,14 @@ fn connect_and_drive(
         // Once on every connect: whatever arrived while the link was down.
         st.fetch = [true, true];
     }
+    apply_device(
+        sh,
+        &tunnels::DeviceEvent::Ready {
+            host_access_epoch: binding.epoch,
+            runtime_generation: binding.generation,
+            devices: ready.devices,
+        },
+    );
     let mut session = Session::new(token);
     let _ = drive(sh, &mut conn, &mut session, binding, generation);
     conn.close();
@@ -1178,9 +1243,14 @@ fn drive(
                 continue;
             }
             for effect in session.on_frame(frame) {
+                if let Effect::Device(event) = &effect {
+                    apply_device(sh, event);
+                    continue;
+                }
                 let mut st = lock(&sh.state);
                 match effect {
                     Effect::Close => return Err(Error::RelayClosed),
+                    Effect::Device(_) => {}
                     Effect::Fresh(lease_left) => {
                         if let Some(live) = st.live.as_mut() {
                             let now = Instant::now();
@@ -1258,8 +1328,20 @@ fn drive(
             .as_ref()
             .and_then(tunnels::Engine::next_deadline)
             .map(|d| Duration::from_millis(d.saturating_sub(now_ms())));
+        // Wake for the next attested expiry and for the moment authority turns stale.
+        let expiry_left = lock(&sh.tunnels)
+            .as_ref()
+            .and_then(tunnels::Engine::next_expiry)
+            .map(|e| Duration::from_millis(e.saturating_sub(wall_ms())));
         let limit = (OFFER_TTL - idle)
             .min(HALF_OPEN - silent)
+            .min(expiry_left.unwrap_or(OFFER_TTL))
+            .min(
+                TUNNEL_FRESH_MAX
+                    .checked_sub(silent)
+                    .filter(|d| !d.is_zero())
+                    .unwrap_or(OFFER_TTL),
+            )
             .min(session.next_timeout().unwrap_or(OFFER_TTL))
             .min(tunnel_left.unwrap_or(OFFER_TTL));
         sh.wake.wait(conn, limit);
@@ -1273,8 +1355,14 @@ fn flush_tunnels(
     session: &mut Session,
 ) -> Result<()> {
     let check = || -> std::result::Result<(), BudgetStop> { Ok(()) };
+    let fresh = lock(&sh.state)
+        .live
+        .as_ref()
+        .is_some_and(|l| tunnels_fresh(l.last_fresh.elapsed()));
     let outs = match lock(&sh.tunnels).as_mut() {
         Some(engine) => {
+            engine.set_fresh(fresh);
+            engine.expire(wall_ms());
             engine.drain_commands();
             engine.tick(now_ms());
             engine.take_out()
