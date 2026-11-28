@@ -1,0 +1,197 @@
+{
+  "confirmation_code": "320244",
+  "device_channel_key": "7d34a4815fa6b982535e60af3bd9b49556816080f1641ff81d2b7c8ae8268a44",
+  "device_seeds": {
+    "channel": "2121212121212121212121212121212121212121212121212121212121212121",
+    "identity": "2020202020202020202020202020202020202020202020202020202020202020",
+    "mailbox": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "ephemeral": {
+    "device": "3131313131313131313131313131313131313131313131313131313131313131",
+    "host": "3232323232323232323232323232323232323232323232323232323232323232"
+  },
+  "handshake_hash": "5d3ab0a8d0b0d9158d0eb02d508a02f24ecf1682e5581e0c595b7c9bd1c75adf",
+  "hello_payload": "68656c6c6f3a206465766963652062756e646c6520616e6420726573756d65206c697374",
+  "host_channel_key": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+  "host_seeds": {
+    "channel": "1111111111111111111111111111111111111111111111111111111111111111",
+    "identity": "1010101010101010101010101010101010101010101010101010101010101010",
+    "mailbox": "1212121212121212121212121212121212121212121212121212121212121212"
+  },
+  "ids": {
+    "account": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "device": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "host": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+  },
+  "messages": [
+    "04f5f29162c31a8defa18e6e742224ee806fc1718a278be859ba5620402b8f3a",
+    "59d9225473451efffe6b36dbcaefdbf7b1895de62084509a7f5b58bf01d064182fa9af740861373c714a0fcc9ad82bc0a88373b16234d2ef4f01521103d54ad59ac030ac4781e529733c8652fad2920b51d1447b5f86854761c1deda473d3c3e",
+    "d14bab80ad3a130592651e60b4116abb2aa6847f52272cc989837f1536b8581da967d6c27c666c06fc4efb5dd6e4937407b70f5929e7d0ab0f1224c05e5114ae8253b1f27883410ca65c456426f022652f6c7290e1db6d383922543150ca65257cbf1faa"
+  ],
+  "noise": "Noise_XX_25519_ChaChaPoly_SHA256",
+  "prologue": {
+    "account_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "circuit_id": "01010101010101010101010101010101",
+    "contract_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+    "device_fingerprint": "12f265ba84064e2208d00a73b8c2034ac1e3b69be28dd2a25ba751473b44c034",
+    "encoded": "89726c6f6d692d72656d6f74652f74756e6e656c58207777777777777777777777777777777777777777777777777777777777777777015001010101010101010101010101010101500202020202020202020202020202020250b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b25820f8d0f1e3d90af82be2ce52c926903fdafa7c312e5313d28278998ca6a6ebcfd1582012f265ba84064e2208d00a73b8c2034ac1e3b69be28dd2a25ba751473b44c03450a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "host_fingerprint": "f8d0f1e3d90af82be2ce52c926903fdafa7c312e5313d28278998ca6a6ebcfd1",
+    "host_id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "nonce": "02020202020202020202020202020202",
+    "path": "relay"
+  },
+  "rekey_interval": 4,
+  "transport": [
+    {
+      "ciphertext": "b183e15f401d43271f90881ef577b8bb34",
+      "direction": "device_to_host",
+      "plaintext": "00"
+    },
+    {
+      "ciphertext": "2d613e8680b83fd999c55509048e1607591d",
+      "direction": "device_to_host",
+      "plaintext": "0101"
+    },
+    {
+      "ciphertext": "9cd1055adb2b09328bdd31dcd5b4dce4a55247",
+      "direction": "host_to_device",
+      "plaintext": "020202"
+    },
+    {
+      "ciphertext": "b2b016f1b19ee949a465f7a2e9eabd8c472e4ece",
+      "direction": "device_to_host",
+      "plaintext": "03030303"
+    },
+    {
+      "ciphertext": "eb3cf1695598bc62d2258e486771b8bff664cbf444",
+      "direction": "device_to_host",
+      "plaintext": "0404040404"
+    },
+    {
+      "ciphertext": "cc83e6f27e970b749b1aa4253bf38bc5d0ca94b94b63",
+      "direction": "host_to_device",
+      "plaintext": "050505050505"
+    },
+    {
+      "ciphertext": "aca2b899ade51fd133ffd21b22b91a44ab38112a7b8eb4",
+      "direction": "device_to_host",
+      "plaintext": "06060606060606"
+    },
+    {
+      "ciphertext": "ac32e0459922bc61ccadd7b8ead1b8b7b96fd41b5587a19e",
+      "direction": "device_to_host",
+      "plaintext": "0707070707070707"
+    },
+    {
+      "ciphertext": "a538484a800dac30d6e531cfe32ce3d58a8b265428f100fc9c",
+      "direction": "host_to_device",
+      "plaintext": "080808080808080808"
+    },
+    {
+      "ciphertext": "8fc96381464939fd2f32d82fc2edb0ab397f6e1c5792cbe15b1d",
+      "direction": "device_to_host",
+      "plaintext": "09090909090909090909"
+    },
+    {
+      "ciphertext": "e056915d3709e0b4c5ae794559b934b3557661",
+      "direction": "device_to_host",
+      "plaintext": "0a0a0a"
+    },
+    {
+      "ciphertext": "c23132b615bc99daba732b11552b4f36bfdb8f",
+      "direction": "host_to_device",
+      "plaintext": "0b0b0b"
+    },
+    {
+      "ciphertext": "f1a7d3a568c2587a51d418bef3b060ae365ab8",
+      "direction": "device_to_host",
+      "plaintext": "0c0c0c"
+    },
+    {
+      "ciphertext": "53647ac85cc475bc1fbe84934fef2ef1203270",
+      "direction": "host_to_device",
+      "plaintext": "0d0d0d"
+    },
+    {
+      "ciphertext": "08c3538f1d340967e44a128057ea8f179678ba",
+      "direction": "device_to_host",
+      "plaintext": "0e0e0e"
+    },
+    {
+      "ciphertext": "69da5ccabee7cbd8d00ce92383e42d6befa636",
+      "direction": "host_to_device",
+      "plaintext": "0f0f0f"
+    },
+    {
+      "ciphertext": "516ee99e480069a67d7cfb424e696964f69ee8",
+      "direction": "device_to_host",
+      "plaintext": "101010"
+    },
+    {
+      "ciphertext": "ac14f01a57c3a179569b36355b5782be70f69b",
+      "direction": "host_to_device",
+      "plaintext": "111111"
+    },
+    {
+      "ciphertext": "070dca58849cc55a5d55a725dcb0e70dea0e2f",
+      "direction": "device_to_host",
+      "plaintext": "121212"
+    },
+    {
+      "ciphertext": "f7c778b585a160cbe122863d33f32f4afd8e72",
+      "direction": "host_to_device",
+      "plaintext": "131313"
+    },
+    {
+      "ciphertext": "4214377f9c6d6d48498a485c2b8bfc4a79b10d",
+      "direction": "device_to_host",
+      "plaintext": "141414"
+    },
+    {
+      "ciphertext": "4e5d4064b7591f3156f0a559c5531e9f72953f",
+      "direction": "host_to_device",
+      "plaintext": "151515"
+    },
+    {
+      "ciphertext": "3eeb5ce1a7fdc1e4e827ecc61f59800d5e9565",
+      "direction": "device_to_host",
+      "plaintext": "161616"
+    },
+    {
+      "ciphertext": "98e63e5ded9a8d203cd40caaaeda3e3514a7d0",
+      "direction": "host_to_device",
+      "plaintext": "171717"
+    },
+    {
+      "ciphertext": "89e4ea302734446a8dc2a95ba849fef5607073",
+      "direction": "device_to_host",
+      "plaintext": "181818"
+    },
+    {
+      "ciphertext": "6610c82732ec016832a925d2a2cc9907bc4f24",
+      "direction": "host_to_device",
+      "plaintext": "191919"
+    },
+    {
+      "ciphertext": "90d9403b88ee03c81a1117a7e178ea4be360d8",
+      "direction": "device_to_host",
+      "plaintext": "1a1a1a"
+    },
+    {
+      "ciphertext": "0d369cba3eaa98a8f00c8821ebcfd9edd2a57f",
+      "direction": "host_to_device",
+      "plaintext": "1b1b1b"
+    },
+    {
+      "ciphertext": "5a57e559fe11da2a543143db9bca76921d514a",
+      "direction": "device_to_host",
+      "plaintext": "1c1c1c"
+    },
+    {
+      "ciphertext": "f4c549d025c3c2e29a6d064337c8b13ca24d9f",
+      "direction": "host_to_device",
+      "plaintext": "1d1d1d"
+    }
+  ],
+  "version": 1
+}
