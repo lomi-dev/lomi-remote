@@ -63,9 +63,9 @@ use lomi_remote_protocol::{
     tunnel::{
         ChatOpen, DirectoryChange, DirectoryChat, DirectoryChatState, DirectoryHost,
         DirectoryLayout, DirectoryMessage, DirectorySnapshot, DirectoryTab, DirectoryTerminal,
-        DirectoryUpdate, DirectoryWorkspace, FilesWatchOpen, OpenParams, RpcEnvelope,
-        RpcTransferResponse, TRANSFER_CHUNK, TRANSFER_INLINE_MAX, TRANSFER_MAX, TerminalOpen,
-        TransferOpen, TransferTag,
+        DirectoryUpdate, DirectoryWorkspace, FilesWatchOpen, MAX_LOGICAL_MESSAGE, OpenParams,
+        RpcEnvelope, RpcTransferResponse, TRANSFER_CHUNK, TRANSFER_INLINE_MAX, TRANSFER_MAX,
+        TerminalOpen, TransferOpen, TransferTag,
     },
     *,
 };
@@ -102,6 +102,9 @@ const MAX_READS: usize = 4;
 const MAX_TRANSFERS: usize = 4;
 /// Calls running at once for one tunnel, over all workspaces.
 const MAX_CALLS: usize = 16;
+/// Concurrent calls of one device over all its tunnels, and of the whole Host.
+const MAX_CALLS_PER_DEVICE: usize = 32;
+const MAX_CALLS_PER_HOST: usize = 64;
 /// Open streams are reset when the view could not be read for this long.
 const RECHECK_BLIND: Duration = Duration::from_secs(5);
 
@@ -145,6 +148,9 @@ struct Ctx {
     view: Mutex<Option<Arc<View>>>,
     /// Into the `streams` worker. Every sender is a job source; the worker also stops on `closed`.
     jobs: SyncSender<Job>,
+    /// Jobs that must not be lost (`Closed`, `Writable`, `Stop`, `Directory`): a short queue of
+    /// its own, bounded by the number of streams, plus a wake-up into `jobs`.
+    life: Mutex<VecDeque<Job>>,
     closed: AtomicBool,
     busy: Mutex<HashMap<WorkspaceId, Busy>>,
     transfers: AtomicUsize,
@@ -161,8 +167,41 @@ struct Permit {
     workspace: WorkspaceId,
     mutation: bool,
 }
+/// Calls running on this Host, in total and per device (the per-tunnel limits alone let many
+/// tunnels of one device multiply them).
+static CALLS: Mutex<(usize, BTreeMap<[u8; 32], usize>)> = Mutex::new((0, BTreeMap::new()));
+fn claim_call(device: &[u8; 32]) -> bool {
+    let mut calls = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mine = calls.1.get(device).copied().unwrap_or(0);
+    if calls.0 >= MAX_CALLS_PER_HOST || mine >= MAX_CALLS_PER_DEVICE {
+        return false;
+    }
+    calls.0 += 1;
+    calls.1.insert(*device, mine + 1);
+    true
+}
+fn release_call(device: &[u8; 32]) {
+    let mut calls = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
+    calls.0 = calls.0.saturating_sub(1);
+    if let Some(n) = calls.1.get_mut(device) {
+        *n -= 1;
+        if *n == 0 {
+            calls.1.remove(device);
+        }
+    }
+}
 impl Permit {
     fn take(ctx: &Arc<Ctx>, workspace: WorkspaceId, mutation: bool) -> Option<Self> {
+        if !claim_call(&ctx.device.fingerprint) {
+            return None;
+        }
+        let permit = Self::take_local(ctx, workspace, mutation);
+        if permit.is_none() {
+            release_call(&ctx.device.fingerprint);
+        }
+        permit
+    }
+    fn take_local(ctx: &Arc<Ctx>, workspace: WorkspaceId, mutation: bool) -> Option<Self> {
         let mut busy = ctx.busy.lock().unwrap_or_else(PoisonError::into_inner);
         let running: usize = busy
             .values()
@@ -188,6 +227,7 @@ impl Permit {
 }
 impl Drop for Permit {
     fn drop(&mut self) {
+        release_call(&self.ctx.device.fingerprint);
         let mut busy = self.ctx.busy.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(slot) = busy.get_mut(&self.workspace) {
             if self.mutation {
@@ -226,13 +266,17 @@ impl Ctx {
     fn view(&self, fresh: bool) -> Result<Arc<View>, RemoteError> {
         let coordinator = self.coordinator()?;
         let hint = coordinator.owner.projection_hint();
-        let mut cached = self.view.lock().unwrap_or_else(PoisonError::into_inner);
-        if !fresh
-            && let Some(v) = &*cached
-            && v.at.elapsed() < VIEW_TTL
-            && v.hint == hint
+        // The lock is for the cache only: the read below can wait on a busy Host, and a second
+        // caller must not queue behind it (at worst both read).
         {
-            return Ok(v.clone());
+            let cached = self.view.lock().unwrap_or_else(PoisonError::into_inner);
+            if !fresh
+                && let Some(v) = &*cached
+                && v.at.elapsed() < VIEW_TTL
+                && v.hint == hint
+            {
+                return Ok(v.clone());
+            }
         }
         let cancelled = AtomicBool::new(false);
         let mut read = None;
@@ -262,7 +306,7 @@ impl Ctx {
             projects: view.projects,
             host_name: view.host_name,
         });
-        *cached = Some(v.clone());
+        *self.view.lock().unwrap_or_else(PoisonError::into_inner) = Some(v.clone());
         Ok(v)
     }
     /// `authorize`. When only the owner's code is missing, first re-read (it may just have been
@@ -302,6 +346,19 @@ impl Ctx {
             fingerprint: hex(&self.device.fingerprint),
             grant_id: hex(&self.device.fingerprint),
         })
+    }
+    /// Queues a job that cannot be dropped and wakes the `streams` worker (a full `jobs` channel
+    /// means the worker is busy and will look at this queue anyway).
+    fn lifecycle(&self, job: Job) {
+        {
+            let mut life = self.life.lock().unwrap_or_else(PoisonError::into_inner);
+            // One `Writable` per stream is as good as many.
+            let dup = matches!(&job, Job::Writable(s) if life.iter().any(|j| matches!(j, Job::Writable(t) if t == s)));
+            if !dup {
+                life.push_back(job);
+            }
+        }
+        let _ = self.jobs.try_send(Job::Wake);
     }
     /// An answer for stream 0, paced by the `streams` worker like every other stream.
     fn reply(&self, data: Vec<u8>) {
@@ -464,7 +521,19 @@ fn serve(ctx: &Arc<Ctx>, envelope: &RpcEnvelope) {
     let workspace = envelope
         .workspace_id
         .or_else(|| call_workspace(&envelope.call).copied());
-    if let Some(out) = deliver(ctx, &envelope.request_id, workspace, answer) {
+    let out = deliver(ctx, &envelope.request_id, workspace, answer)
+        // The engine takes one message of 1 MiB at most and drops a larger one silently: answer
+        // with an error instead of leaving the request hanging.
+        .filter(|out| out.len() <= MAX_LOGICAL_MESSAGE)
+        .or_else(|| {
+            let id = &envelope.request_id;
+            encode(&response(
+                id,
+                envelope.call.chat_operation_id(),
+                Err(fault(ErrorCode::ResourceExhausted)),
+            ))
+        });
+    if let Some(out) = out {
         ctx.reply(out);
     }
 }
@@ -592,11 +661,21 @@ fn rpc_call(ctx: &Ctx, envelope: &RpcEnvelope) -> Outcome {
             if files.workspace_epoch != state.workspace_epoch {
                 return Err(fault(ErrorCode::StaleEpoch));
             }
+            // The file engine cannot be interrupted: a call for a tunnel that is gone does not
+            // start, and one that outlived its own deadline is answered as such.
+            if ctx.closed.load(Ordering::Acquire) {
+                return Err(fault(ErrorCode::ServiceUnavailable));
+            }
+            let started = Instant::now();
             let root =
                 coordinator
                     .files
                     .get(workspace, state.workspace_epoch, &project.local_root)?;
-            return remote_files::execute_read(&root, call).map(Ok);
+            let read = remote_files::execute_read(&root, call);
+            if started.elapsed() > Duration::from_millis(envelope.timeout_ms.get()) {
+                return Err(fault(ErrorCode::DeadlineExceeded));
+            }
+            return read.map(Ok);
         }
         if is_chat(call) {
             let scope = Scope {
@@ -613,9 +692,9 @@ fn rpc_call(ctx: &Ctx, envelope: &RpcEnvelope) -> Outcome {
                 .map(Ok);
         }
         if is_dispatched(call) {
-            let cancelled = AtomicBool::new(false);
             let deadline = Instant::now() + Duration::from_millis(envelope.timeout_ms.get());
-            let operation = Operation::new(deadline, &cancelled);
+            // A closed tunnel cancels what its calls still run.
+            let operation = Operation::new(deadline, &ctx.closed);
             // Stored operations are looked up with what this device may do here, not with the
             // owner's local rights.
             let rights = view
@@ -654,7 +733,8 @@ enum Job {
     Message(u32, Vec<u8>),
     Closed(u32),
     Writable(u32),
-    Baseline(Vec<DirectoryWorkspace>),
+    /// The engine opened the directory stream: build and send the snapshot.
+    Directory(u32),
     /// An answer for stream 0.
     Reply(Vec<u8>),
     /// The payload of a Host-opened transfer stream.
@@ -839,6 +919,8 @@ struct Hub {
     checked: Option<Arc<View>>,
     /// Since when the view cannot be read while streams are open.
     blind: Option<Instant>,
+    /// Streams closed with nothing of ours on them (a transfer may still be on its way).
+    gone: VecDeque<u32>,
 }
 
 fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
@@ -857,6 +939,7 @@ fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
         dir: None,
         checked: None,
         blind: None,
+        gone: VecDeque::new(),
     };
     loop {
         // Nothing to do until a job or a wake-up arrives, unless something needs a look.
@@ -864,6 +947,15 @@ fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
             Some(wait) => jobs.recv_timeout(wait),
             None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
+        // Taken before the channel is drained: whatever was queued here came after the `Open` it
+        // belongs to, and that one is already in the channel.
+        let life: Vec<Job> = hub
+            .ctx
+            .life
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect();
         match first {
             Ok(job) => hub.job(job),
             Err(RecvTimeoutError::Timeout) => {}
@@ -872,6 +964,9 @@ fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
         // From here an event queues a new wake-up job.
         hub.wake.pending.store(false, Ordering::Release);
         while let Ok(job) = jobs.try_recv() {
+            hub.job(job);
+        }
+        for job in life {
             hub.job(job);
         }
         if hub.ctx.closed.load(Ordering::Acquire) {
@@ -917,6 +1012,12 @@ impl Hub {
                 }
             }
             Job::Closed(stream) => {
+                if !self.subs.contains_key(&stream) {
+                    if self.gone.len() == 256 {
+                        self.gone.pop_front();
+                    }
+                    self.gone.push_back(stream);
+                }
                 self.finished(stream);
                 self.subs.remove(&stream);
                 self.pipes.remove(&stream);
@@ -926,16 +1027,16 @@ impl Hub {
                     pipe.flight = 0;
                 }
             }
-            Job::Baseline(last) => {
-                self.dir = Some(Dir {
-                    last,
-                    seq: 0,
-                    hint: None,
-                    built: Instant::now(),
-                });
-            }
+            Job::Directory(stream) => self.snapshot(stream),
             Job::Reply(data) => self.push(0, data),
             Job::Transfer(stream, request_id, workspace, data) => {
+                // The device closed the stream before the payload got here: nothing to send, and
+                // the slot it took is free.
+                if let Some(i) = self.gone.iter().position(|g| *g == stream) {
+                    self.gone.remove(i);
+                    self.ctx.transfers.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
                 let open = OpenParams::Transfer(TransferOpen { request_id });
                 self.subs.insert(
                     stream,
@@ -1394,6 +1495,22 @@ impl Hub {
 
     // -- directory ------------------------------------------------------------------------
 
+    /// The first message of the Host-opened directory stream, built here and not on the uplink
+    /// thread (the view read can block).
+    fn snapshot(&mut self, stream: u32) {
+        let (host, workspaces) = match self.ctx.view(true) {
+            Ok(view) => (view.host_name.clone(), build_directory(&self.ctx, &view)),
+            Err(_) => (None, Vec::new()),
+        };
+        self.dir = Some(Dir {
+            last: workspaces.clone(),
+            seq: 0,
+            hint: None,
+            built: Instant::now(),
+        });
+        self.push(stream, snapshot_bytes(host, workspaces, 0));
+    }
+
     fn directory(&mut self) {
         let Some(dir) = &self.dir else {
             return;
@@ -1419,14 +1536,14 @@ impl Hub {
             return;
         };
         let now = build_directory(&self.ctx, &view);
-        let mut messages = Vec::new();
+        let mut changes = Vec::new();
         let dir = self.dir.as_mut().expect("checked above");
         dir.built = Instant::now();
         dir.hint = hint;
         for ws in &now {
             if dir.last.iter().all(|old| old != ws) {
                 dir.seq += 1;
-                messages.push(DirectoryUpdate {
+                changes.push(DirectoryUpdate {
                     seq: dir.seq,
                     change: DirectoryChange::Workspace(ws.clone()),
                 });
@@ -1435,19 +1552,46 @@ impl Hub {
         for old in &dir.last {
             if now.iter().all(|ws| ws.id != old.id) {
                 dir.seq += 1;
-                messages.push(DirectoryUpdate {
+                changes.push(DirectoryUpdate {
                     seq: dir.seq,
                     change: DirectoryChange::Removed(old.id),
                 });
             }
         }
-        dir.last = now;
-        for change in messages {
-            if let Ok(bytes) = DirectoryMessage::Change(change).encode() {
+        dir.last = now.clone();
+        let encoded: Option<Vec<Vec<u8>>> = changes
+            .into_iter()
+            .map(|c| DirectoryMessage::Change(c).encode().ok())
+            .collect();
+        match encoded {
+            Some(messages) => messages.into_iter().for_each(|m| self.push(DIRECTORY, m)),
+            None => {
+                // A change that does not encode must not leave the device behind: send the whole
+                // state instead (its `seq` is past every change that was dropped).
+                dir.seq += 1;
+                let bytes = snapshot_bytes(view.host_name.clone(), now, dir.seq);
                 self.push(DIRECTORY, bytes);
             }
         }
     }
+}
+
+fn snapshot_bytes(host: Option<String>, workspaces: Vec<DirectoryWorkspace>, seq: u64) -> Vec<u8> {
+    let text = |s: String| {
+        DisplayText::try_from(s)
+            .unwrap_or_else(|_| DisplayText::try_from("Host".to_owned()).expect("static"))
+    };
+    DirectoryMessage::Snapshot(DirectorySnapshot {
+        seq,
+        host: DirectoryHost {
+            name: text(host.unwrap_or_else(|| "Lomi Host".to_owned())),
+            platform: text(std::env::consts::OS.to_owned()),
+            version: text(env!("CARGO_PKG_VERSION").to_owned()),
+        },
+        workspaces,
+    })
+    .encode()
+    .unwrap_or_default()
 }
 
 fn reset_for(code: ErrorCode) -> u16 {
@@ -1880,8 +2024,6 @@ pub(super) struct HostService {
     handle: Arc<OnceLock<Handle>>,
     consent: Option<DeviceConsent>,
     tunnels: HashMap<CircuitId, Tun>,
-    /// The tunnel whose `directory()` call is next: the engine calls it right after opening.
-    opening: Option<CircuitId>,
     /// Tests: the stream whose credit never comes back (0: none).
     #[cfg(test)]
     stalled: Arc<std::sync::atomic::AtomicU32>,
@@ -1895,7 +2037,6 @@ impl HostService {
 
 impl TunnelService for HostService {
     fn on_tunnel_open(&mut self, s: &mut Streams<'_>, device: &AttestedDevice) {
-        self.opening = None;
         let Some(handle) = self.handle.get().cloned() else {
             return;
         };
@@ -1913,6 +2054,7 @@ impl TunnelService for HostService {
             consent: self.consent.clone(),
             view: Mutex::new(None),
             jobs,
+            life: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
             busy: Mutex::new(HashMap::new()),
             transfers: AtomicUsize::new(0),
@@ -1930,7 +2072,6 @@ impl TunnelService for HostService {
                 Box::new(move || stream_loop(b, jobs_rx)),
             )
         {
-            self.opening = Some(s.circuit());
             self.tunnels.insert(s.circuit(), Tun { ctx, rpc });
         }
     }
@@ -1978,7 +2119,7 @@ impl TunnelService for HostService {
 
     fn on_stream_close(&mut self, s: &mut Streams<'_>, stream: u32, _reset: Option<u16>) {
         if let Some(tun) = self.tun(s) {
-            let _ = tun.ctx.jobs.try_send(Job::Closed(stream));
+            tun.ctx.lifecycle(Job::Closed(stream));
         }
     }
 
@@ -1988,7 +2129,7 @@ impl TunnelService for HostService {
             return;
         }
         if let Some(tun) = self.tun(s) {
-            let _ = tun.ctx.jobs.try_send(Job::Writable(stream));
+            tun.ctx.lifecycle(Job::Writable(stream));
         }
     }
 
@@ -1997,37 +2138,14 @@ impl TunnelService for HostService {
         // the device.
         if let Some(tun) = self.tunnels.remove(&circuit) {
             tun.ctx.closed.store(true, Ordering::Release);
-            let _ = tun.ctx.jobs.try_send(Job::Stop);
+            tun.ctx.lifecycle(Job::Stop);
         }
     }
 
-    fn directory(&mut self, _device: &AttestedDevice) -> Vec<u8> {
-        let tun = self.opening.and_then(|c| self.tunnels.get(&c));
-        let (host, workspaces) = match tun {
-            Some(tun) => match tun.ctx.view(true) {
-                Ok(view) => (view.host_name.clone(), build_directory(&tun.ctx, &view)),
-                Err(_) => (None, Vec::new()),
-            },
-            None => (None, Vec::new()),
-        };
-        if let Some(tun) = tun {
-            let _ = tun.ctx.jobs.try_send(Job::Baseline(workspaces.clone()));
+    fn directory_opened(&mut self, s: &mut Streams<'_>, stream: u32) {
+        if let Some(tun) = self.tun(s) {
+            tun.ctx.lifecycle(Job::Directory(stream));
         }
-        let text = |s: String| {
-            DisplayText::try_from(s)
-                .unwrap_or_else(|_| DisplayText::try_from("Host".to_owned()).expect("static"))
-        };
-        DirectoryMessage::Snapshot(DirectorySnapshot {
-            seq: 0,
-            host: DirectoryHost {
-                name: text(host.unwrap_or_else(|| "Lomi Host".to_owned())),
-                platform: text(std::env::consts::OS.to_owned()),
-                version: text(env!("CARGO_PKG_VERSION").to_owned()),
-            },
-            workspaces,
-        })
-        .encode()
-        .unwrap_or_default()
     }
 }
 
@@ -2065,7 +2183,6 @@ pub(super) fn install(
         handle: cell.clone(),
         consent: Some(consent.clone()),
         tunnels: HashMap::new(),
-        opening: None,
         #[cfg(test)]
         stalled: Arc::default(),
     };
@@ -2086,6 +2203,26 @@ pub(super) fn install(
 }
 
 #[cfg(test)]
+mod call_limits {
+    use super::*;
+
+    #[test]
+    fn one_device_cannot_exceed_its_call_share_across_tunnels() {
+        let key = [0xd1; 32];
+        let claimed: Vec<bool> = (0..=MAX_CALLS_PER_DEVICE)
+            .map(|_| claim_call(&key))
+            .collect();
+        assert!(claimed[..MAX_CALLS_PER_DEVICE].iter().all(|c| *c));
+        assert!(!claimed[MAX_CALLS_PER_DEVICE], "the 33rd call is refused");
+        release_call(&key);
+        assert!(claim_call(&key));
+        for _ in 0..MAX_CALLS_PER_DEVICE {
+            release_call(&key);
+        }
+    }
+}
+
+#[cfg(test)]
 #[path = "tunnel_service_tests.rs"]
 mod tests;
 
@@ -2103,7 +2240,6 @@ pub(super) fn service_for_test(
         handle: cell,
         consent,
         tunnels: HashMap::new(),
-        opening: None,
         stalled,
     })
 }

@@ -341,22 +341,30 @@ fn handshake_deadline_is_ten_seconds() {
 fn limits_per_device_devices_and_pending_handshakes() {
     let mut w = world();
     let d = device(1);
-    for c in 1..=8u8 {
+    for c in 1..=MAX_HANDSHAKES_PER_DEVICE as u8 {
         w.e.on_circuit_open(&event([c; 16], &d, 1), 0);
     }
     assert!(w.e.take_out().is_empty());
     w.e.on_circuit_open(&event([9; 16], &d, 1), 0);
     assert_eq!(w.e.take_out(), [Out::Close { circuit: [9; 16] }]);
-    // seven more devices fill the eight slots (15 of 16 handshakes), the ninth device is refused
+    // seven more devices fill the eight slots, the ninth device is refused
     for n in 2..=8u8 {
         w.e.on_circuit_open(&event([n + 20; 16], &device(n), 1), 0);
     }
     w.e.on_circuit_open(&event([30; 16], &device(9), 1), 0);
     assert_eq!(w.e.take_out(), [Out::Close { circuit: [30; 16] }]);
-    // handshake cap: 16 in flight, the 17th (known device) is refused
-    w.e.on_circuit_open(&event([31; 16], &device(2), 1), 0);
-    w.e.on_circuit_open(&event([32; 16], &device(2), 1), 0);
-    assert_eq!(w.e.take_out(), [Out::Close { circuit: [32; 16] }]);
+
+    // handshake cap: 16 in flight over all devices, the 17th is refused
+    let mut w = world();
+    for n in 1..=4u8 {
+        for k in 0..MAX_HANDSHAKES_PER_DEVICE as u8 {
+            w.e.on_circuit_open(&event([n * 10 + k; 16], &device(n), 1), 0);
+        }
+    }
+    assert!(w.e.take_out().is_empty());
+    assert_eq!(w.e.len(), MAX_HANDSHAKES);
+    w.e.on_circuit_open(&event([99; 16], &device(5), 1), 0);
+    assert_eq!(w.e.take_out(), [Out::Close { circuit: [99; 16] }]);
 }
 
 #[test]
@@ -605,9 +613,6 @@ fn set_level_command_raises_only_that_devices_live_tunnels() {
             self.0.lock().unwrap().push((s.circuit(), s.level()));
         }
         fn on_tunnel_close(&mut self, _: CircuitId, _: &str) {}
-        fn directory(&mut self, _: &AttestedDevice) -> Vec<u8> {
-            Vec::new()
-        }
     }
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut w = world();
@@ -654,4 +659,88 @@ fn set_level_command_raises_only_that_devices_live_tunnels() {
         *seen.lock().unwrap(),
         [([1; 16], Level::Control), ([2; 16], Level::Read)]
     );
+}
+
+#[test]
+fn control_commands_pass_a_full_inbox_and_a_refused_send_reports_writable() {
+    let h = Handle::new(|| {});
+    let big = || Command::Send {
+        circuit: [1; 16],
+        stream: 2,
+        data: vec![0; MAX_INBOX_BYTES],
+    };
+    h.push(big()).unwrap();
+    assert!(h.push(big()).is_err(), "data is refused when full");
+    for c in [
+        Command::CloseTunnel { circuit: [1; 16] },
+        Command::Deny { circuit: [1; 16] },
+        Command::CloseDevice {
+            fingerprint: [1; 32],
+        },
+        Command::SetLevel {
+            fingerprint: [1; 32],
+            level: Level::Read,
+        },
+    ] {
+        assert!(h.push(c).is_ok());
+    }
+}
+
+#[test]
+fn a_refused_send_tells_the_service_nothing_is_in_flight() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Spy(Arc<AtomicUsize>);
+    impl TunnelService for Spy {
+        fn on_stream_open(
+            &mut self,
+            _: &mut Streams<'_>,
+            _: u32,
+            _: &OpenParams,
+        ) -> Result<(), u16> {
+            Ok(())
+        }
+        fn on_message(&mut self, _: &mut Streams<'_>, _: u32, _: Vec<u8>) {}
+        fn on_writable(&mut self, _: &mut Streams<'_>, _: u32) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_tunnel_close(&mut self, _: CircuitId, _: &str) {}
+    }
+    let writable = Arc::new(AtomicUsize::new(0));
+    let mut w = world();
+    let host = Identity::generate(ACCOUNT, HOST_ID, Role::Host, 1).unwrap();
+    w.host = host.public_bundle();
+    w.e = Engine::new(
+        Config {
+            identity: host,
+            host_id: HOST_ID,
+            contract_hash: HASH,
+        },
+        Box::new(Scripted::default()),
+        Box::new(Spy(writable.clone())),
+        w.handle.clone(),
+    )
+    .unwrap();
+    let mut dev = open_dev(&mut w, 1);
+    let (id, open) = dev.table.open(&terminal()).unwrap();
+    dev.send(&mut w, &[open], 1);
+    // a message over 1 MiB cannot be queued: the engine refuses it
+    w.handle
+        .send(dev.circuit, id, vec![0; MAX_LOGICAL_MESSAGE + 1])
+        .unwrap();
+    w.e.drain_commands();
+    assert_eq!(writable.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn one_device_cannot_fill_all_handshake_slots() {
+    let mut w = world();
+    let greedy = device(1);
+    for c in 1..=(MAX_HANDSHAKES_PER_DEVICE as u8 + 1) {
+        w.e.on_circuit_open(&event([c; 16], &greedy, 1), 0);
+    }
+    assert_eq!(w.e.len(), MAX_HANDSHAKES_PER_DEVICE);
+    w.e.take_out();
+    // another device still gets in
+    w.e.on_circuit_open(&event([0x20; 16], &device(2), 1), 0);
+    assert_eq!(w.e.len(), MAX_HANDSHAKES_PER_DEVICE + 1);
 }

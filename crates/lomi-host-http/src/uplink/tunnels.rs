@@ -34,6 +34,8 @@ pub const MAX_DEVICES: usize = 8;
 pub const MAX_TUNNELS_PER_DEVICE: usize = 8;
 /// Tunnels that have not reached `Live` yet (handshake or approval), over all devices.
 pub const MAX_HANDSHAKES: usize = 16;
+/// Of those, what one device may hold (two devices cannot lock everyone else out).
+pub const MAX_HANDSHAKES_PER_DEVICE: usize = 4;
 /// Bytes a service may leave in the [`Handle`] queue before `push` refuses.
 const MAX_INBOX_BYTES: usize = 8 << 20;
 
@@ -191,8 +193,10 @@ pub trait TunnelService: Send {
     fn on_writable(&mut self, _s: &mut Streams<'_>, _stream: u32) {}
     /// Only after `on_tunnel_open`.
     fn on_tunnel_close(&mut self, circuit: CircuitId, reason: &str);
-    /// First snapshot for the `directory` stream (the device asked with `sendDirectory`).
-    fn directory(&mut self, device: &AttestedDevice) -> Vec<u8>;
+    /// The engine opened the `directory` stream (the device asked with `sendDirectory`). The
+    /// first message, the snapshot, is the service's to send, later and from its own thread
+    /// (`Handle::send`): building it can block, and this callback must not.
+    fn directory_opened(&mut self, _s: &mut Streams<'_>, _stream: u32) {}
 }
 
 /// Service access to one live tunnel from inside a callback.
@@ -287,6 +291,17 @@ pub enum Command {
     },
 }
 impl Command {
+    /// Commands that end or restrict something are never refused for a full inbox.
+    fn is_control(&self) -> bool {
+        matches!(
+            self,
+            Self::CloseDevice { .. }
+                | Self::Deny { .. }
+                | Self::CloseTunnel { .. }
+                | Self::SetLevel { .. }
+                | Self::Approve { .. }
+        )
+    }
     fn size(&self) -> usize {
         64 + match self {
             Self::Send { data, .. } => data.len(),
@@ -308,11 +323,12 @@ impl Handle {
             wake: Box::new(wake),
         }))
     }
-    /// Refuses (hands the command back) while more than 8 MiB is waiting.
+    /// Refuses (hands the command back) while more than 8 MiB is waiting; control commands
+    /// (`CloseDevice`, `Deny`, `CloseTunnel`, `SetLevel`, `Approve`) are never refused.
     pub fn push(&self, c: Command) -> Result<(), Command> {
         {
             let mut q = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
-            if q.1 >= MAX_INBOX_BYTES {
+            if q.1 >= MAX_INBOX_BYTES && !c.is_control() {
                 return Err(c);
             }
             q.1 += c.size();
@@ -605,6 +621,13 @@ impl Engine {
             .values()
             .filter(|t| !matches!(t.phase, Phase::Live(_)))
             .count();
+        let starting_same = self
+            .tunnels
+            .values()
+            .filter(|t| {
+                t.device.device_id == device.device_id && !matches!(t.phase, Phase::Live(_))
+            })
+            .count();
         let prologue = TunnelPrologue {
             contract_hash: self.contract_hash,
             path: TunnelPath::Relay,
@@ -620,7 +643,8 @@ impl Engine {
             Some(hs)
                 if same < MAX_TUNNELS_PER_DEVICE
                     && (same > 0 || devices.len() < MAX_DEVICES)
-                    && starting < MAX_HANDSHAKES =>
+                    && starting < MAX_HANDSHAKES
+                    && starting_same < MAX_HANDSHAKES_PER_DEVICE =>
             {
                 self.tunnels.insert(
                     circuit,
@@ -796,8 +820,17 @@ impl Engine {
                     stream,
                     data,
                 } => {
-                    if let Some(l) = self.live(circuit) {
-                        let _ = l.send(stream, &data);
+                    if let Some(Tunnel {
+                        phase: Phase::Live(l),
+                        ..
+                    }) = self.tunnels.get_mut(&circuit)
+                    {
+                        // A refusal (full queue, stream gone) is reported as "nothing of it is
+                        // left here", so the service's in-flight count cannot stick.
+                        if l.send(stream, &data).is_err() && l.table.kind_of(stream).is_some() {
+                            self.service
+                                .on_writable(&mut Streams { circuit, live: l }, stream);
+                        }
                         touched.insert(circuit);
                     }
                 }
@@ -1004,9 +1037,14 @@ impl Engine {
             &t.device,
         );
         if hello.send_directory {
-            let snapshot = self.service.directory(&t.device);
             let id = live.open(&OpenParams::Directory)?;
-            live.send(id, &snapshot)?;
+            self.service.directory_opened(
+                &mut Streams {
+                    circuit,
+                    live: &mut live,
+                },
+                id,
+            );
         }
         t.phase = Phase::Live(live);
         self.pump(circuit, t)
@@ -1078,8 +1116,8 @@ pub mod testing {
         fn on_tunnel_close(&mut self, _: CircuitId, reason: &str) {
             self.log.lock().unwrap().push(format!("close {reason}"));
         }
-        fn directory(&mut self, _: &AttestedDevice) -> Vec<u8> {
-            b"dir".to_vec()
+        fn directory_opened(&mut self, s: &mut Streams<'_>, stream: u32) {
+            let _ = s.send(stream, b"dir");
         }
     }
 }

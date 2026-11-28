@@ -664,6 +664,8 @@ fn directory_is_the_first_message_lists_only_shared_workspaces_and_follows_chang
     let mut fx = Fx::new(pty);
     let mut rig = fx.observer();
     // the Host-opened directory stream is stream 2 and its first message is the snapshot
+    // built by the streams worker, not on the uplink thread, so it follows the welcome
+    rig.wait("directory snapshot", |r| !r.messages(2).is_empty());
     let first = rig.messages(2).into_iter().next().expect("directory first");
     let DirectoryMessage::Snapshot(snapshot) = DirectoryMessage::decode(&first).unwrap() else {
         panic!("first directory message is not a snapshot");
