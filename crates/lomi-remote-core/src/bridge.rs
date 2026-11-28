@@ -12,7 +12,7 @@
 //!
 //! Link record list: repeated `tag u8 | len u32 BE | body`. Tag 1 `Connect`, 2 `Send`
 //! (body = one WebSocket binary message), 3 `Close`, 4 `Event` (body = JSON with a
-//! `type` field), 5 `Stream message` (body = `stream u32 BE | bytes`, one complete logical
+//! `type` field), 5 `Stream message` (body = `tunnel u32 BE | stream u32 BE | bytes`, one complete logical
 //! message of a tunnel stream). So frames travel as raw bytes and only events are JSON.
 //! Tunnels (`Tunnel`) sit on a link: every link operation also routes the link's circuit traffic
 //! into the attached tunnels and returns their records in the same list (`settle`).
@@ -570,7 +570,8 @@ fn tunnel_record(out: &mut Vec<u8>, th: u32, e: &tunnel::Event) {
     match e {
         // The bytes travel raw (tag 5), not in JSON.
         tunnel::Event::Message { stream, data } => {
-            let mut body = stream.to_be_bytes().to_vec();
+            let mut body = th.to_be_bytes().to_vec();
+            body.extend_from_slice(&stream.to_be_bytes());
             body.extend_from_slice(data);
             record(out, 5, &body);
         }

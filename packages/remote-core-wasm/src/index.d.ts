@@ -5,7 +5,7 @@ export type LinkRecord =
   | { type: 'send'; bytes: Uint8Array }
   | { type: 'event'; event: { type: string; [key: string]: unknown } }
   /** Tunnel stream message (record tag 5). */
-  | { type: 'stream'; stream: number; bytes: Uint8Array };
+  | { type: 'stream'; tunnel: number; stream: number; bytes: Uint8Array };
 export function initializeRemoteCore(moduleOrBytes: BufferSource | WebAssembly.Module): void;
 /** Throws Error('CORE_BROKEN') after a WebAssembly trap; recreate the worker. `directory.seal`/`directory.open`/`tunnel.new`/`device.bundle`/`device.signRegistration` wipe `payload`; `device.create` wipes its encoded args.
  * `handle` 0 for stateless and creating operations. Throws CoreError. */

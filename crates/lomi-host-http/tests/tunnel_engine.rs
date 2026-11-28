@@ -39,8 +39,8 @@ fn recs(mut b: &[u8]) -> Vec<Rec> {
             2 => out.push(Rec::Send(body)),
             4 => out.push(Rec::Ev(serde_json::from_slice(&body).unwrap())),
             5 => out.push(Rec::Msg(
-                u32::from_be_bytes(body[..4].try_into().unwrap()),
-                body[4..].to_vec(),
+                u32::from_be_bytes(body[4..8].try_into().unwrap()),
+                body[8..].to_vec(),
             )),
             _ => {}
         }
@@ -241,8 +241,31 @@ impl Rig {
     }
     fn new_tunnel(&mut self) -> u32 {
         let seed = self.device.export_secret_seed_blob().unwrap();
+        // The directory pins the Host's key on its first session (`tunnel.new` checks it).
+        let directory = handle(&call(
+            0,
+            "directory.new",
+            json!({"accountId": "acc", "deviceId": "dev"}),
+            &[],
+        ));
+        let fingerprint = hex(&self.host.public_bundle().bundle.fingerprint().unwrap());
+        let session = json!({
+            "account": {"id": "acc"}, "sessionExpiresAt": WALL0 + 1,
+            "relay": {"token": "t", "expiresAt": WALL0 + 1},
+            "hosts": [{"hostId": lomi_remote_core::tunnel::uuid_text(&HOST_ID), "online": true,
+                "accessEpoch": "1", "runtimeGeneration": "1", "workspaces": [],
+                "hostFingerprint": fingerprint}],
+            "device": {"state": "registered", "deviceId": "dev"},
+        });
+        call(
+            directory,
+            "directory.applySession",
+            json!({}),
+            session.to_string().as_bytes(),
+        );
         let args = json!({
             "link": self.link,
+            "directory": directory,
             "deviceBundle": serde_json::to_value(self.device.public_bundle()).unwrap(),
             "hostBundle": serde_json::to_value(self.host.public_bundle()).unwrap(),
             "hostFingerprint": hex(&self.host.public_bundle().bundle.fingerprint().unwrap()),
@@ -599,4 +622,36 @@ fn the_handshake_deadline_is_ten_seconds_on_both_sides() {
     assert_eq!(states(&r), ["closed:handshakeTimeout"]);
     assert_eq!(rig.host_closes, [rig.last_circuit()]);
     assert!(rig.engine.is_empty());
+}
+
+#[test]
+fn closing_a_stream_while_the_host_is_still_sending_keeps_the_tunnel() {
+    let mut rig = Rig::new(welcoming(), 1);
+    rig.start(1);
+    rig.op(
+        "tunnel.openStream",
+        json!({"kind": "terminal", "params": terminal_params()}),
+        &[],
+    );
+    let c = rig.last_circuit();
+    // more than the stream window, so the Host is still sending when the device closes
+    rig.handle.send(c, 1, vec![7; 150_000]).unwrap();
+    rig.engine.drain_commands();
+    // the device gets what the Host's windows allow, then closes the stream before the Host
+    // has heard of its credit: the Host's later frames and credit for it are late
+    let mut records = Vec::new();
+    for o in rig.engine.take_out() {
+        records.extend(rig.deliver(o));
+    }
+    let tun = rig.tuns[0];
+    records.extend(recs(&call(
+        tun,
+        "tunnel.closeStream",
+        rig.at(json!({"stream": 1})),
+        &[],
+    )));
+    rig.settle(records);
+    assert!(rig.host_closes.is_empty(), "the tunnel stays open");
+    let r = rig.op("tunnel.send", json!({"stream": 0}), &rpc("r2"));
+    assert_eq!(msgs(&r, 0), [&rpc("r2")], "other streams keep working");
 }

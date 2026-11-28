@@ -28,7 +28,7 @@ enum Rec {
     Send(Vec<u8>),
     Close,
     Ev(Value),
-    Msg(u32, Vec<u8>),
+    Msg(u32, u32, Vec<u8>),
 }
 
 fn call(h: u32, op: &str, args: Value, payload: &[u8]) -> Vec<u8> {
@@ -49,7 +49,8 @@ fn recs(mut b: &[u8]) -> Vec<Rec> {
             4 => Rec::Ev(serde_json::from_slice(&body).unwrap()),
             5 => Rec::Msg(
                 u32::from_be_bytes(body[..4].try_into().unwrap()),
-                body[4..].to_vec(),
+                u32::from_be_bytes(body[4..8].try_into().unwrap()),
+                body[8..].to_vec(),
             ),
             t => panic!("tag {t}"),
         });
@@ -458,7 +459,9 @@ fn open_rpc_directory_and_flow_controlled_terminal() {
         .send_data(0, br#"{"requestId":"r1","type":"result"}"#, true)
         .unwrap();
     let r = rig.relay(&host.send(&[reply]));
-    assert!(matches!(&r[0], Rec::Msg(0, d) if d.starts_with(b"{\"requestId\":\"r1\"")));
+    assert!(
+        matches!(&r[0], Rec::Msg(t, 0, d) if *t == rig.tun && d.starts_with(b"{\"requestId\":\"r1\""))
+    );
     datas(&r).iter().for_each(|d| {
         host.recv(d);
     }); // the core's CREDIT frames
@@ -474,7 +477,7 @@ fn open_rpc_directory_and_flow_controlled_terminal() {
     );
     assert!(
         r.iter()
-            .any(|x| matches!(x, Rec::Msg(2, d) if d == b"dir-snapshot"))
+            .any(|x| matches!(x, Rec::Msg(_, 2, d) if d == b"dir-snapshot"))
     );
     // the core gives the windows back (CREDIT frames), so the Host can go on
     for d in datas(&r) {
