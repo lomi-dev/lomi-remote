@@ -56,6 +56,7 @@
     "contracts/PublicationParams.schema.json": "fb8f44890641bff0d4ff41994c2dd077f262a0c2467e94dfa8ce12c71cdb8d2f",
     "contracts/PublicationResult.schema.json": "2c5f6f5af0839d81a9a3cf38a99067f06a79d09f77ab8addb278c6045eac4b32",
     "contracts/RpcEnvelope.schema.json": "0db9e3a3709b545d0fa9209ee49f6d59d63a5c97ac48e956ae75ca6af5f3716b",
+    "contracts/RpcTransferResponse.schema.json": "6e72f0eaf8ccfcf9350529d3d33fbdd27aa53fa395a0940e089f77b506be3a2a",
     "contracts/RuntimeClaimParams.schema.json": "5f3f4767aa534d62cab5969b827b2586a7e0b56ee9e42dc92d6cf721cde50235",
     "contracts/RuntimeClaimResult.schema.json": "fa57010d6953d70cb6fef1b0191ec2338c1cc26d2715ac0fcc59306411c84cd6",
     "contracts/TerminalOpen.schema.json": "c6391511f0cde5793371fb307904663a3ff4e15d0add8787f03b65dab7919d66",
@@ -141,6 +142,7 @@
     "PublicationParams.d.ts": "014cb875ea79adaf4df1e3d83df7ca6b3a39578ec5b5abe196e92f47cde306b7",
     "PublicationResult.d.ts": "765a7db1dcc811c53cc1175fe42feaee9d3bbc3c97f091741470deb50c9ab356",
     "RpcEnvelope.d.ts": "fe1c560eda100d6641565611ddf0151b6c8f80ab795c0e1bf6f95dd3e5133834",
+    "RpcTransferResponse.d.ts": "0947b90bb31382f500f6ee04eb6773a1bb4bb9aaf7f99b66d60439b50bc00bfb",
     "RuntimeClaimParams.d.ts": "7da5045da3846acbf8291a8ef62d6cd53018974791b9793baba617233f3cd6da",
     "RuntimeClaimResult.d.ts": "90fdcfd6571c9ca7b2fd00e7d6d9e87789c7ad6b1f5cea439a01cbd09d69378f",
     "TerminalOpen.d.ts": "0eef23346b3ef6174ddaa1da776d08bc24b4b3b1b32a8729ec6ad16a8ed9f73c",
@@ -168,9 +170,9 @@
     "workspace-context.d.ts": "a11d0a93d1df7d38791dc006c7066f8e84bcfe472b6ee1c142c6d16444a64ae0",
     "workspace-stream-frame.d.ts": "6f3f4f214dfab98625f2138c5c31f450935ae04eb5c93a4295ff7f03ab3b41d2",
     "wss-admission-frame.d.ts": "0e0e905e951578efc8019c404aa20daf482e30d710b6beea9ac5f33c28341db4",
-    "validators.mjs": "f3bee07876fc985fd15dc4ff85136c3efa510a6f70cd8814d68d7fafd020ebc2",
-    "registry.mjs": "c259d357df9ab3bf01da152a93f5fb97a9077e109f850b8e52a074d0dabe66d8",
-    "index.d.ts": "a4d1be28681d7d4d4ca77a312fe5fb1cf525826ede00c15624abb38a5a87aeb8"
+    "validators.mjs": "68e3af550121a15b2e53345d8eeb0270d00d0906da7e230c73837bd61e16a079",
+    "registry.mjs": "f56b46cb03778a826e6bfd8583f534404d6ff548725480816ae3046977c3ef38",
+    "index.d.ts": "368724809abf245976c632656ab5a6016a4f7ad7c2b817ce8020f910a34fa62b"
   },
   "manifestSelfHash": false
 }

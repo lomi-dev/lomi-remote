@@ -5,10 +5,11 @@
 //! Scheduling (P3a.7) is not here; `StreamKind::class` only tells the scheduler what to use.
 use crate::rpc::{DisplayText, EncodedPathId, PaneState, SplitAxis, TerminalDimension, text_type};
 use crate::{
-    CapabilitySet, ChatMessageId, ChatModelId, ChatPermissions, ChatProviderId, ChatThreadId,
-    ChatTitle, PaneId, RequestId, SessionEpoch, TabId, TimeoutMs, WorkspaceEpoch, WorkspaceId,
+    ApplicationMajor, CapabilitySet, ChatMessageId, ChatModelId, ChatPermissions, ChatProviderId,
+    ChatThreadId, ChatTitle, DecimalU64, PaneId, RequestId, SessionEpoch, TabId, TimeoutMs,
+    WorkspaceEpoch, WorkspaceId,
     message_framing::{MAX_MESSAGE_LEN, MAX_PLAINTEXT_FRAME_LEN},
-    rpc::{BoundedList, RpcCall, dto},
+    rpc::{BoundedList, RpcCall, RpcResult, dto},
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -754,6 +755,35 @@ impl RpcEnvelope {
     }
 }
 
+/// Fixed `type` of [`RpcTransferResponse`] (the other stream 0 answers are `result` and `error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferTag {
+    Transfer,
+}
+// Stream 0 answer to `files.read`, `git.diff` and `git.show` whose result does not fit inline
+// (`TRANSFER_INLINE_MAX`; smaller results are an ordinary `result`). The Host opens a `transfer`
+// stream whose OPEN carries the request id, sends this message, then the payload as consecutive
+// logical messages (each at most `TRANSFER_CHUNK` bytes) and closes the stream; `transferBytes` is
+// their total length. `result` is the ordinary result with its bulk field emptied:
+// `files.read`: `bytes` is `[]` and the stream carries the raw bytes;
+// `git.diff`: `files` is `[]` and the stream carries the JSON array of `GitDiffFile`;
+// `git.show`: `diff.files` is `[]` and the stream carries the same JSON array.
+dto!(RpcTransferResponse {
+    r#type: TransferTag,
+    v: ApplicationMajor,
+    request_id: RequestId,
+    transfer_stream: u32,
+    transfer_bytes: DecimalU64,
+    result: RpcResult
+});
+/// Largest serialized answer sent inline on stream 0 (spec 10: a small result shares the write).
+pub const TRANSFER_INLINE_MAX: usize = 16 * 1024;
+/// Largest logical message on a `transfer` stream.
+pub const TRANSFER_CHUNK: usize = 32 * 1024;
+/// Largest payload one transfer carries.
+pub const TRANSFER_MAX: usize = 8 * 1024 * 1024;
+
 // `directory` stream (postcard, externally tagged: postcard cannot read internal tags). The first
 // message is `Snapshot`; every later one is a `Change` with the next `seq`. A change replaces or
 // removes one whole workspace entry, so the device needs no diff logic.
@@ -1425,6 +1455,21 @@ mod tests {
         assert!(matches!(env.call, RpcCall::WorkspaceGet(_)));
         let with_v = format!(r#"{{"v":2,"requestId":"r1","timeoutMs":1000,"call":{call}}}"#);
         assert!(serde_json::from_str::<RpcEnvelope>(&with_v).is_err());
+    }
+
+    #[test]
+    fn transfer_response_names_the_stream_and_rejects_other_fields() {
+        let token = format!("r{}", "ab".repeat(32));
+        let text = format!(
+            r#"{{"type":"transfer","v":2,"requestId":"r1","transferStream":4,"transferBytes":"1048576","result":{{"method":"git.diff","params":{{"stateToken":"{token}","files":[],"nextCursor":null,"truncated":false}}}}}}"#
+        );
+        let r: RpcTransferResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!((r.transfer_stream, r.transfer_bytes.0), (4, 1_048_576));
+        assert_eq!(serde_json::to_string(&r).unwrap(), text);
+        let other = text.replace(r#""type":"transfer""#, r#""type":"result""#);
+        assert!(serde_json::from_str::<RpcTransferResponse>(&other).is_err());
+        let extra = text.replace(r#""v":2,"#, r#""v":2,"x":1,"#);
+        assert!(serde_json::from_str::<RpcTransferResponse>(&extra).is_err());
     }
 
     #[test]
