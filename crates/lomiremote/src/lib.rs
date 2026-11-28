@@ -25,6 +25,8 @@ pub mod maintenance_commands {
     }
 }
 pub mod operator;
+#[cfg(unix)]
+pub mod probe;
 pub mod service;
 pub mod setup;
 pub mod setup_entry;

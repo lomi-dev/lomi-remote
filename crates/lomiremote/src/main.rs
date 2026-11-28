@@ -1493,6 +1493,10 @@ fn run() -> u8 {
         eprintln!();
         return 2;
     }
+    #[cfg(unix)]
+    if let Some(("probe", args)) = arguments.subcommand() {
+        return lomiremote::probe::run(args);
+    }
     match prepare_setup_account(&arguments) {
         Ok(Some(exit)) => return exit,
         Ok(None) => {}
