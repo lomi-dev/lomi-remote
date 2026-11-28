@@ -125,6 +125,8 @@ pub enum DeviceEvent {
         fingerprint: Option<[u8; 32]>,
     },
     HostRevoked,
+    /// `authority.fresh`: the relay vouches for the account's device list right now.
+    Fresh,
 }
 impl DeviceEvent {
     /// `devices.changed` without a `deviceId` (the older `grant.changed` shape) is `None`, and so
@@ -884,6 +886,10 @@ impl Engine {
                 let bundle: SignedBundle =
                     serde_json::from_slice(&hello.device_bundle.0).map_err(|_| HS)?;
                 hs.verify_device(&bundle).map_err(|_| HS)?;
+                // The relay attested a device id; the signed bundle must be that same device.
+                if bundle.bundle.subject_id != t.device.device_id {
+                    return Err(HS);
+                }
                 let code = hs.confirmation_code().map_err(|_| HS)?;
                 let mut noise = hs.into_transport().map_err(|_| HS)?;
                 let verdict = self.policy.admit_circuit(circuit, &t.device, &hello, &code);

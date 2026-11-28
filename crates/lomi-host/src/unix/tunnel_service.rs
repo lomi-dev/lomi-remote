@@ -102,6 +102,8 @@ const MAX_READS: usize = 4;
 const MAX_TRANSFERS: usize = 4;
 /// Calls running at once for one tunnel, over all workspaces.
 const MAX_CALLS: usize = 16;
+/// Open streams are reset when the view could not be read for this long.
+const RECHECK_BLIND: Duration = Duration::from_secs(5);
 
 /// RESET codes (the HTTP status of the matching error).
 pub(super) const RESET_INVALID: u16 = 400;
@@ -459,7 +461,10 @@ fn rpc_loop(ctx: Arc<Ctx>, jobs: Receiver<Vec<u8>>) {
 /// Runs one request and puts its answer (and a transfer, if any) on the wire.
 fn serve(ctx: &Arc<Ctx>, envelope: &RpcEnvelope) {
     let answer = rpc(ctx, envelope);
-    if let Some(out) = deliver(ctx, &envelope.request_id, answer) {
+    let workspace = envelope
+        .workspace_id
+        .or_else(|| call_workspace(&envelope.call).copied());
+    if let Some(out) = deliver(ctx, &envelope.request_id, workspace, answer) {
         ctx.reply(out);
     }
 }
@@ -480,7 +485,12 @@ fn take_bulk(result: &mut RpcResult) -> Option<Vec<u8>> {
 /// Stream 0 bytes for `answer`: the response itself, or, when a `files.read`, `git.diff` or
 /// `git.show` result is larger than `TRANSFER_INLINE_MAX`, the metadata with a transfer stream
 /// that the payload follows on.
-fn deliver(ctx: &Arc<Ctx>, id: &RequestId, answer: RpcResponse) -> Option<Vec<u8>> {
+fn deliver(
+    ctx: &Arc<Ctx>,
+    id: &RequestId,
+    workspace: Option<WorkspaceId>,
+    answer: RpcResponse,
+) -> Option<Vec<u8>> {
     let RpcResponse::Result { result, .. } = &answer else {
         return encode(&answer);
     };
@@ -528,7 +538,7 @@ fn deliver(ctx: &Arc<Ctx>, id: &RequestId, answer: RpcResponse) -> Option<Vec<u8
         transfer_bytes: DecimalU64(payload.len() as u64),
         result,
     };
-    let job = Job::Transfer(stream, id.clone(), payload);
+    let job = Job::Transfer(stream, id.clone(), workspace, payload);
     if ctx.jobs.send(job).is_err() {
         ctx.transfers.fetch_sub(1, Ordering::AcqRel);
         return None;
@@ -606,8 +616,14 @@ fn rpc_call(ctx: &Ctx, envelope: &RpcEnvelope) -> Outcome {
             let cancelled = AtomicBool::new(false);
             let deadline = Instant::now() + Duration::from_millis(envelope.timeout_ms.get());
             let operation = Operation::new(deadline, &cancelled);
+            // Stored operations are looked up with what this device may do here, not with the
+            // owner's local rights.
+            let rights = view
+                .access
+                .capabilities(&workspace)
+                .ok_or_else(|| fault(ErrorCode::WorkspaceUnshared))?;
             let mut connection =
-                ConnectionState::for_device(coordinator.clone(), ctx.principal.actor());
+                ConnectionState::for_device(coordinator.clone(), ctx.principal.actor(), rights);
             let request = RpcRequest {
                 v: ApplicationMajor,
                 r#type: RequestKind::Request,
@@ -642,7 +658,7 @@ enum Job {
     /// An answer for stream 0.
     Reply(Vec<u8>),
     /// The payload of a Host-opened transfer stream.
-    Transfer(u32, RequestId, Vec<u8>),
+    Transfer(u32, RequestId, Option<WorkspaceId>, Vec<u8>),
     /// Something queued an event for a stream; nothing else to learn.
     Wake,
     /// The tunnel is gone.
@@ -779,6 +795,8 @@ struct Watch {
 /// A payload on its way over a transfer stream.
 struct Transfer {
     open: OpenParams,
+    /// The workspace the payload came from; unsharing it ends the transfer.
+    workspace: Option<WorkspaceId>,
     data: Vec<u8>,
     position: usize,
 }
@@ -819,6 +837,8 @@ struct Hub {
     watches: u64,
     dir: Option<Dir>,
     checked: Option<Arc<View>>,
+    /// Since when the view cannot be read while streams are open.
+    blind: Option<Instant>,
 }
 
 fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
@@ -836,6 +856,7 @@ fn stream_loop(ctx: Arc<Ctx>, jobs: Receiver<Job>) {
         watches: 0,
         dir: None,
         checked: None,
+        blind: None,
     };
     loop {
         // Nothing to do until a job or a wake-up arrives, unless something needs a look.
@@ -914,12 +935,13 @@ impl Hub {
                 });
             }
             Job::Reply(data) => self.push(0, data),
-            Job::Transfer(stream, request_id, data) => {
+            Job::Transfer(stream, request_id, workspace, data) => {
                 let open = OpenParams::Transfer(TransferOpen { request_id });
                 self.subs.insert(
                     stream,
                     Sub::Transfer(Transfer {
                         open,
+                        workspace,
                         data,
                         position: 0,
                     }),
@@ -1320,17 +1342,38 @@ impl Hub {
                 }
                 return;
             }
-            Err(_) => return,
+            Err(_) => {
+                // Busy for a moment is no reason to cut streams, but an unreadable Host is not
+                // a licence to keep them: after RECHECK_BLIND without a view they go.
+                let since = *self.blind.get_or_insert_with(Instant::now);
+                if since.elapsed() >= RECHECK_BLIND {
+                    for stream in std::mem::take(&mut self.subs).into_keys() {
+                        self.reset(stream, RESET_UNAVAILABLE);
+                    }
+                }
+                return;
+            }
         };
+        self.blind = None;
         if self.checked.as_ref().is_some_and(|c| Arc::ptr_eq(c, &view)) {
             return;
         }
         let mut gone = Vec::new();
         for (stream, sub) in &self.subs {
             let open = sub.open();
-            let mut code = authorize(&view.access, &Target::open(open), now_ms())
-                .err()
-                .map(reset_code);
+            let mut code = match sub {
+                Sub::Transfer(Transfer {
+                    workspace: Some(ws),
+                    ..
+                }) => authorize(
+                    &view.access,
+                    &Target::message(ws, Method::WorkspaceGet),
+                    now_ms(),
+                ),
+                _ => authorize(&view.access, &Target::open(open), now_ms()),
+            }
+            .err()
+            .map(reset_code);
             if let (None, OpenParams::Terminal(p)) = (code, open)
                 && view
                     .project(&p.workspace_id)
@@ -2032,8 +2075,10 @@ pub(super) fn install(
         host_id,
         contract_hash,
     };
+    // The roster first (it also replays a READY that came before), so no admission runs against a
+    // consent that has not seen the device list.
+    uplink::install_roster(consent.roster());
     if let Some(handle) = uplink::install_tunnels(config, policy, Box::new(service)) {
-        uplink::install_roster(consent.roster());
         consent.set_handle(handle.clone());
         let _ = cell.set(handle);
     }

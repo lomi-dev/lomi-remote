@@ -51,6 +51,17 @@ impl DeviceGrant {
     }
 }
 
+const MAX_TOMBSTONES: i64 = 64;
+fn tombstone_key(device_key: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    device_key
+        .iter()
+        .fold(String::from("device_tombstone:"), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
 fn int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Invalid)
 }
@@ -197,6 +208,41 @@ impl HostStore {
         Ok(changed > 0)
     }
 
+    /// A Host-local revoke leaves a mark for the key: the device stays refused until the owner
+    /// approves it again with a code. Kept in `metadata` (no schema change), newest
+    /// `MAX_TOMBSTONES` only.
+    pub fn tombstone_device(&mut self, device_key: &[u8; 32], now: u64) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![tombstone_key(device_key), now.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key LIKE 'device_tombstone:%' AND key NOT IN \
+             (SELECT key FROM metadata WHERE key LIKE 'device_tombstone:%' \
+              ORDER BY CAST(value AS INTEGER) DESC, key LIMIT ?1)",
+            [MAX_TOMBSTONES],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn is_tombstoned(&self, device_key: &[u8; 32]) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1)",
+            [tombstone_key(device_key)],
+            |row| row.get(0),
+        )?)
+    }
+    pub fn clear_tombstone(&mut self, device_key: &[u8; 32]) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [tombstone_key(device_key)],
+        )?;
+        Ok(())
+    }
+
     /// The owner's choice for new devices; `Auto` until one is saved.
     pub fn device_mode(&self) -> Result<lomi_remote_protocol::ipc::LocalDeviceMode> {
         let value: Option<String> = self
@@ -305,6 +351,24 @@ mod tests {
         store.save_device_mode(M::Confirm).unwrap();
         drop(store);
         assert_eq!(open(&dir).device_mode().unwrap(), M::Confirm);
+    }
+
+    #[test]
+    fn a_tombstone_persists_clears_and_is_bounded() {
+        let dir = Dir::new();
+        let mut store = open(&dir);
+        assert!(!store.is_tombstoned(&[1; 32]).unwrap());
+        store.tombstone_device(&[1; 32], 5).unwrap();
+        drop(store);
+        let mut store = open(&dir);
+        assert!(store.is_tombstoned(&[1; 32]).unwrap(), "survives a restart");
+        store.clear_tombstone(&[1; 32]).unwrap();
+        assert!(!store.is_tombstoned(&[1; 32]).unwrap());
+        for i in 0..70u8 {
+            store.tombstone_device(&[i; 32], 10 + u64::from(i)).unwrap();
+        }
+        assert!(!store.is_tombstoned(&[0; 32]).unwrap(), "oldest dropped");
+        assert!(store.is_tombstoned(&[69; 32]).unwrap());
     }
 
     #[test]

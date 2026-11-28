@@ -154,6 +154,8 @@ struct Shared {
     tunnels: Mutex<Option<tunnels::Engine>>,
     /// Consent follows the account's device list (P3a.10). Lock order: never held with `tunnels`.
     roster: Mutex<Option<Box<dyn tunnels::Roster>>>,
+    /// The READY of the current link, replayed into a roster installed after it.
+    last_ready: Mutex<Option<tunnels::DeviceEvent>>,
 }
 
 #[cfg_attr(not(debug_assertions), allow(dead_code))] // release builds never create it
@@ -166,6 +168,7 @@ impl Shared {
             wake: Wake::new(),
             tunnels: Mutex::new(None),
             roster: Mutex::new(None),
+            last_ready: Mutex::new(None),
         }
     }
 }
@@ -194,6 +197,11 @@ pub fn install_tunnels(
 pub fn install_roster(roster: Box<dyn tunnels::Roster>) {
     if let Some(sh) = shared() {
         *lock(&sh.roster) = Some(roster);
+        // A link that came up before this call has already said READY.
+        let ready = lock(&sh.last_ready).clone();
+        if let Some(ready) = ready {
+            apply_device(sh, &ready);
+        }
     }
 }
 fn wall_ms() -> u64 {
@@ -207,6 +215,11 @@ fn tunnels_fresh(silent: Duration) -> bool {
 }
 /// Roster first (grants, list), then the engine closes what it names.
 fn apply_device(sh: &Shared, event: &tunnels::DeviceEvent) {
+    match event {
+        tunnels::DeviceEvent::Ready { .. } => *lock(&sh.last_ready) = Some(event.clone()),
+        tunnels::DeviceEvent::HostRevoked => *lock(&sh.last_ready) = None,
+        _ => {}
+    }
     let closing = lock(&sh.roster).as_mut().and_then(|r| r.apply(event));
     if let Some(engine) = lock(&sh.tunnels).as_mut() {
         if let tunnels::DeviceEvent::Changed(entry) = event {
@@ -1201,6 +1214,7 @@ fn connect_and_drive(
     if let Some(engine) = lock(&sh.tunnels).as_mut() {
         engine.link_down();
     }
+    *lock(&sh.last_ready) = None;
     let mut st = lock(&sh.state);
     st.live = None;
     session.fail_jobs(&mut st.jobs);
@@ -1246,6 +1260,9 @@ fn drive(
                 if let Effect::Device(event) = &effect {
                     apply_device(sh, event);
                     continue;
+                }
+                if matches!(effect, Effect::Fresh(_)) {
+                    apply_device(sh, &tunnels::DeviceEvent::Fresh);
                 }
                 let mut st = lock(&sh.state);
                 match effect {

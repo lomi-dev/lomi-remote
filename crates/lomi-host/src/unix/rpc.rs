@@ -49,6 +49,8 @@ pub(super) struct ConnectionState {
     subscriptions: HashMap<String, Subscription>,
     leases: HashMap<String, (TerminalContext, ControlLease)>,
     schedule: VecDeque<String>,
+    /// What a tunnel device may do in its workspace; `None` for the local owner connection.
+    rights: Option<CapabilitySet>,
 }
 
 fn fault(code: ErrorCode) -> RemoteError {
@@ -252,6 +254,7 @@ impl ConnectionState {
             subscriptions: HashMap::new(),
             leases: HashMap::new(),
             schedule: VecDeque::new(),
+            rights: None,
         })
     }
     /// State for one device tunnel request (`tunnel_service`): the device is the actor, the
@@ -259,8 +262,10 @@ impl ConnectionState {
     pub(super) fn for_device(
         coordinator: Arc<Coordinator>,
         actor: ConsumerAuthorizationId,
+        rights: CapabilitySet,
     ) -> Self {
         Self {
+            rights: Some(rights),
             coordinator,
             connection: AuthenticatedConnection::new(actor),
             streams: super::local_streams::Streams::default(),
@@ -269,6 +274,9 @@ impl ConnectionState {
             leases: HashMap::new(),
             schedule: VecDeque::new(),
         }
+    }
+    fn rights(&self) -> CapabilitySet {
+        self.rights.clone().unwrap_or_else(local_rights)
     }
     fn prune_leases(&mut self) {
         self.leases.retain(|_, (context, lease)| {
@@ -1120,7 +1128,7 @@ fn execute(
                     connection.connection.actor(),
                     params.context.workspace_id,
                     params.operation_id,
-                    &local_rights(),
+                    &connection.rights(),
                 )
             })
             .map_err(owner_fault)?
@@ -1133,7 +1141,7 @@ fn execute(
                 .map_err(|_| fault(ErrorCode::ServiceUnavailable))?;
             let _guard = actor_lock(&owner, operation)?;
             project(coordinator, &params.context, operation)?;
-            let rights = local_rights();
+            let rights = connection.rights();
             let mut turn = owner_call(operation, || {
                 coordinator.owner.begin_cancel_operation(
                     operation,

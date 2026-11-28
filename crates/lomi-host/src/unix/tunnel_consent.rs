@@ -36,7 +36,7 @@ use lomi_remote_protocol::{
     tunnel::{DeviceKind, Hello, StaleEpoch},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -47,6 +47,8 @@ pub(super) const MAX_PENDING: usize = 3;
 pub(super) const MAX_PROMPTS_PER_HOUR: usize = 10;
 const HOUR_MS: u64 = 3_600_000;
 const MAX_NOTICES: usize = 32;
+/// A device's server confirmation is refreshed at most this often.
+const CONFIRM_EVERY_MS: u64 = 60_000;
 
 type Id = [u8; 16];
 type Key = [u8; 32];
@@ -123,6 +125,10 @@ struct Inner {
     /// `(host access epoch, runtime generation)` of the current link; `None` before READY.
     epochs: Option<(u64, u64)>,
     list: Option<BTreeMap<Key, DeviceEntry>>,
+    /// Last time the listed devices' server confirmation was refreshed on `authority.fresh`.
+    confirmed: u64,
+    /// Devices the account revoked by event since the last READY: never admitted implicitly.
+    revoked: (BTreeSet<Id>, BTreeSet<Key>),
     pending: Vec<Approval>,
     /// Welcomed tunnels: device and the code both sides display.
     live: BTreeMap<CircuitId, (Key, String)>,
@@ -174,14 +180,62 @@ impl Inner {
         let Some((host_access_epoch, runtime_generation)) = self.epochs else {
             return Admission::Refuse;
         };
-        let on_list = self.list.as_ref().map(|l| l.contains_key(&d.fingerprint));
-        if d.account_id != self.account || d.expires_at <= now || on_list == Some(false) {
+        let mut on_list = self.list.as_ref().map(|l| l.contains_key(&d.fingerprint));
+        if d.account_id != self.account || d.expires_at <= now {
             return Admission::Refuse;
+        }
+        // The relay attested this device from its database a moment ago (the engine only admits
+        // while the authority is fresh), possibly before `devices.changed` reached us. Waiting
+        // buys nothing: whoever could lie here could forge that event too. Treat it as one;
+        // a later READY or event without the device removes it again.
+        if on_list == Some(false) {
+            if self.revoked.0.contains(&d.device_id) || self.revoked.1.contains(&d.fingerprint) {
+                return Admission::Refuse;
+            }
+            let (id, key) = (d.device_id, d.fingerprint);
+            self.revoke_where(|g| g.device_id == id && g.device_key != key);
+            if let Some(list) = &mut self.list {
+                list.retain(|_, x| x.device_id != id);
+                list.insert(
+                    key,
+                    DeviceEntry {
+                        device_id: id,
+                        fingerprint: key,
+                        client_class: d.client_class.clone(),
+                        auth_epoch: d.auth_epoch,
+                        expires_at: d.expires_at,
+                    },
+                );
+            }
+            on_list = Some(true);
         }
         let Ok(grant) = self.store().get_grant(&d.fingerprint) else {
             return Admission::Refuse;
         };
-        let grant = grant.filter(|g| g.account_id == self.account);
+        let mut grant = grant.filter(|g| g.account_id == self.account);
+        // The signed key now shows up under another device id: a different device, so nothing
+        // it held (control included) carries over.
+        if grant.as_ref().is_some_and(|g| g.device_id != d.device_id) {
+            if self.store().revoke(&d.fingerprint).is_err() {
+                return Admission::Refuse;
+            }
+            grant = None;
+        }
+        // A key the owner revoked on this Host needs an explicit approval with a code.
+        let Ok(tombstoned) = self.store().is_tombstoned(&d.fingerprint) else {
+            return Admission::Refuse;
+        };
+        if tombstoned {
+            grant = None;
+        }
+        // The server just vouched for this device (list known, link fresh): refresh at most
+        // once a minute, so a long-lived uplink keeps its grants valid.
+        if on_list == Some(true)
+            && let Some(g) = &mut grant
+            && now.saturating_sub(g.server_confirmed_at) >= CONFIRM_EVERY_MS
+        {
+            g.server_confirmed_at = now;
+        }
         if on_list.is_none() && !grant.as_ref().is_some_and(|g| g.is_valid(now)) {
             return Admission::Refuse;
         }
@@ -236,7 +290,7 @@ impl Inner {
             });
             return Admission::Refuse;
         }
-        match self.mode {
+        match if tombstoned { Mode::Confirm } else { self.mode } {
             Mode::Auto => {
                 if self.store().upsert_grant(&new).is_err() {
                     return Admission::Refuse;
@@ -282,6 +336,7 @@ impl Inner {
                 devices,
             } => {
                 self.epochs = Some((*host_access_epoch, *runtime_generation));
+                self.revoked = Default::default();
                 let Some(devices) = devices else {
                     self.list = None; // unknown: nothing is wiped, only valid grants are let in
                     return None;
@@ -297,6 +352,8 @@ impl Inner {
             }
             DeviceEvent::Changed(e) => {
                 let (id, key) = (e.device_id, e.fingerprint);
+                self.revoked.0.remove(&id);
+                self.revoked.1.remove(&key);
                 // The same device with another key: the old key is gone.
                 self.revoke_where(|g| g.device_id == id && g.device_key != key);
                 if let Some(list) = &mut self.list {
@@ -317,6 +374,8 @@ impl Inner {
                 fingerprint,
             } => {
                 let (id, key) = (*device_id, *fingerprint);
+                self.revoked.0.insert(id);
+                self.revoked.1.extend(key);
                 self.revoke_where(|g| g.device_id == id || Some(g.device_key) == key);
                 if let Some(list) = &mut self.list {
                     list.retain(|k, x| x.device_id != id && Some(*k) != key);
@@ -324,6 +383,17 @@ impl Inner {
                 Some(Box::new(move |d| {
                     d.device_id == id || Some(d.fingerprint) == key
                 }))
+            }
+            DeviceEvent::Fresh => {
+                if let Some(list) = &self.list
+                    && now.saturating_sub(self.confirmed) >= CONFIRM_EVERY_MS
+                {
+                    let keys: Vec<Key> = list.keys().copied().collect();
+                    if self.store().mark_server_confirmed(&keys, now).is_ok() {
+                        self.confirmed = now;
+                    }
+                }
+                None
             }
             DeviceEvent::HostRevoked => {
                 self.revoke_where(|_| true);
@@ -368,6 +438,8 @@ impl DeviceConsent {
             handle: None,
             epochs: None,
             list: None,
+            confirmed: 0,
+            revoked: Default::default(),
             pending: Vec::new(),
             live: BTreeMap::new(),
             prompts: VecDeque::new(),
@@ -406,9 +478,15 @@ impl DeviceConsent {
         self.inner().store().list_grants().unwrap_or_default()
     }
     /// The owner ends a grant: it is deleted and every live tunnel of the device is closed. The
-    /// account may still list the device; if so its next connection is a new device again.
+    /// account may still list the device; if so its next connection waits for an explicit approval
+    /// with a code (a tombstone, whatever the mode).
     pub(super) fn revoke(&self, key: &Key) -> bool {
         let mut g = self.inner();
+        let now = (g.clock)();
+        // The mark first: without it the device would come back at Read in `Auto` mode.
+        if g.store().tombstone_device(key, now).is_err() {
+            return false;
+        }
         let Ok(existed) = g.store().revoke(key) else {
             return false;
         };
@@ -493,6 +571,7 @@ impl DeviceConsent {
                     });
                 }
                 stored.is_ok()
+                    && g.store().clear_tombstone(&key).is_ok()
                     && handle
                         .push(Command::Approve {
                             circuit,
@@ -686,7 +765,9 @@ mod tests {
             r.c.admit_circuit([1; 16], &d, &hello(5), "1"),
             Admission::Refuse
         );
-        assert_eq!(admit(&r, 2, 1), Admission::Refuse, "not on the list");
+        r.ready(None);
+        assert_eq!(admit(&r, 2, 1), Admission::Refuse, "list unknown, no grant");
+        r.ready(Some(vec![entry(1)]));
         assert_eq!(admit(&r, 1, 1), READ);
     }
 
@@ -817,6 +898,103 @@ mod tests {
     }
 
     #[test]
+    fn an_attested_device_missing_from_the_list_is_admitted_until_the_next_ready() {
+        let mut r = rig(Mode::Auto);
+        r.ready(Some(vec![entry(2)]));
+        // attestation arrived before `devices.changed`
+        assert_eq!(admit(&r, 1, 1), READ);
+        assert_eq!(r.grants().len(), 1);
+        assert!(matches!(r.c.take_notices()[..], [Notice::NewDevice { .. }]));
+        // a READY without it revokes it again
+        let closing = r.ready(Some(vec![entry(2)])).unwrap();
+        assert!(closing(&device(1)));
+        assert!(r.grants().is_empty());
+        // an unknown list still refuses
+        r.ready(None);
+        assert_eq!(admit(&r, 3, 3), Admission::Refuse);
+    }
+
+    #[test]
+    fn a_host_local_revoke_sticks_until_approved_with_a_code() {
+        let mut r = rig(Mode::Auto);
+        r.ready(Some(vec![entry(1)]));
+        assert_eq!(admit(&r, 1, 1), READ);
+        assert!(r.c.revoke(&[1; 32]));
+        r.commands();
+        // Auto mode no longer re-grants silently: the device waits for the owner.
+        assert_eq!(admit(&r, 1, 2), Admission::Pending);
+        assert!(r.grants().is_empty());
+        assert!(!r.c.approve("000000"));
+        assert!(r.c.approve("123456"));
+        assert!(matches!(r.commands()[..], [Command::Approve { .. }]));
+        assert_eq!(r.grants().len(), 1);
+        // approved once: the mark is gone and the grant is an ordinary one
+        assert_eq!(
+            admit(&r, 1, 3),
+            Admission::Welcome {
+                level: Level::Control
+            }
+        );
+    }
+
+    #[test]
+    fn a_key_under_another_device_id_is_a_new_device() {
+        let mut r = rig(Mode::Auto);
+        r.ready(Some(vec![entry(1)]));
+        assert_eq!(admit(&r, 1, 1), READ);
+        let key = [1; 32];
+        r.store.lock().unwrap().confirm_control(&key, T0).unwrap();
+        assert!(r.grants()[0].control_confirmed_at.is_some());
+        // same key and fingerprint, attested as another device id
+        let mut other = device(1);
+        other.device_id = [9; 16];
+        let mut e = entry(1);
+        e.device_id = [9; 16];
+        r.ready(Some(vec![e]));
+        assert_eq!(
+            r.c.admit_circuit([2; 16], &other, &hello(5), "123456"),
+            READ,
+            "no inherited control"
+        );
+        let g = &r.grants()[0];
+        assert_eq!((g.device_id, g.control_confirmed_at), ([9; 16], None));
+    }
+
+    #[test]
+    fn authority_fresh_keeps_listed_grants_confirmed_once_a_minute() {
+        let day = lomi_host_store::SERVER_CONFIRMATION_TTL_MS;
+        let long = |n| DeviceEntry {
+            expires_at: T0 + 10 * day,
+            ..entry(n)
+        };
+        let mut r = rig(Mode::Auto);
+        r.ready(Some(vec![long(1)]));
+        let attested = AttestedDevice {
+            expires_at: T0 + 10 * day,
+            ..device(1)
+        };
+        let admit_late = |r: &Rig, circuit: u8| {
+            r.c.admit_circuit([circuit; 16], &attested, &hello(5), "123456")
+        };
+        assert_eq!(admit_late(&r, 1), READ);
+        r.clock.store(T0 + day - 1_000, Ordering::SeqCst);
+        r.c.apply(&DeviceEvent::Fresh);
+        let confirmed = |r: &Rig| r.grants()[0].server_confirmed_at;
+        assert_eq!(confirmed(&r), T0 + day - 1_000);
+        // a second one within the minute writes nothing
+        r.clock.store(T0 + day + 30_000, Ordering::SeqCst);
+        r.c.apply(&DeviceEvent::Fresh);
+        assert_eq!(confirmed(&r), T0 + day - 1_000);
+        r.clock.store(T0 + day + 70_000, Ordering::SeqCst);
+        r.c.apply(&DeviceEvent::Fresh);
+        assert_eq!(confirmed(&r), T0 + day + 70_000);
+        assert!(r.grants()[0].is_valid(T0 + day + 70_000));
+        // a new connection of a listed device long past 24 h is admitted, not refused
+        r.clock.store(T0 + 3 * day, Ordering::SeqCst);
+        assert!(matches!(admit_late(&r, 2), Admission::Welcome { .. }));
+    }
+
+    #[test]
     fn approval_prompts_are_rate_limited() {
         let mut r = rig(Mode::Confirm);
         let list: Vec<_> = (1..=12).map(entry).collect();
@@ -895,7 +1073,8 @@ mod tests {
             [2]
         );
         assert!(closing(&device(1)) && !closing(&device(2)));
-        assert_eq!(admit(&r2, 1, 3), Admission::Refuse);
+        // attested again by the relay: a new device, nothing inherited
+        assert_eq!(admit(&r2, 1, 3), READ);
         assert_eq!(admit(&r2, 2, 4), READ);
     }
 
@@ -1220,8 +1399,12 @@ mod tests {
                 w2.r.grants().is_empty(),
                 "the grant is gone before anyone connects"
             );
-            let (_, _, outs) = w2.connect(1);
-            assert_eq!(outs, [Out::Close { circuit: [1; 16] }]);
+            // the relay attests it again: admitted as a new device (Read, no inherited grant)
+            let (mut noise, _, outs) = w2.connect(1);
+            assert!(matches!(
+                World::greeting(&mut noise, &outs),
+                HostGreeting::Welcome(_)
+            ));
         }
 
         #[test]

@@ -1247,6 +1247,25 @@ fn files_read_goes_over_a_transfer_stream_unless_it_is_small() {
 }
 
 #[test]
+fn a_transfer_in_flight_is_reset_when_its_workspace_is_unshared() {
+    let mut fx = Fx::new(false);
+    let big = vec![b'x'; 2_000_000];
+    fs::write(fx.root.join("big.bin"), &big).unwrap();
+    let mut ctl = fx.controller();
+    let entry = entry_named(&mut ctl, &fx, "big.bin");
+    // the device stops granting credit on the first Host-opened stream: the transfer stays open
+    ctl.stalled.store(4, std::sync::atomic::Ordering::Release);
+    let answer = ctl.request(0, "big", None, read_call(&fx, &entry, 1_048_576));
+    assert_eq!(answer["type"], "transfer", "{answer}");
+    let stream = answer["transferStream"].as_u64().unwrap() as u32;
+    assert_eq!(stream, 4);
+    assert_eq!(ctl.reset_code(stream), None);
+    fx.store(|st| st.unshare(fx.ws()).unwrap());
+    ctl.wait("reset after unshare", |r| r.reset_code(stream).is_some());
+    assert_eq!(ctl.reset_code(stream), Some(u64::from(RESET_UNSHARED)));
+}
+
+#[test]
 fn rpc_serves_workspace_files_mutations_and_operation_status() {
     let mut fx = Fx::new(false);
     let mut ctl = fx.controller();

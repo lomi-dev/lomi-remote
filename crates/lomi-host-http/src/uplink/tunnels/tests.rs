@@ -66,11 +66,21 @@ fn device(n: u8) -> Identity {
     Identity::generate(ACCOUNT, [n; 16], Role::Device, 1).unwrap()
 }
 fn event(circuit: CircuitId, device: &Identity, auth_epoch: u64) -> Object {
+    event_as(circuit, device, auth_epoch, None)
+}
+/// `attested_id`: the device id the relay claims, when it is not the bundle's own.
+fn event_as(
+    circuit: CircuitId,
+    device: &Identity,
+    auth_epoch: u64,
+    attested_id: Option<Id>,
+) -> Object {
     let b = &device.public_bundle().bundle;
+    let device_id = attested_id.unwrap_or(b.subject_id);
     let Value::Object(o) = json!({
         "circuitId": hex(&circuit), "nonce": hex(&circuit),
         "device": {
-            "accountId": dashed(&ACCOUNT), "deviceId": dashed(&b.subject_id), "clientClass": "web",
+            "accountId": dashed(&ACCOUNT), "deviceId": dashed(&device_id), "clientClass": "web",
             "attestation": {"fingerprint": hex(&b.fingerprint().unwrap()), "authEpoch": auth_epoch.to_string(), "expiresAt": 9},
         },
     }) else {
@@ -129,8 +139,19 @@ fn handshake(
     send_directory: bool,
     now: u64,
 ) -> (Dev, Vec<Out>) {
+    handshake_as(w, id, c, epoch, send_directory, now, None)
+}
+fn handshake_as(
+    w: &mut World,
+    id: &Identity,
+    c: u8,
+    epoch: u64,
+    send_directory: bool,
+    now: u64,
+    attested_id: Option<Id>,
+) -> (Dev, Vec<Out>) {
     let circuit = [c; 16];
-    w.e.on_circuit_open(&event(circuit, id, epoch), now);
+    w.e.on_circuit_open(&event_as(circuit, id, epoch, attested_id), now);
     let prologue = TunnelPrologue {
         contract_hash: HASH,
         path: TunnelPath::Relay,
@@ -202,6 +223,16 @@ fn control_pending_frame_carries_the_tunnel_code_to_the_device() {
     // the Host does not accept the frame from a device
     let mut table = StreamTable::new(Side::Host);
     assert!(table.on_frame(f).is_err());
+}
+
+#[test]
+fn a_bundle_for_another_device_id_than_the_attested_one_is_refused() {
+    let mut w = world();
+    let (_, outs) = handshake_as(&mut w, &device(1), 1, 1, false, 0, Some([0xee; 16]));
+    assert!(outs.contains(&Out::Close { circuit: [1; 16] }), "{outs:?}");
+    assert!(w.e.is_empty());
+    // the same device under its own id is welcomed
+    open_dev(&mut w, 2);
 }
 
 #[test]
