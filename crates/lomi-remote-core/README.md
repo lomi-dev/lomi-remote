@@ -124,11 +124,14 @@ a zeroizing `Key` for the duration of the call:
 Callers must zero their key buffers right after the call: the JS wrapper and the Kotlin module
 wipe the payload of `directory.seal` / `directory.open` for you (so build a fresh payload per call),
 and the JNI layer and the core wipe their own copies. Swift cannot wipe the `Data` copy the Expo
-bridge makes, so on iOS only the JS array and the core's copy are cleared. A WASM module cannot reach its input copy in
-linear memory, so the web key lives in the worker only for the duration of the call.
+bridge makes, so on iOS only the JS array and the core's copy are cleared. The WASM `call` takes its payload by value and wipes the copy in
+linear memory itself, so the web key lives in the worker only for the duration of the call.
 
-`tunnel.new` takes the identity seed blob as payload like the keys above: wipe it after the call (the platform
-wrappers still have to be taught this op).
+`tunnel.new` takes the identity seed blob as payload like the keys above: the JS wrapper, the JNI layer and the
+WASM core wipe their copies, and a C or Swift caller must wipe its own buffer (the C ABI only borrows it).
+
+Reassembly memory: unfinished logical messages are capped at 4 MiB per tunnel over all streams
+(`MAX_REASSEMBLY`, the same `StreamTable` on the Host and here); beyond it the tunnel closes with `protocol`.
 
 Handles are process-global: every caller in the process (every worker, module or script sharing the
 library) can use or free any handle, so all of them must be in one trust domain. Do not load the

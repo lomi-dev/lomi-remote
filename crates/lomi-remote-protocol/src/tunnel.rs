@@ -21,6 +21,12 @@ pub const MAX_FRAME_DATA: usize = MAX_PLAINTEXT_FRAME_LEN;
 pub const MAX_LOGICAL_MESSAGE: usize = MAX_MESSAGE_LEN;
 /// Open streams other than stream 0.
 pub const MAX_OPEN_STREAMS: usize = 64;
+/// Bytes of unfinished logical messages one tunnel may hold, over all its streams. Credit is
+/// returned as data is received, so without this 64 streams could each hold 1 MiB. Over it the
+/// tunnel is closed as a protocol error (`MessageTooLarge`), on both sides.
+pub const MAX_REASSEMBLY: usize = 4 * 1024 * 1024;
+/// Ids of streams we closed that are remembered, so the peer's in-flight frames are not errors.
+const RECENT_CLOSED: usize = 4 * MAX_OPEN_STREAMS;
 pub const MAX_TERMINAL_STREAMS: usize = 32;
 pub const STREAM_WINDOW: u64 = 64 * 1024;
 pub const TUNNEL_WINDOW: u64 = 256 * 1024;
@@ -434,7 +440,7 @@ impl StreamTable {
     }
     fn forget_local(&mut self, id: u32) {
         self.remove(id);
-        if self.recent_closed.len() == MAX_OPEN_STREAMS {
+        if self.recent_closed.len() == RECENT_CLOSED {
             self.recent_closed.pop_front();
         }
         self.recent_closed.push_back(id);
@@ -605,6 +611,14 @@ impl StreamTable {
         if s.buf.len() + data.len() > MAX_LOGICAL_MESSAGE {
             return Err(TunnelError::MessageTooLarge);
         }
+        // `s` borrows `streams`: all streams are summed after it is released.
+        let held: usize = self.streams.values().map(|s| s.buf.len()).sum();
+        if held + data.len() > MAX_REASSEMBLY {
+            return Err(TunnelError::MessageTooLarge);
+        }
+        let Some(s) = self.streams.get_mut(&id) else {
+            return Err(TunnelError::UnknownStream);
+        };
         self.recv_tunnel -= n;
         s.buf.extend_from_slice(data);
         Ok(fin.then(|| Event::Message {
@@ -818,7 +832,9 @@ pub const TRANSFER_MAX: usize = 8 * 1024 * 1024;
 
 // `directory` stream (postcard, externally tagged: postcard cannot read internal tags). The first
 // message is `Snapshot`; every later one is a `Change` with the next `seq`. A change replaces or
-// removes one whole workspace entry, so the device needs no diff logic.
+// removes one whole workspace entry, so the device needs no diff logic. A `Snapshot` may come
+// again later (a change that could not be encoded): it replaces the whole state and its `seq`
+// continues the sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryHost {
@@ -826,7 +842,10 @@ pub struct DirectoryHost {
     pub platform: DisplayText,
     pub version: DisplayText,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Nesting a decoded `DirectoryLayout` may have (a deeper one would only be an attack on the
+/// decoder's stack).
+pub const MAX_LAYOUT_DEPTH: usize = 16;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum DirectoryLayout {
     Pane(PaneId),
     Split {
@@ -834,6 +853,41 @@ pub enum DirectoryLayout {
         first: Box<DirectoryLayout>,
         second: Box<DirectoryLayout>,
     },
+}
+#[derive(Deserialize)]
+enum LayoutWire {
+    Pane(PaneId),
+    Split {
+        axis: SplitAxis,
+        first: Box<DirectoryLayout>,
+        second: Box<DirectoryLayout>,
+    },
+}
+thread_local! {
+    static LAYOUT_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+impl<'de> Deserialize<'de> for DirectoryLayout {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let depth = LAYOUT_DEPTH.with(|c| c.get());
+        if depth >= MAX_LAYOUT_DEPTH {
+            return Err(serde::de::Error::custom("directory layout too deep"));
+        }
+        LAYOUT_DEPTH.with(|c| c.set(depth + 1));
+        let wire = LayoutWire::deserialize(d);
+        LAYOUT_DEPTH.with(|c| c.set(depth));
+        Ok(match wire? {
+            LayoutWire::Pane(p) => Self::Pane(p),
+            LayoutWire::Split {
+                axis,
+                first,
+                second,
+            } => Self::Split {
+                axis,
+                first,
+                second,
+            },
+        })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1285,6 +1339,57 @@ mod tests {
                 assert_eq!(last, Err(TunnelError::MessageTooLarge));
             }
         }
+    }
+
+    #[test]
+    fn unfinished_messages_over_all_streams_are_capped() {
+        let (mut d, mut h) = pair();
+        let ids: Vec<u32> = (0..6)
+            .map(|_| {
+                let (id, f) = d.open(&chat()).unwrap();
+                h.on_frame(&f).unwrap();
+                id
+            })
+            .collect();
+        // 960 KiB unfinished on each: the fifth stream's data crosses 4 MiB in total
+        let mut failed = None;
+        'out: for (i, id) in ids.iter().enumerate() {
+            let mut sent = 0;
+            while sent < 960 * 1024 {
+                let n = MAX_FRAME_DATA
+                    .min(d.send_credit(*id) as usize)
+                    .min(960 * 1024 - sent);
+                let f = d.send_data(*id, &vec![0; n], false).unwrap();
+                sent += n;
+                if let Err(e) = h.on_frame(&f) {
+                    failed = Some((i, e));
+                    break 'out;
+                }
+                d.on_frame(&h.grant(*id, n as u32).unwrap()).unwrap();
+                d.on_frame(&h.grant(0, n as u32).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(failed, Some((4, TunnelError::MessageTooLarge)));
+    }
+
+    #[test]
+    fn directory_layouts_nest_at_most_sixteen_deep() {
+        fn nested(depth: usize) -> DirectoryLayout {
+            let pane = DirectoryLayout::Pane(PaneId::try_from(WS.to_string()).unwrap());
+            (1..depth).fold(pane.clone(), |inner, _| DirectoryLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(inner),
+                second: Box::new(pane.clone()),
+            })
+        }
+        let postcard = |l: &DirectoryLayout| postcard::to_allocvec(l).unwrap();
+        let ok = postcard(&nested(MAX_LAYOUT_DEPTH));
+        assert!(postcard::from_bytes::<DirectoryLayout>(&ok).is_ok());
+        let deep = postcard(&nested(MAX_LAYOUT_DEPTH + 1));
+        assert!(postcard::from_bytes::<DirectoryLayout>(&deep).is_err());
+        // far deeper than the stack would take is refused without recursing that far
+        let huge = postcard(&nested(2_000));
+        assert!(postcard::from_bytes::<DirectoryLayout>(&huge).is_err());
     }
 
     #[test]

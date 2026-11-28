@@ -4,7 +4,7 @@ const decoder = new TextDecoder();
 let initialized = false;
 let broken = false;
 // Payloads of these operations carry key bytes; the wrapper wipes them after the call.
-const SECRET_PAYLOAD_OPS = new Set(['directory.seal', 'directory.open']);
+const SECRET_PAYLOAD_OPS = new Set(['directory.seal', 'directory.open', 'tunnel.new']);
 
 export class CoreError extends Error {
   constructor(detail) { super(detail.code); this.name = 'CoreError'; this.detail = detail; }
