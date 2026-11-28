@@ -40,6 +40,19 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Dashed lowercase UUID text of 16 bytes (the relay's `circuit.open` `hostId`).
+pub fn uuid_text(b: &[u8; 16]) -> String {
+    let h = hex(b);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
 /// Lowercase hex of exactly `N` bytes.
 pub fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != 2 * N || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
@@ -213,7 +226,7 @@ impl Tunnel {
         self.deadline = Some((now + HANDSHAKE_MS, "handshakeTimeout"));
         out.push(Out::Event(Event::State("opening")));
         let mut args = Object::new();
-        args.insert("hostId".into(), hex(&self.host_id).into());
+        args.insert("hostId".into(), uuid_text(&self.host_id).into());
         args.insert("circuitId".into(), hex(&self.circuit).into());
         args.insert("nonce".into(), hex(&nonce).into());
         out.push(Out::Call {

@@ -357,6 +357,8 @@ impl Rig {
             panic!("CALL then DATA expected")
         };
         assert_eq!(name, "circuit.open");
+        // the relay takes the Host id as a dashed UUID (relay-frames vector `call-circuit-open`)
+        assert_eq!(args["hostId"], "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2");
         assert_eq!(s.len(), 2);
         (*id, args.clone(), bytes.clone(), r)
     }
