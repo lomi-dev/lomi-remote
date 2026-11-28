@@ -141,6 +141,34 @@ impl Identity {
     pub fn public_bundle(&self) -> SignedBundle {
         self.signed.clone()
     }
+    /// Ed25519 over `device_registration_message` for `POST /remote/devices` (plan-1.0 P3a.5).
+    pub fn sign_device_registration(&self, challenge: &[u8; 32]) -> Result<[u8; 64]> {
+        if self.disposed || self.signed.bundle.role != Role::Device {
+            return Err("not a live device identity".into());
+        }
+        let b = &self.signed.bundle;
+        let message = device_registration_message(challenge, &b.account_id, &b.fingerprint()?);
+        Ok(self.signing.sign(&message).to_bytes())
+    }
+}
+
+/// CBOR array(4) `["lomi-remote/device-registration", challenge, account, fingerprint]`, the
+/// bytes auth-app `deviceRegistrationMessage` (src/remote/api/crypto.ts) verifies.
+pub fn device_registration_message(
+    challenge: &[u8; 32],
+    account: &Id,
+    fingerprint: &[u8; 32],
+) -> Vec<u8> {
+    const DOMAIN: &str = "lomi-remote/device-registration";
+    let mut m = vec![0x84, 0x78, DOMAIN.len() as u8];
+    m.extend_from_slice(DOMAIN.as_bytes());
+    m.extend_from_slice(&[0x58, 32]);
+    m.extend_from_slice(challenge);
+    m.push(0x50);
+    m.extend_from_slice(account);
+    m.extend_from_slice(&[0x58, 32]);
+    m.extend_from_slice(fingerprint);
+    m
 }
 
 impl Identity {
@@ -205,5 +233,30 @@ impl Identity {
 impl Drop for Identity {
     fn drop(&mut self) {
         self.dispose();
+    }
+}
+
+#[cfg(test)]
+mod device_registration_tests {
+    use super::*;
+
+    #[test]
+    fn registration_message_is_canonical_cbor_and_the_signature_verifies() {
+        let m = device_registration_message(&[7; 32], &[9; 16], &[5; 32]);
+        let mut d = minicbor::Decoder::new(&m);
+        assert_eq!(d.array().unwrap(), Some(4));
+        assert_eq!(d.str().unwrap(), "lomi-remote/device-registration");
+        assert_eq!(d.bytes().unwrap(), &[7; 32]);
+        assert_eq!(d.bytes().unwrap(), &[9; 16]);
+        assert_eq!(d.bytes().unwrap(), &[5; 32]);
+        assert_eq!(d.position(), m.len());
+
+        let device = Identity::generate([9; 16], [3; 16], Role::Device, 1).unwrap();
+        let b = device.public_bundle().bundle;
+        let sig = device.sign_device_registration(&[7; 32]).unwrap();
+        let m = device_registration_message(&[7; 32], &b.account_id, &b.fingerprint().unwrap());
+        verify_signature(&b.identity_key, &m, &sig).unwrap();
+        let host = Identity::generate([9; 16], [3; 16], Role::Host, 1).unwrap();
+        assert!(host.sign_device_registration(&[7; 32]).is_err());
     }
 }

@@ -47,7 +47,7 @@ mod wire;
 pub use approval::{pairing_fingerprint, PeerApproval, Permissions, SignedPeerApproval};
 pub use channel::{Channel, Handshake, TransportFrame};
 pub use enrollment::{EnrollmentChallenge, SignedEnrollmentProof, ENROLLMENT_PROOF_DOMAIN};
-pub use identity::{Identity, PublicBundle, SignedBundle};
+pub use identity::{device_registration_message, Identity, PublicBundle, SignedBundle};
 pub const REMOTE_V2_PRODUCTION_QUALIFIED: bool = false;
 pub use mailbox::{Envelope, EnvelopeMetadata, MailboxPolicy};
 pub use wire::{ChannelContext, ChannelPurpose, Role};
