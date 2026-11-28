@@ -378,6 +378,8 @@ pub struct StreamTable {
     last_peer: u32,
     /// Ids we closed ourselves; in-flight frames from the peer for them are dropped, not errors.
     recent_closed: VecDeque<u32>,
+    /// Streams the peer closed or reset: only its CREDIT may still cross that.
+    peer_closed: VecDeque<u32>,
     send_tunnel: u64,
     recv_tunnel: u64,
     terminals: usize,
@@ -396,6 +398,7 @@ impl StreamTable {
             next_own: if side == Side::Device { 1 } else { 2 },
             last_peer: 0,
             recent_closed: VecDeque::new(),
+            peer_closed: VecDeque::new(),
             send_tunnel: TUNNEL_WINDOW,
             recv_tunnel: TUNNEL_WINDOW,
             terminals: 0,
@@ -544,6 +547,10 @@ impl StreamTable {
                 }
                 if self.streams.contains_key(&id) {
                     self.remove(id);
+                    if self.peer_closed.len() == RECENT_CLOSED {
+                        self.peer_closed.pop_front();
+                    }
+                    self.peer_closed.push_back(id);
                     return Ok(Some(match f.reset_code() {
                         Some(code) if f.kind == FrameType::Reset => Event::Reset {
                             stream_id: id,
@@ -630,6 +637,8 @@ impl StreamTable {
         let (window, cap) = match self.streams.get_mut(&id) {
             Some(_) if id == 0 => (&mut self.send_tunnel, TUNNEL_WINDOW),
             Some(s) => (&mut s.send, STREAM_WINDOW),
+            // The peer's CREDIT may have been sent before it saw the stream end.
+            None if self.peer_closed.contains(&id) => return Ok(None),
             None => return self.late(id),
         };
         *window = window
@@ -1279,6 +1288,28 @@ mod tests {
             Err(TunnelError::CreditOverflow)
         );
         // Sum of two u32::MAX credits cannot wrap either.
+    #[test]
+    fn frames_that_cross_the_peers_close_are_tolerated() {
+        let (mut d, mut h, id) = open_pair();
+        let credit = h.grant(id, 10).unwrap_err(); // window already full: no credit to give
+        assert_eq!(credit, TunnelError::CreditOverflow);
+        let close = d.close(id).unwrap();
+        // the Host's own CREDIT/CLOSE for the stream were sent before it saw the CLOSE
+        assert_eq!(
+            d.on_frame(&TunnelFrame::new(id, FrameType::Close, 0, vec![])),
+            Ok(None)
+        );
+        assert!(matches!(h.on_frame(&close), Ok(Some(Event::Closed { .. }))));
+        // the device's CREDIT crossed its own CLOSE
+        let late = TunnelFrame::new(id, FrameType::Credit, 0, 5u32.to_be_bytes().to_vec());
+        assert_eq!(h.on_frame(&late), Ok(None));
+        // but data or a second CLOSE after the peer's close, and ids never seen, are still errors
+        let data = TunnelFrame::new(id, FrameType::Data, 0, vec![1]);
+        assert_eq!(h.on_frame(&data), Err(TunnelError::UnknownStream));
+        let unknown = TunnelFrame::new(99, FrameType::Credit, 0, 5u32.to_be_bytes().to_vec());
+        assert_eq!(h.on_frame(&unknown), Err(TunnelError::UnknownStream));
+    }
+
         d.send_data(id, &[0; 10], false).unwrap();
         assert_eq!(
             d.on_frame(&credit(id, 11)),
