@@ -14,7 +14,7 @@
     "wasmBindgen": "wasm-bindgen 0.2.126"
   },
   "sourceSha256": {
-    "Cargo.lock": "f082d9b3d2c02e32d1d735f3172d15ae14144d8be35389945ffd20cc4b329de8",
+    "Cargo.lock": "aebdb77394d82051308b086af5d3691b1a2d32f4947cc419092094cfbc14a5ac",
     "Cargo.toml": "662b75edfd7947a6b1c1dbed2dba4c29b466f344d68a68561553a122fe0761d0",
     "crates/lomi-remote-crypto/.gitignore": "0013c9fb76b8728f13ada5de1d5c76b5734468f5bc2f5f905c0d7185ce9cdd76",
     "crates/lomi-remote-crypto/Cargo.toml": "bff415a89e632ed906d80177c9706b7892533310dfc960d579993d3efa243e7f",
@@ -33,8 +33,8 @@
     "crates/lomi-remote-crypto/src/grant_v3_wire.rs": "15124f260579ee903dc4c09b58125a659c2c0d36cc3fc5b00b26e71556342d66",
     "crates/lomi-remote-crypto/src/host_key_enrollment.rs": "494427eb106774bfb9c47225652ef872a6144cf68cff70160bd41e95c04df7e8",
     "crates/lomi-remote-crypto/src/host_refresh.rs": "e18117598a6f0244fcf0a019fa771c09b038712a53c1e347c87f9661862aece3",
-    "crates/lomi-remote-crypto/src/identity.rs": "ad8251b0e14e7829e2a63535076abcf32f282673ef4273e759d71ac7b405131d",
-    "crates/lomi-remote-crypto/src/lib.rs": "f1d3de084c61732b00e5258c55e69712d761d6c3ee99933819360ef2b04d9be7",
+    "crates/lomi-remote-crypto/src/identity.rs": "5aa399009fe0073d9c15b7a1e6b14a542216d8aa1ec211379f837035fff6c315",
+    "crates/lomi-remote-crypto/src/lib.rs": "2430fe62e6fa2c9b9d671b98ec3b5ffd5983f7a14080b04b9308135df5b821e7",
     "crates/lomi-remote-crypto/src/mailbox.rs": "968a8bea289eecae7b763786864f3cc6dedc850f1be4a67128cea4ecd12c8a69",
     "crates/lomi-remote-crypto/src/public_identity_wire.rs": "e71f5cb1641cfe93d879f05d82d4331c1d017ce538fd4255ec2fc7f79c2e4487",
     "crates/lomi-remote-crypto/src/tunnel.rs": "9ad5f2b48fb3438ed3765e9058c9e2f2a8e6b6583fec6af4b86d00c87c18c62c",
