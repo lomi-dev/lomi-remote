@@ -90,7 +90,7 @@ impl Identity {
             Zeroizing::new(random()?),
         )
     }
-    fn from_seeds(
+    pub(crate) fn from_seeds(
         account_id: Id,
         subject_id: Id,
         role: Role,
