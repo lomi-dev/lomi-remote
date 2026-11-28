@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "ApprovalPending": {
+      "description": "`code` is the 6-digit confirmation code as a number (0..=999999, display zero-padded).",
+      "properties": {
+        "code": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deadlineMs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "deadlineMs"
+      ],
+      "type": "object"
+    },
+    "OlderSide": {
+      "enum": [
+        "host",
+        "client"
+      ],
+      "type": "string"
+    },
+    "StaleEpoch": {
+      "properties": {
+        "authEpoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hostAccessEpoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "authEpoch",
+        "hostAccessEpoch",
+        "runtimeGeneration"
+      ],
+      "type": "object"
+    },
+    "UpdateRequired": {
+      "properties": {
+        "olderSide": {
+          "$ref": "#/$defs/OlderSide"
+        }
+      },
+      "required": [
+        "olderSide"
+      ],
+      "type": "object"
+    },
+    "Welcome": {
+      "description": "The directory itself goes on the `directory` stream; `directory` says whether it will follow.",
+      "properties": {
+        "directory": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "directory"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Externally tagged (postcard has no self-describing tags).",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "welcome": {
+          "$ref": "#/$defs/Welcome"
+        }
+      },
+      "required": [
+        "welcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "approvalPending": {
+          "$ref": "#/$defs/ApprovalPending"
+        }
+      },
+      "required": [
+        "approvalPending"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "staleEpoch": {
+          "$ref": "#/$defs/StaleEpoch"
+        }
+      },
+      "required": [
+        "staleEpoch"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "updateRequired": {
+          "$ref": "#/$defs/UpdateRequired"
+        }
+      },
+      "required": [
+        "updateRequired"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "HostGreeting"
+}

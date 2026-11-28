@@ -2362,6 +2362,7 @@ dependencies = [
 name = "lomi-remote-protocol"
 version = "0.0.0"
 dependencies = [
+ "postcard",
  "schemars",
  "serde",
  "serde_json",

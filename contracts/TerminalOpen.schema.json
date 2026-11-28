@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "PaneId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SessionEpoch": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "TerminalDimension": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "afterSeq": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cols": {
+      "$ref": "#/$defs/TerminalDimension"
+    },
+    "paneId": {
+      "$ref": "#/$defs/PaneId"
+    },
+    "rows": {
+      "$ref": "#/$defs/TerminalDimension"
+    },
+    "sessionEpoch": {
+      "$ref": "#/$defs/SessionEpoch"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/WorkspaceId"
+    }
+  },
+  "required": [
+    "workspaceId",
+    "paneId",
+    "sessionEpoch",
+    "cols",
+    "rows"
+  ],
+  "title": "TerminalOpen",
+  "type": "object"
+}

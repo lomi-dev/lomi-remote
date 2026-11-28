@@ -1,0 +1,24 @@
+{
+  "$defs": {
+    "RequestId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "requestId": {
+      "$ref": "#/$defs/RequestId"
+    }
+  },
+  "required": [
+    "requestId"
+  ],
+  "title": "TransferOpen",
+  "type": "object"
+}

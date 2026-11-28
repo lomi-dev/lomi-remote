@@ -1526,6 +1526,79 @@
         "title": "ChannelTicketResult",
         "type": "object"
       },
+      "ChatOpen": {
+        "$defs": {
+          "ChatAfter": {
+            "properties": {
+              "messageId": {
+                "$ref": "#/components/schemas/ChatOpen/$defs/ChatMessageId"
+              },
+              "streamSeq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "messageId",
+              "streamSeq"
+            ],
+            "type": "object"
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatOpen/$defs/ChatAfter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ChatOpen/$defs/ChatThreadId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/ChatOpen/$defs/WorkspaceId"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "threadId"
+        ],
+        "title": "ChatOpen",
+        "type": "object"
+      },
       "ChatStreamFrame": {
         "$defs": {
           "ChatEffort": {
@@ -3177,6 +3250,44 @@
         ],
         "title": "FileWatchFrame"
       },
+      "FilesWatchOpen": {
+        "$defs": {
+          "EncodedPathId": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/FilesWatchOpen/$defs/EncodedPathId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/FilesWatchOpen/$defs/WorkspaceId"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "path"
+        ],
+        "title": "FilesWatchOpen",
+        "type": "object"
+      },
       "FoundationTypes": {
         "$defs": {
           "AccountId": {
@@ -3817,6 +3928,120 @@
         "title": "HeartbeatResult",
         "type": "object"
       },
+      "Hello": {
+        "$defs": {
+          "BoundedList": {
+            "items": {
+              "$ref": "#/components/schemas/Hello/$defs/ResumeEntry"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "BoundedList2": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 4096,
+            "type": "array"
+          },
+          "DeviceKind": {
+            "enum": [
+              "web",
+              "mobile",
+              "desktop"
+            ],
+            "type": "string"
+          },
+          "DeviceName": {
+            "maxLength": 64,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 64
+          },
+          "ResumeEntry": {
+            "properties": {
+              "cursor": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/Hello/$defs/StreamKind"
+              }
+            },
+            "required": [
+              "kind",
+              "cursor"
+            ],
+            "type": "object"
+          },
+          "StreamKind": {
+            "description": "Declaration order equals the OPEN kind code and the postcard variant index.",
+            "enum": [
+              "rpc",
+              "directory",
+              "terminal",
+              "chat",
+              "files.watch",
+              "transfer",
+              "media"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "authEpoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deviceBundle": {
+            "$ref": "#/components/schemas/Hello/$defs/BoundedList2",
+            "description": "Opaque signed device bundle; verified elsewhere."
+          },
+          "deviceKind": {
+            "$ref": "#/components/schemas/Hello/$defs/DeviceKind"
+          },
+          "deviceName": {
+            "$ref": "#/components/schemas/Hello/$defs/DeviceName"
+          },
+          "hostAccessEpoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resume": {
+            "$ref": "#/components/schemas/Hello/$defs/BoundedList"
+          },
+          "runtimeGeneration": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sendDirectory": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deviceName",
+          "deviceKind",
+          "authEpoch",
+          "hostAccessEpoch",
+          "runtimeGeneration",
+          "resume",
+          "sendDirectory",
+          "deviceBundle"
+        ],
+        "title": "Hello",
+        "type": "object"
+      },
       "HostAuthorizationExchangeParams": {
         "$defs": {
           "CanonicalCryptoCborHex": {
@@ -4366,6 +4591,138 @@
         ],
         "title": "HostEnrollmentTokenContext",
         "type": "object"
+      },
+      "HostGreeting": {
+        "$defs": {
+          "ApprovalPending": {
+            "description": "`code` is the 6-digit confirmation code as a number (0..=999999, display zero-padded).",
+            "properties": {
+              "code": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "deadlineMs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "code",
+              "deadlineMs"
+            ],
+            "type": "object"
+          },
+          "OlderSide": {
+            "enum": [
+              "host",
+              "client"
+            ],
+            "type": "string"
+          },
+          "StaleEpoch": {
+            "properties": {
+              "authEpoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hostAccessEpoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "runtimeGeneration": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "authEpoch",
+              "hostAccessEpoch",
+              "runtimeGeneration"
+            ],
+            "type": "object"
+          },
+          "UpdateRequired": {
+            "properties": {
+              "olderSide": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/OlderSide"
+              }
+            },
+            "required": [
+              "olderSide"
+            ],
+            "type": "object"
+          },
+          "Welcome": {
+            "description": "The directory itself goes on the `directory` stream; `directory` says whether it will follow.",
+            "properties": {
+              "directory": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "directory"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Externally tagged (postcard has no self-describing tags).",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "welcome": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/Welcome"
+              }
+            },
+            "required": [
+              "welcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPending": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/ApprovalPending"
+              }
+            },
+            "required": [
+              "approvalPending"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "staleEpoch": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/StaleEpoch"
+              }
+            },
+            "required": [
+              "staleEpoch"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "updateRequired": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/UpdateRequired"
+              }
+            },
+            "required": [
+              "updateRequired"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "HostGreeting"
       },
       "HostRegisterParams": {
         "$defs": {
@@ -18991,6 +19348,2602 @@
         "title": "RemoteError",
         "type": "object"
       },
+      "RpcEnvelope": {
+        "$defs": {
+          "BoundedList": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 16384,
+            "type": "array"
+          },
+          "BoundedList2": {
+            "items": {
+              "$ref": "#/components/schemas/RpcEnvelope/$defs/GitStagePath"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "BoundedList3": {
+            "items": {
+              "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "ChatCursor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "ChatEffort": {
+            "maxLength": 16,
+            "minLength": 1,
+            "pattern": "^[a-z]{1,16}$",
+            "type": "string"
+          },
+          "ChatMessageId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatMessagePageLimit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "ChatModelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatPermissions": {
+            "enum": [
+              "read-only",
+              "edit",
+              "full"
+            ],
+            "type": "string"
+          },
+          "ChatProviderId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "ChatProvidersParams": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "ChatSendParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              },
+              "text": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatText"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision",
+              "text"
+            ],
+            "type": "object"
+          },
+          "ChatStopParams": {
+            "additionalProperties": false,
+            "properties": {
+              "threadId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId"
+            ],
+            "type": "object"
+          },
+          "ChatStreamCursor": {
+            "additionalProperties": false,
+            "properties": {
+              "messageId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatMessageId"
+              },
+              "streamSeq": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "messageId",
+              "streamSeq"
+            ],
+            "type": "object"
+          },
+          "ChatSubscribeParams": {
+            "additionalProperties": false,
+            "properties": {
+              "after": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatStreamCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "threadId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "ChatText": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "not": {
+              "pattern": "\\u0000"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 65536
+          },
+          "ChatThreadCreateParams": {
+            "additionalProperties": false,
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatModelId"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              },
+              "permissions": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatPermissions"
+              },
+              "providerId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatProviderId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "workspaceMode": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatWorkspaceMode"
+              }
+            },
+            "required": [
+              "operationId",
+              "providerId",
+              "model",
+              "permissions",
+              "workspaceMode"
+            ],
+            "type": "object"
+          },
+          "ChatThreadDeleteParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadGetParams": {
+            "additionalProperties": false,
+            "properties": {
+              "beforeSeq": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatMessagePageLimit"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+              }
+            },
+            "required": [
+              "threadId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatThreadId": {
+            "maxLength": 32,
+            "minLength": 32,
+            "not": {
+              "pattern": "[^0-9a-f]"
+            },
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "ChatThreadUpdateParams": {
+            "additionalProperties": false,
+            "description": "Omitted fields stay unchanged; `effort: null` clears it back to the provider default.",
+            "properties": {
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatModelId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              },
+              "threadId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadId"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "operationId",
+              "threadId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ChatThreadsListParams": {
+            "additionalProperties": false,
+            "properties": {
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "ChatTitle": {
+            "maxLength": 200,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string"
+          },
+          "ChatWorkspaceMode": {
+            "enum": [
+              "project",
+              "private"
+            ],
+            "type": "string"
+          },
+          "CommitMessage": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 16384
+          },
+          "Confirmed": {
+            "enum": [
+              "confirmed"
+            ],
+            "type": "string"
+          },
+          "DecimalU64": {
+            "maxLength": 20,
+            "not": {
+              "pattern": "[^0-9]"
+            },
+            "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$",
+            "type": "string"
+          },
+          "DestinationState": {
+            "enum": [
+              "absent"
+            ],
+            "type": "string"
+          },
+          "DiffView": {
+            "enum": [
+              "index",
+              "worktree"
+            ],
+            "type": "string"
+          },
+          "DisplayText": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 4096
+          },
+          "EntryId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "EntryName": {
+            "maxLength": 255,
+            "minLength": 1,
+            "not": {
+              "anyOf": [
+                {
+                  "pattern": "[/\\\\\\u0000-\\u001F\\u007F-\\u009F]"
+                },
+                {
+                  "enum": [
+                    ".",
+                    ".."
+                  ]
+                }
+              ]
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 255
+          },
+          "EventCursor": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "FileMutationContext": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              }
+            },
+            "required": [
+              "operationId",
+              "context"
+            ],
+            "type": "object"
+          },
+          "FileRevision": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "FilesCreateParams": {
+            "additionalProperties": false,
+            "properties": {
+              "destination": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DestinationState"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileMutationContext"
+              },
+              "name": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryName"
+              },
+              "parentEntryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "parentRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              }
+            },
+            "required": [
+              "mutation",
+              "parentEntryId",
+              "parentRevision",
+              "name",
+              "destination"
+            ],
+            "type": "object"
+          },
+          "FilesListParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "parentEntryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              }
+            },
+            "required": [
+              "context",
+              "parentEntryId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "FilesReadParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "fileRevision": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxBytes": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PreviewLimit"
+              },
+              "offset": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "context",
+              "entryId",
+              "offset",
+              "maxBytes"
+            ],
+            "type": "object"
+          },
+          "FilesRemoveParams": {
+            "additionalProperties": false,
+            "properties": {
+              "confirmation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/Confirmed"
+              },
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "fileRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileMutationContext"
+              },
+              "parentEntryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "parentRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              }
+            },
+            "required": [
+              "mutation",
+              "entryId",
+              "fileRevision",
+              "parentEntryId",
+              "parentRevision",
+              "confirmation"
+            ],
+            "type": "object"
+          },
+          "FilesRenameParams": {
+            "additionalProperties": false,
+            "properties": {
+              "destination": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DestinationState"
+              },
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "fileRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileMutationContext"
+              },
+              "name": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryName"
+              },
+              "sourceParentId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "sourceParentRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              },
+              "targetParentId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "targetParentRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              }
+            },
+            "required": [
+              "mutation",
+              "entryId",
+              "fileRevision",
+              "sourceParentId",
+              "sourceParentRevision",
+              "targetParentId",
+              "targetParentRevision",
+              "name",
+              "destination"
+            ],
+            "type": "object"
+          },
+          "FilesSearchNamesParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "parentEntryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "query": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/SearchText"
+              }
+            },
+            "required": [
+              "context",
+              "parentEntryId",
+              "query",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "FilesStatParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "fileRevision": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "context",
+              "entryId"
+            ],
+            "type": "object"
+          },
+          "FilesWatchParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              }
+            },
+            "required": [
+              "context",
+              "entryId"
+            ],
+            "type": "object"
+          },
+          "GitCommitParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expected": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitPreconditions"
+              },
+              "message": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/CommitMessage"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitMutationContext"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              }
+            },
+            "required": [
+              "mutation",
+              "repositoryId",
+              "expected",
+              "message"
+            ],
+            "type": "object"
+          },
+          "GitDiffParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "entryId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              },
+              "stateToken": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              },
+              "view": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DiffView"
+              }
+            },
+            "required": [
+              "context",
+              "repositoryId",
+              "stateToken",
+              "view",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "GitLogParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              },
+              "stateToken": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              }
+            },
+            "required": [
+              "context",
+              "repositoryId",
+              "stateToken",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "GitMutationContext": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              }
+            },
+            "required": [
+              "operationId",
+              "context"
+            ],
+            "type": "object"
+          },
+          "GitNetworkParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedRefs": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitMutationContext"
+              },
+              "refId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RefId"
+              },
+              "remoteId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RemoteId"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              }
+            },
+            "required": [
+              "mutation",
+              "repositoryId",
+              "remoteId",
+              "refId",
+              "expectedRefs"
+            ],
+            "type": "object"
+          },
+          "GitPreconditions": {
+            "additionalProperties": false,
+            "properties": {
+              "head": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              },
+              "index": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              }
+            },
+            "required": [
+              "head",
+              "index"
+            ],
+            "type": "object"
+          },
+          "GitPullParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expected": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitPreconditions"
+              },
+              "expectedRefs": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              },
+              "expectedWorktree": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PullMode"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitMutationContext"
+              },
+              "refId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RefId"
+              },
+              "remoteId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RemoteId"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              }
+            },
+            "required": [
+              "mutation",
+              "repositoryId",
+              "remoteId",
+              "refId",
+              "expectedRefs",
+              "expected",
+              "expectedWorktree",
+              "mode"
+            ],
+            "type": "object"
+          },
+          "GitShowParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "objectId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/ObjectId"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              },
+              "stateToken": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+              }
+            },
+            "required": [
+              "context",
+              "repositoryId",
+              "stateToken",
+              "objectId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "GitStageParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expected": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitPreconditions"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitMutationContext"
+              },
+              "paths": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/BoundedList2"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              }
+            },
+            "required": [
+              "mutation",
+              "repositoryId",
+              "expected",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "GitStagePath": {
+            "additionalProperties": false,
+            "properties": {
+              "entryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/EntryId"
+              },
+              "fileRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/FileRevision"
+              }
+            },
+            "required": [
+              "entryId",
+              "fileRevision"
+            ],
+            "type": "object"
+          },
+          "GitStatusParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "limit": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PageLimit"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              },
+              "stateToken": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/RepoStateToken"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "context",
+              "repositoryId",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "GitUnstageParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expected": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitPreconditions"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/GitMutationContext"
+              },
+              "paths": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/BoundedList3"
+              },
+              "repositoryId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RepositoryId"
+              }
+            },
+            "required": [
+              "mutation",
+              "repositoryId",
+              "expected",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "HostProfileId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "LeaseBinding": {
+            "additionalProperties": false,
+            "properties": {
+              "token": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/LeaseToken"
+              },
+              "version": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "token",
+              "version"
+            ],
+            "type": "object"
+          },
+          "LeaseToken": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "MovePlacement": {
+            "enum": [
+              "before",
+              "after"
+            ],
+            "type": "string"
+          },
+          "MutationContext": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "expectedRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              }
+            },
+            "required": [
+              "operationId",
+              "context",
+              "expectedRevision"
+            ],
+            "type": "object"
+          },
+          "ObjectId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "OperationCancelParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              }
+            },
+            "required": [
+              "context",
+              "operationId"
+            ],
+            "type": "object"
+          },
+          "OperationId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "OperationStatusParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "operationId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationId"
+              }
+            },
+            "required": [
+              "context",
+              "operationId"
+            ],
+            "type": "object"
+          },
+          "PageLimit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "PaneId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "PreviewLimit": {
+            "maximum": 1048576,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "PullMode": {
+            "enum": [
+              "ff-only"
+            ],
+            "type": "string"
+          },
+          "RefId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "RemoteId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "RepoStateToken": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "RepositoryId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "RequestId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "RpcCall": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "workspace.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "workspace.capabilities",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "workspace.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceSubscribeParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.split",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalSplitParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.rename",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalRenameParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.move",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalMoveParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.close",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalCloseParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.restart",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalRestartParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.attach",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.snapshot",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.ack",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalAckParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.claim",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalClaimParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.renew",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalLeaseParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.release",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalLeaseParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.input",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalInputParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "terminal.resize",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalResizeParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesListParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.stat",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesStatParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.read",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.searchNames",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesSearchNamesParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.watch",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesWatchParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.mkdir",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.rename",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesRenameParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "files.remove",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/FilesRemoveParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.repositories",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceReadParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.status",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitStatusParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.diff",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitDiffParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.log",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitLogParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.show",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitShowParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.stage",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitStageParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.unstage",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitUnstageParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.commit",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitCommitParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.fetch",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitNetworkParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.push",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitNetworkParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "git.pull",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/GitPullParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.providers",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatProvidersParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.threads.list",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadsListParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.get",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadGetParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.subscribe",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatSubscribeParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.create",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadCreateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.update",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadUpdateParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.thread.delete",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatThreadDeleteParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.send",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatSendParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "chat.stop",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/ChatStopParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "operation.status",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationStatusParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "const": "operation.cancel",
+                    "type": "string"
+                  },
+                  "params": {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/OperationCancelParams"
+                  }
+                },
+                "required": [
+                  "method",
+                  "params"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RuntimeId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SearchText": {
+            "maxLength": 256,
+            "minLength": 1,
+            "not": {
+              "pattern": "[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]"
+            },
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 256
+          },
+          "SessionEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SnapshotEncoding": {
+            "description": "Opt-in snapshot wire encodings. Absent keeps the full-width row encoding\nthat older clients require; older Hosts reject the field entirely.",
+            "oneOf": [
+              {
+                "const": "trimmed-rows-v1",
+                "description": "Rows omit trailing blank default cells; decoders pad them back.",
+                "type": "string"
+              },
+              {
+                "const": "compact-cells-v1",
+                "description": "trimmed-rows-v1 plus cells that omit default-valued fields (text \" \",\nwidth 1, default colors, no flags, underline or hyperlink), in\nsnapshots and in every state delta. Decoders restore the defaults.",
+                "type": "string"
+              }
+            ]
+          },
+          "SplitAxis": {
+            "enum": [
+              "horizontal",
+              "vertical"
+            ],
+            "type": "string"
+          },
+          "SubscriptionId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string",
+            "x-lomi-maxUtf8Bytes": 128
+          },
+          "TabId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "TerminalAckParams": {
+            "additionalProperties": false,
+            "properties": {
+              "subscriptionId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/SubscriptionId"
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              },
+              "throughSeq": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              }
+            },
+            "required": [
+              "terminal",
+              "subscriptionId",
+              "throughSeq"
+            ],
+            "type": "object"
+          },
+          "TerminalClaimParams": {
+            "additionalProperties": false,
+            "properties": {
+              "renderedThroughSeq": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "subscriptionId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/SubscriptionId"
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              }
+            },
+            "required": [
+              "terminal",
+              "subscriptionId",
+              "renderedThroughSeq"
+            ],
+            "type": "object"
+          },
+          "TerminalCloseParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedSession": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "paneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              }
+            },
+            "required": [
+              "mutation",
+              "paneId"
+            ],
+            "type": "object"
+          },
+          "TerminalContext": {
+            "additionalProperties": false,
+            "properties": {
+              "paneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              },
+              "profile": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalProfile"
+              },
+              "sessionEpoch": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/SessionEpoch"
+              },
+              "sessionId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalSessionId"
+              },
+              "workspace": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              }
+            },
+            "required": [
+              "workspace",
+              "paneId",
+              "sessionId",
+              "sessionEpoch",
+              "profile"
+            ],
+            "type": "object"
+          },
+          "TerminalCreateParams": {
+            "additionalProperties": false,
+            "properties": {
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "profileId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/HostProfileId"
+              },
+              "tabName": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DisplayText"
+              }
+            },
+            "required": [
+              "mutation",
+              "tabName",
+              "profileId"
+            ],
+            "type": "object"
+          },
+          "TerminalDimension": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "TerminalInputParams": {
+            "additionalProperties": false,
+            "properties": {
+              "bytes": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/BoundedList"
+              },
+              "inputId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "inputSeq": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "lease": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/LeaseBinding"
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              }
+            },
+            "required": [
+              "terminal",
+              "lease",
+              "inputId",
+              "inputSeq",
+              "bytes"
+            ],
+            "type": "object"
+          },
+          "TerminalLeaseParams": {
+            "additionalProperties": false,
+            "properties": {
+              "lease": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/LeaseBinding"
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              }
+            },
+            "required": [
+              "terminal",
+              "lease"
+            ],
+            "type": "object"
+          },
+          "TerminalMoveParams": {
+            "additionalProperties": false,
+            "properties": {
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "paneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              },
+              "placement": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MovePlacement"
+              },
+              "sourceTabId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TabId"
+              },
+              "targetPaneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              },
+              "targetTabId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TabId"
+              }
+            },
+            "required": [
+              "mutation",
+              "paneId",
+              "sourceTabId",
+              "targetTabId",
+              "targetPaneId",
+              "placement"
+            ],
+            "type": "object"
+          },
+          "TerminalProfile": {
+            "enum": [
+              "lomi-rust-grid-v1-experimental"
+            ],
+            "type": "string"
+          },
+          "TerminalReadParams": {
+            "additionalProperties": false,
+            "properties": {
+              "snapshotEncoding": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/SnapshotEncoding"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              }
+            },
+            "required": [
+              "terminal"
+            ],
+            "type": "object"
+          },
+          "TerminalRenameParams": {
+            "additionalProperties": false,
+            "properties": {
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "name": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DisplayText"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TabId"
+              }
+            },
+            "required": [
+              "mutation",
+              "tabId",
+              "name"
+            ],
+            "type": "object"
+          },
+          "TerminalResizeParams": {
+            "additionalProperties": false,
+            "properties": {
+              "columns": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalDimension"
+              },
+              "lease": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/LeaseBinding"
+              },
+              "resizeSeq": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "rows": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalDimension"
+              },
+              "terminal": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+              }
+            },
+            "required": [
+              "terminal",
+              "lease",
+              "resizeSeq",
+              "columns",
+              "rows"
+            ],
+            "type": "object"
+          },
+          "TerminalRestartParams": {
+            "additionalProperties": false,
+            "properties": {
+              "expectedSession": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/TerminalContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "paneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              },
+              "profileId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/HostProfileId"
+              }
+            },
+            "required": [
+              "mutation",
+              "paneId",
+              "profileId"
+            ],
+            "type": "object"
+          },
+          "TerminalSessionId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "TerminalSplitParams": {
+            "additionalProperties": false,
+            "properties": {
+              "axis": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/SplitAxis"
+              },
+              "mutation": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/MutationContext"
+              },
+              "paneId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/PaneId"
+              },
+              "profileId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/HostProfileId"
+              },
+              "tabId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/TabId"
+              }
+            },
+            "required": [
+              "mutation",
+              "tabId",
+              "paneId",
+              "axis",
+              "profileId"
+            ],
+            "type": "object"
+          },
+          "TimeoutMs": {
+            "maximum": 120000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "WorkspaceContext": {
+            "additionalProperties": false,
+            "properties": {
+              "grantRevision": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "hostAccessEpoch": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "runtimeGeneration": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/DecimalU64"
+              },
+              "runtimeId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/RuntimeId"
+              },
+              "workspaceEpoch": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceEpoch"
+              },
+              "workspaceId": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceId"
+              }
+            },
+            "required": [
+              "workspaceId",
+              "workspaceEpoch",
+              "runtimeId",
+              "runtimeGeneration",
+              "hostAccessEpoch",
+              "grantRevision"
+            ],
+            "type": "object"
+          },
+          "WorkspaceEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "WorkspaceReadParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              }
+            },
+            "required": [
+              "context"
+            ],
+            "type": "object"
+          },
+          "WorkspaceSubscribeParams": {
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "#/components/schemas/RpcEnvelope/$defs/WorkspaceContext"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RpcEnvelope/$defs/EventCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "context"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/RpcEnvelope/$defs/RpcCall"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RpcEnvelope/$defs/RequestId"
+          },
+          "timeoutMs": {
+            "$ref": "#/components/schemas/RpcEnvelope/$defs/TimeoutMs"
+          }
+        },
+        "required": [
+          "requestId",
+          "timeoutMs",
+          "call"
+        ],
+        "title": "RpcEnvelope",
+        "type": "object"
+      },
       "RpcRequest": {
         "$defs": {
           "ApplicationMajor": {
@@ -24854,6 +27807,77 @@
         "title": "TerminalContext",
         "type": "object"
       },
+      "TerminalOpen": {
+        "$defs": {
+          "PaneId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "SessionEpoch": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "TerminalDimension": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "WorkspaceId": {
+            "maxLength": 36,
+            "minLength": 36,
+            "not": {
+              "const": "00000000-0000-0000-0000-000000000000"
+            },
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "afterSeq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cols": {
+            "$ref": "#/components/schemas/TerminalOpen/$defs/TerminalDimension"
+          },
+          "paneId": {
+            "$ref": "#/components/schemas/TerminalOpen/$defs/PaneId"
+          },
+          "rows": {
+            "$ref": "#/components/schemas/TerminalOpen/$defs/TerminalDimension"
+          },
+          "sessionEpoch": {
+            "$ref": "#/components/schemas/TerminalOpen/$defs/SessionEpoch"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/TerminalOpen/$defs/WorkspaceId"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "paneId",
+          "sessionEpoch",
+          "cols",
+          "rows"
+        ],
+        "title": "TerminalOpen",
+        "type": "object"
+      },
       "TerminalStreamFrame": {
         "$defs": {
           "BoundedList": {
@@ -25567,6 +28591,30 @@
           }
         ],
         "title": "TerminalStreamFrame"
+      },
+      "TransferOpen": {
+        "$defs": {
+          "RequestId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "not": {
+              "pattern": "[^A-Za-z0-9_-]"
+            },
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/TransferOpen/$defs/RequestId"
+          }
+        },
+        "required": [
+          "requestId"
+        ],
+        "title": "TransferOpen",
+        "type": "object"
       },
       "WorkspaceContext": {
         "$defs": {

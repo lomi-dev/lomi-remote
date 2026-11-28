@@ -18,6 +18,7 @@ mod operations;
 mod primitives;
 pub mod rpc;
 pub mod streams;
+pub mod tunnel;
 pub use admission::*;
 pub use chat::*;
 pub use errors::*;

@@ -1,4 +1,7 @@
 use lomi_remote_protocol::ipc::*;
+use lomi_remote_protocol::tunnel::{
+    ChatOpen, FilesWatchOpen, Hello, HostGreeting, RpcEnvelope, TerminalOpen, TransferOpen,
+};
 use lomi_remote_protocol::*;
 use schemars::JsonSchema;
 use serde_json::json;
@@ -133,6 +136,15 @@ fn render(root: &std::path::Path) -> Result<Vec<Artifact>, Box<dyn std::error::E
         HostSelfRetirementParams,
         HostEnrollmentRevocationAckParams,
         HostEnrollmentRevocationAckResult
+    );
+    http_schemas!(
+        Hello,
+        HostGreeting,
+        TerminalOpen,
+        ChatOpen,
+        FilesWatchOpen,
+        TransferOpen,
+        RpcEnvelope
     );
     let mut paths = serde_json::Map::new();
     for route in HTTP_ROUTES {

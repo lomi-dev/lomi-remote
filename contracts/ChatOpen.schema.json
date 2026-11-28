@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "ChatAfter": {
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/ChatMessageId"
+        },
+        "streamSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messageId",
+        "streamSeq"
+      ],
+      "type": "object"
+    },
+    "ChatMessageId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "ChatThreadId": {
+      "maxLength": 32,
+      "minLength": 32,
+      "not": {
+        "pattern": "[^0-9a-f]"
+      },
+      "pattern": "^[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "maxLength": 36,
+      "minLength": 36,
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "after": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChatAfter"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "threadId": {
+      "$ref": "#/$defs/ChatThreadId"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/WorkspaceId"
+    }
+  },
+  "required": [
+    "workspaceId",
+    "threadId"
+  ],
+  "title": "ChatOpen",
+  "type": "object"
+}
