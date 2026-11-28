@@ -53,6 +53,7 @@ export function decodeRecords(data) {
     else if (tag === 2) out.push({ type: 'send', bytes: body });
     else if (tag === 3) out.push({ type: 'close' });
     else if (tag === 4) out.push({ type: 'event', event: JSON.parse(decoder.decode(body)) });
+    else if (tag === 5 && len >= 4) out.push({ type: 'stream', stream: view.getUint32(i - len), bytes: body.subarray(4) });
     else throw new Error('BAD_RECORD');
   }
   return out;

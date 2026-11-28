@@ -99,6 +99,8 @@ records. The tunnel's own call results are not shown as `callDone`; unclaimed `c
 * Resume: the core cannot read stream payloads, so the platform's stream decoder reports cursors with
   `tunnel.cursors {stream, cursor}`; read them back (also after `closed`) to fill `hello.resume` of the next
   `tunnel.new`. A cursor is dropped when its stream closes or resets.
+* `directory.decodeMessage` (stateless, handle 0) + payload = one `directory` stream message (postcard
+  `DirectoryMessage`): its serde JSON (`{"snapshot": {...}}` / `{"change": {...}}`); error `malformed`.
 * Message 4 (the Host's first transport message) is a postcard `HostGreeting`, not a frame batch.
 
 Directory: `directory.new {accountId, deviceId}`; `directory.open {accountId, deviceId, minKeyId}`;

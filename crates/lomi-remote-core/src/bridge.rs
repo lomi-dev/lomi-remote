@@ -29,7 +29,7 @@ use crate::session::{
 };
 use crate::tunnel::{self, Tunnel};
 use lomi_remote_crypto::{Identity, Role, SignedBundle};
-use lomi_remote_protocol::tunnel::Hello;
+use lomi_remote_protocol::tunnel::{DirectoryMessage, Hello};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -205,6 +205,11 @@ fn dispatch(h: u32, op: &str, args: &[u8], payload: &[u8]) -> R {
         "device.bundle" => device_bundle(&a, payload),
         "device.signRegistration" => device_sign_registration(&a, payload),
         "tunnel.new" => tunnel_new(&a, payload),
+        // The Host's `directory` stream message (postcard) as JSON for the platform UI.
+        "directory.decodeMessage" => {
+            let m = DirectoryMessage::decode(payload).map_err(|_| fail("malformed"))?;
+            serde_json::to_vec(&m).map_err(|_| fail("malformed"))
+        }
         _ if op.starts_with("tunnel.") => tunnel_op(h, op, &a, payload),
         _ if op.starts_with("link.") => link_op(h, op, &a, payload),
         _ if op.starts_with("directory.") => directory_op(h, op, &a, payload),
