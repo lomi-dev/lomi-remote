@@ -56,10 +56,14 @@ same list, and everything a tunnel sends (calls, DATA) leaves as ordinary `send`
 platform has no `tunnel.onRelay`: it keeps calling `link.onMessage` with every WebSocket message and executes the
 records. The tunnel's own call results are not shown as `callDone`; unclaimed `circuit.closed` is shown as `server`.
 
-* `tunnel.new {link, deviceBundle, hostBundle, hostFingerprint, contractHash, accountId, hostId, hello}` +
+* `tunnel.new {link, directory, deviceBundle, hostBundle, hostFingerprint, contractHash, accountId, hostId, hello}` +
   payload = the 97-byte device identity seed blob (wipe your copy after the call; the core keeps only a
   zeroizing `Identity` until the tunnel is open or closed). Returns `{handle}`. Bundles are the serde JSON of
-  `SignedBundle`; `hostFingerprint` (hex 64) is the pinned Host; `accountId`/`hostId` hex 32; `hello` =
+  `SignedBundle`; `hostFingerprint` (hex 64) is the pinned Host key, taken from `directory.hostPin`, never from the server;
+  `directory` = handle of the directory that holds the pin: the core refuses to create the tunnel unless that
+  directory has a pin for the Host (its id is the dashed UUID of `hostId`) equal to `hostFingerprint`.
+  Errors: `hostKeyChanged` (the server reported another key, not yet accepted), `hostNotPinned`, `pinMismatch`
+  (`hostFingerprint` is not the pin); `accountId`/`hostId` hex 32; `hello` =
   `{deviceName, deviceKind: web|mobile|desktop, authEpoch, hostAccessEpoch, runtimeGeneration,
   resume: [{kind, cursor}], sendDirectory}` (`deviceBundle` is filled in by the core, as serde JSON of the bundle).
 * `tunnel.start {random, +now}`: `random` = 64 hex chars (32 platform random bytes: circuit id, nonce). Sends
@@ -100,7 +104,35 @@ records. The tunnel's own call results are not shown as `callDone`; unclaimed `c
 Directory: `directory.new {accountId, deviceId}`; `directory.open {accountId, deviceId, minKeyId}`;
 `directory.applySession` (payload = the 200 response body), `applyReadyState {state}`,
 `applyEvent {name, data}` (all return `{effect: unchanged | changed | revoked}`), `setHostName`,
-`setWorkspaceName`, `snapshot` (Hosts for the UI), `wipe`, `seal`.
+`setWorkspaceName`, `snapshot` (Hosts for the UI, each with `pinMismatch`), `wipe`, `seal`.
+
+Host key pinning (trust on first use, `src/directory.rs`). A Host entry of the session response or of
+`inventory.changed` may carry `hostFingerprint` (hex 64) and/or `hostBundle` (`SignedBundle` JSON, verified
+against itself; both present must agree, else `malformed`); absent is fine. The first value is pinned.
+An equal value changes nothing. A different value never replaces the pin: the Host gets `pinMismatch: true`
+in `snapshot` and the call returns `effect: changed` (once); the server reporting the pinned value again
+clears it. `directory.hostPin {hostId}` returns `{fingerprint: hex | null, mismatch}`.
+`directory.acceptHostKey {hostId}` (after an explicit user decision) makes the latest server value the pin and
+returns `{changed}`; store the directory again when it is true. Pins are kept apart from the Host list (a Host
+that leaves a snapshot keeps its pin) and are sealed in the blob as an optional `pins` entry; blobs without it
+still open (format version unchanged) and pin on the next session. `tunnel.new` enforces the result (above).
+
+Device identity (stateless, handle 0; the core has no RNG, so the platform supplies the seed bytes).
+`accountId` and `deviceId` are 32 hex chars. The seed blob is the 97-byte `tunnel.new` payload and goes to the
+platform's secure storage (Keychain/Keystore; web: IndexedDB wrapped by a non-extractable WebCrypto key); the
+bundle is public and can always be re-derived from it.
+
+* `device.create {accountId, deviceId, random}`: `random` = at least 192 hex chars (96 platform random bytes, the
+  first 96 are used; `args` holds seed material, so wipe your copy of it). Result = record list (like the link
+  ops): record 1 = JSON `{bundle, fingerprint}` (`bundle` = `SignedBundle` JSON, `fingerprint` = hex 64), record 2
+  = the seed blob.
+* `device.bundle {accountId, deviceId}` + seed blob: `{bundle, fingerprint}`, equal to what `create` returned.
+* `device.signRegistration {accountId, deviceId, challenge}` + seed blob: `{signature}` (hex 128), Ed25519 over
+  the registration message for step 2 of `POST /remote/devices` (`deviceId` is needed because the fingerprint in
+  the message covers it). `challenge` = hex 64 from step 1.
+
+The core wipes every seed copy it owns (`Zeroizing`); wipe the payload and `args` buffers as for `tunnel.new`.
+Errors: `badArgs` (shape, hex, too little random), `badIdentity` (wrong blob or ids).
 
 ## Token refresh and liveness
 
@@ -127,7 +159,7 @@ and the JNI layer and the core wipe their own copies. Swift cannot wipe the `Dat
 bridge makes, so on iOS only the JS array and the core's copy are cleared. The WASM `call` takes its payload by value and wipes the copy in
 linear memory itself, so the web key lives in the worker only for the duration of the call.
 
-`tunnel.new` takes the identity seed blob as payload like the keys above: the JS wrapper, the JNI layer and the
+`tunnel.new` and the `device.*` operations take the identity seed blob as payload like the keys above: the JS wrapper, the JNI layer and the
 WASM core wipe their copies, and a C or Swift caller must wipe its own buffer (the C ABI only borrows it).
 
 Reassembly memory: unfinished logical messages are capped at 4 MiB per tunnel over all streams

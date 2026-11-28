@@ -209,21 +209,37 @@ impl Identity {
             Zeroizing::new(blob[65..97].try_into().map_err(|_| "seed length")?),
         )
     }
+    /// Rebuilds the identity from a 97-byte seed blob (`1 | identity | channel | mailbox`) and
+    /// the ids that frame it; the same blob and ids always give the same bundle. The platform's
+    /// random bytes make a fresh identity (`device.create`).
+    pub fn from_seed_blob(
+        blob: &[u8],
+        account_id: Id,
+        subject_id: Id,
+        role: Role,
+        key_version: u32,
+    ) -> Result<Self> {
+        if blob.len() != 97 || blob[0] != 1 {
+            return Err("invalid identity seed blob".into());
+        }
+        Self::from_seeds(
+            account_id,
+            subject_id,
+            role,
+            key_version,
+            Zeroizing::new(blob[1..33].try_into().map_err(|_| "seed length")?),
+            Zeroizing::new(blob[33..65].try_into().map_err(|_| "seed length")?),
+            Zeroizing::new(blob[65..97].try_into().map_err(|_| "seed length")?),
+        )
+    }
     pub fn import_secret_seed_blob(blob: &[u8], expected: &SignedBundle) -> Result<Self> {
         if blob.len() != 97 || blob[0] != 1 {
             return Err("invalid identity seed blob".into());
         }
         expected.verify(&expected.bundle.fingerprint()?)?;
         let b = &expected.bundle;
-        let identity = Self::from_seeds(
-            b.account_id,
-            b.subject_id,
-            b.role,
-            b.key_version,
-            Zeroizing::new(blob[1..33].try_into().map_err(|_| "seed length")?),
-            Zeroizing::new(blob[33..65].try_into().map_err(|_| "seed length")?),
-            Zeroizing::new(blob[65..97].try_into().map_err(|_| "seed length")?),
-        )?;
+        let identity =
+            Self::from_seed_blob(blob, b.account_id, b.subject_id, b.role, b.key_version)?;
         if identity.signed != *expected {
             return Err("persisted identity bundle mismatch".into());
         }

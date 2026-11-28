@@ -5,7 +5,7 @@ export type LinkRecord =
   | { type: 'send'; bytes: Uint8Array }
   | { type: 'event'; event: { type: string; [key: string]: unknown } };
 export function initializeRemoteCore(moduleOrBytes: BufferSource | WebAssembly.Module): void;
-/** Throws Error('CORE_BROKEN') after a WebAssembly trap; recreate the worker. `directory.seal`/`directory.open` wipe `payload`.
+/** Throws Error('CORE_BROKEN') after a WebAssembly trap; recreate the worker. `directory.seal`/`directory.open`/`tunnel.new`/`device.bundle`/`device.signRegistration` wipe `payload`; `device.create` wipes its encoded args.
  * `handle` 0 for stateless and creating operations. Throws CoreError. */
 export function coreCall(handle: number, op: string, args?: object, payload?: Uint8Array): Uint8Array;
 export function coreJson<T = unknown>(handle: number, op: string, args?: object, payload?: Uint8Array): T;

@@ -14,8 +14,16 @@
 //! updates one known Host; the READY state lists the published Hosts without
 //! workspaces ([`Directory::apply_ready_state`]). `revoked` wipes the directory.
 //!
-//! Blob format v2 (v1 had decimal workspace epochs; a v1 blob is refused with
-//! [`Error::Version`] and must be discarded) (all integers big endian):
+//! Host key pinning (trust on first use): the first fingerprint the server reports for a Host
+//! (`hostFingerprint` or `hostBundle`) is pinned. A later different value never replaces the pin:
+//! it is kept as the pending value, the Host shows `pinMismatch` and the merge reports `Changed`,
+//! until [`Directory::accept_host_key`] (explicit user decision) adopts it. The server reporting
+//! the pinned value again clears the mismatch. Pins live apart from the Host list, so a Host that
+//! drops out of a snapshot and comes back keeps its pin; only `wipe` forgets them.
+//!
+//! Blob format v2 (the optional `pins` plaintext key was added without a version bump: older
+//! blobs open with no pins and pin on the next session; v1 had decimal workspace epochs; a v1
+//! blob is refused with [`Error::Version`] and must be discarded) (all integers big endian):
 //! `"LRDR" | version u8 | key_id u32 | nonce[24] | XChaCha20-Poly1305(plaintext) + tag[16]`.
 //! Associated data: header (first 9 bytes) | len u32 | account id | len u32 | device id.
 //! Plaintext: strict JSON in a fixed key order with Hosts sorted by id, so equal
@@ -123,6 +131,13 @@ impl Host {
     }
 }
 
+/// Pinned Host key and the different value the server reported since, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pin {
+    fingerprint: [u8; 32],
+    pending: Option<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Directory {
     account_id: String,
@@ -130,6 +145,7 @@ pub struct Directory {
     hosts: BTreeMap<String, Host>,
     /// Highest revoked epoch per Host id; entries at or below it are ignored.
     revoked: BTreeMap<String, u64>,
+    pins: BTreeMap<String, Pin>,
     wiped: bool,
 }
 
@@ -183,6 +199,7 @@ impl Directory {
             device_id: device_id.into(),
             hosts: BTreeMap::new(),
             revoked: BTreeMap::new(),
+            pins: BTreeMap::new(),
             wiped: false,
         }
     }
@@ -205,7 +222,47 @@ impl Directory {
     pub fn wipe(&mut self) {
         self.hosts.clear();
         self.revoked.clear();
+        self.pins.clear();
         self.wiped = true;
+    }
+
+    /// Trust on first use for one server report; returns whether the stored state changed.
+    fn observe_fingerprint(&mut self, host_id: &str, reported: Option<[u8; 32]>) -> bool {
+        let Some(fp) = reported else { return false };
+        let Some(pin) = self.pins.get_mut(host_id) else {
+            self.pins.insert(
+                host_id.to_owned(),
+                Pin {
+                    fingerprint: fp,
+                    pending: None,
+                },
+            );
+            return true;
+        };
+        let pending = (fp != pin.fingerprint).then_some(fp);
+        let changed = pin.pending != pending;
+        pin.pending = pending;
+        changed
+    }
+
+    /// The pinned fingerprint and whether the server now reports another one. The platform gives
+    /// the fingerprint to `tunnel.new`, never the server's value.
+    pub fn host_pin(&self, host_id: &str) -> (Option<[u8; 32]>, bool) {
+        self.pins.get(host_id).map_or((None, false), |p| {
+            (Some(p.fingerprint), p.pending.is_some())
+        })
+    }
+
+    /// The user accepts the Host's new key: the pending value becomes the pin. False when
+    /// there is nothing to accept.
+    pub fn accept_host_key(&mut self, host_id: &str) -> bool {
+        self.live().is_ok()
+            && self.pins.get_mut(host_id).is_some_and(|p| {
+                p.pending.take().is_some_and(|n| {
+                    p.fingerprint = n;
+                    true
+                })
+            })
     }
 
     fn live(&self) -> Result<(), Error> {
@@ -279,6 +336,7 @@ impl Directory {
 
     /// Server snapshot: entries are merged monotonically, Hosts missing from it are removed.
     fn merge_snapshot(&mut self, entries: Vec<HostEntry>) -> Result<Effect, Error> {
+        let fps: Vec<_> = entries.iter().map(|e| e.fingerprint).collect();
         let hosts = entries
             .into_iter()
             .map(to_host)
@@ -290,8 +348,13 @@ impl Directory {
         let before = self.hosts.len();
         self.hosts.retain(|id, _| seen.contains(id));
         let mut changed = self.hosts.len() != before;
-        for h in hosts {
+        for (h, fp) in hosts.into_iter().zip(fps) {
+            let id = h.id.clone();
             changed |= self.upsert(h);
+            // A Host refused as revoked is not in the list: its report is not trusted either.
+            if self.hosts.contains_key(&id) {
+                changed |= self.observe_fingerprint(&id, fp);
+            }
         }
         Ok(if changed {
             Effect::Changed
@@ -464,6 +527,21 @@ impl Directory {
         let mut root = Map::new();
         root.insert("hosts".into(), hosts.collect::<Vec<_>>().into());
         root.insert("revoked".into(), revoked.collect::<Vec<_>>().into());
+        if !self.pins.is_empty() {
+            let pins = self.pins.iter().map(|(id, p)| {
+                let mut o = Map::new();
+                o.insert("id".into(), id.clone().into());
+                o.insert(
+                    "fingerprint".into(),
+                    crate::tunnel::hex(&p.fingerprint).into(),
+                );
+                if let Some(n) = &p.pending {
+                    o.insert("pending".into(), crate::tunnel::hex(n).into());
+                }
+                Value::Object(o)
+            });
+            root.insert("pins".into(), pins.collect::<Vec<_>>().into());
+        }
         // Serializing strings, bools and arrays cannot fail.
         serde_json::to_vec(&Value::Object(root)).unwrap_or_default()
     }
@@ -511,6 +589,24 @@ impl Directory {
             let id = str_of(&r, "id")?.to_owned();
             if d.revoked.insert(id, dec(str_of(&r, "epoch")?)?).is_some() {
                 return Err(Error::Malformed);
+            }
+        }
+        // Absent in blobs written before pinning.
+        if root.contains_key("pins") {
+            let fp = |o: &Object, k: &str| -> Result<[u8; 32], Error> {
+                crate::tunnel::unhex(str_of(o, k)?).ok_or(Error::Malformed)
+            };
+            for p in list(&root, "pins")? {
+                let pin = Pin {
+                    fingerprint: fp(&p, "fingerprint")?,
+                    pending: p
+                        .contains_key("pending")
+                        .then(|| fp(&p, "pending"))
+                        .transpose()?,
+                };
+                if d.pins.insert(str_of(&p, "id")?.to_owned(), pin).is_some() {
+                    return Err(Error::Malformed);
+                }
             }
         }
         Ok(d)

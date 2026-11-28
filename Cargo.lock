@@ -2336,6 +2336,7 @@ name = "lomi-remote-core"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305 0.10.1",
+ "ed25519-dalek",
  "jni 0.21.1",
  "lomi-remote-crypto",
  "lomi-remote-protocol",

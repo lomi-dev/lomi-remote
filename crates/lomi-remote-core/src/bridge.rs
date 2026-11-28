@@ -28,12 +28,12 @@ use crate::session::{
     SessionResponse,
 };
 use crate::tunnel::{self, Tunnel};
-use lomi_remote_crypto::{Identity, SignedBundle};
+use lomi_remote_crypto::{Identity, Role, SignedBundle};
 use lomi_remote_protocol::tunnel::Hello;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Live instances per process; a leak in the platform layer fails loudly instead of growing.
 const MAX_HANDLES: usize = 64;
@@ -178,7 +178,7 @@ fn key_at(p: &[u8]) -> Key {
 // ---- dispatch ----
 
 fn dispatch(h: u32, op: &str, args: &[u8], payload: &[u8]) -> R {
-    let a = parse_args(args)?;
+    let mut a = parse_args(args)?;
     match op {
         "version" => Ok(crate::version().as_bytes().to_vec()),
         "frame.decode" => {
@@ -201,6 +201,9 @@ fn dispatch(h: u32, op: &str, args: &[u8], payload: &[u8]) -> R {
             arg_str(&a, "deviceId")?,
         )))),
         "directory.open" => directory_open(&a, payload),
+        "device.create" => device_create(&mut a),
+        "device.bundle" => device_bundle(&a, payload),
+        "device.signRegistration" => device_sign_registration(&a, payload),
         "tunnel.new" => tunnel_new(&a, payload),
         _ if op.starts_with("tunnel.") => tunnel_op(h, op, &a, payload),
         _ if op.starts_with("link.") => link_op(h, op, &a, payload),
@@ -636,11 +639,86 @@ fn bundle_arg(a: &Object, k: &str) -> R<SignedBundle> {
     serde_json::from_value(Value::Object(arg_obj(a, k)?)).map_err(|_| fail("badArgs"))
 }
 
+/// Device identity from the 97-byte seed blob; `accountId` and `deviceId` are 32 hex chars each.
+fn device_identity(a: &Object, seeds: &[u8]) -> R<Identity> {
+    Identity::from_seed_blob(
+        seeds,
+        hex_arg(a, "accountId")?,
+        hex_arg(a, "deviceId")?,
+        Role::Device,
+        1,
+    )
+    .map_err(|_| fail("badIdentity"))
+}
+
+fn device_info(id: &Identity) -> R<Vec<u8>> {
+    let b = id.public_bundle();
+    let fp = b.bundle.fingerprint().map_err(|_| fail("badIdentity"))?;
+    Ok(to_bytes(
+        &json!({ "bundle": b, "fingerprint": tunnel::hex(&fp) }),
+    ))
+}
+
+/// `device.create {accountId, deviceId, random}`: `random` = at least 192 hex chars (96 platform
+/// random bytes; the first 96 are used). Result records: 1 = JSON `{bundle, fingerprint}`,
+/// 2 = the 97-byte seed blob for the platform's secure storage (and `tunnel.new`).
+fn device_create(a: &mut Object) -> R {
+    // The hex seeds sit in the args object: take them out and wipe them on every path.
+    let hex_seeds = match a.remove("random") {
+        Some(Value::String(s)) => Zeroizing::new(s),
+        _ => return Err(fail("badArgs")),
+    };
+    if hex_seeds.len() < 192 {
+        return Err(fail("badArgs"));
+    }
+    let seeds =
+        Zeroizing::new(tunnel::unhex::<96>(&hex_seeds[..192]).ok_or_else(|| fail("badArgs"))?);
+    let mut blob = Zeroizing::new(vec![1u8]);
+    blob.extend_from_slice(&*seeds);
+    let id = device_identity(a, &blob)?;
+    let mut out = Vec::new();
+    record(&mut out, 1, &device_info(&id)?);
+    record(&mut out, 2, &blob);
+    Ok(out)
+}
+
+/// `device.bundle {accountId, deviceId}` + seed blob: `{bundle, fingerprint}`.
+fn device_bundle(a: &Object, payload: &[u8]) -> R {
+    device_info(&device_identity(a, payload)?)
+}
+
+/// `device.signRegistration {accountId, deviceId, challenge}` + seed blob: `{signature}` (hex 64
+/// bytes) over the registration message for `POST /remote/devices` step 2.
+fn device_sign_registration(a: &Object, payload: &[u8]) -> R {
+    let id = device_identity(a, payload)?;
+    let sig = id
+        .sign_device_registration(&hex_arg(a, "challenge")?)
+        .map_err(|_| fail("badIdentity"))?;
+    Ok(to_bytes(&json!({ "signature": tunnel::hex(&sig) })))
+}
+
 /// `tunnel.new` payload: the 97-byte device identity seed blob (the platform wipes its copy).
+/// `directory` (handle) is the pin store: the tunnel is refused unless the directory has a pin for
+/// the Host that equals `hostFingerprint` and reports no key change.
 fn tunnel_new(a: &Object, payload: &[u8]) -> R {
     let lh = u32::try_from(arg_u64(a, "link")?).map_err(|_| fail("badArgs"))?;
-    if !matches!(registry().slots.get(&lh), Some(Slot::Link(_))) {
-        return Err(fail("badHandle"));
+    let dh = u32::try_from(arg_u64(a, "directory")?).map_err(|_| fail("badArgs"))?;
+    let host_uuid = tunnel::uuid_text(&hex_arg(a, "hostId")?);
+    let pin: [u8; 32] = hex_arg(a, "hostFingerprint")?;
+    {
+        let r = registry();
+        if !matches!(r.slots.get(&lh), Some(Slot::Link(_))) {
+            return Err(fail("badHandle"));
+        }
+        let Some(Slot::Dir(d)) = r.slots.get(&dh) else {
+            return Err(fail("badHandle"));
+        };
+        match d.host_pin(&host_uuid) {
+            (_, true) => return Err(fail("hostKeyChanged")),
+            (None, _) => return Err(fail("hostNotPinned")),
+            (Some(p), _) if p != pin => return Err(fail("pinMismatch")),
+            _ => {}
+        }
     }
     let (device, host) = (bundle_arg(a, "deviceBundle")?, bundle_arg(a, "hostBundle")?);
     let identity =
@@ -773,6 +851,7 @@ fn snapshot(d: &Directory) -> Value {
         "wiped": d.is_wiped(),
         "hosts": d.hosts().map(|h| json!({
             "id": h.id, "name": h.name, "online": h.online,
+            "pinMismatch": d.host_pin(&h.id).1,
             "accessEpoch": h.access_epoch.to_string(),
             "runtimeGeneration": h.runtime_generation.to_string(),
             "workspaces": h.workspaces.iter()
@@ -803,6 +882,15 @@ fn directory_op(h: u32, op: &str, a: &Object, payload: &[u8]) -> R {
                 d.set_host_name(arg_str(a, "hostId")?, arg_str(a, "name")?) })),
             "directory.setWorkspaceName" => to_bytes(&json!({ "changed":
                 d.set_workspace_name(arg_str(a, "hostId")?, arg_str(a, "workspaceId")?, arg_str(a, "name")?) })),
+            "directory.hostPin" => {
+                let (fp, mismatch) = d.host_pin(arg_str(a, "hostId")?);
+                to_bytes(
+                    &json!({ "fingerprint": fp.map(|f| tunnel::hex(&f)), "mismatch": mismatch }),
+                )
+            }
+            "directory.acceptHostKey" => {
+                to_bytes(&json!({ "changed": d.accept_host_key(arg_str(a, "hostId")?) }))
+            }
             "directory.snapshot" => to_bytes(&snapshot(d)),
             "directory.wipe" => {
                 d.wipe();

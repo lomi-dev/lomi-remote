@@ -256,7 +256,37 @@ impl FakeHost {
 
 // ---- rig ----
 
+/// A directory that pinned `fingerprint` for the Host on its first session.
+fn pinned_directory(fingerprint: &str) -> u32 {
+    let dir = handle(&call(
+        0,
+        "directory.new",
+        json!({"accountId": "acc", "deviceId": "dev"}),
+        &[],
+    ));
+    apply_session(dir, fingerprint);
+    dir
+}
+
+fn apply_session(dir: u32, fingerprint: &str) -> Vec<u8> {
+    let body = json!({
+        "account": {"id": "acc"}, "sessionExpiresAt": WALL0 + 1,
+        "relay": {"token": "t", "expiresAt": WALL0 + 1},
+        "hosts": [{"hostId": lomi_remote_core::tunnel::uuid_text(&HOST_ID), "online": true,
+            "accessEpoch": "1", "runtimeGeneration": "1", "workspaces": [],
+            "hostFingerprint": fingerprint}],
+        "device": {"state": "registered", "deviceId": "dev"},
+    });
+    call(
+        dir,
+        "directory.applySession",
+        json!({}),
+        body.to_string().as_bytes(),
+    )
+}
+
 struct Rig {
+    dir: u32,
     link: u32,
     tun: u32,
     device: Identity,
@@ -270,6 +300,7 @@ impl Drop for Rig {
     fn drop(&mut self) {
         bridge::free(self.tun);
         bridge::free(self.link);
+        bridge::free(self.dir);
     }
 }
 
@@ -283,7 +314,9 @@ impl Rig {
             json!({"contractHash": HASH, "seed": 1, "silenceMs": 0}),
             &[],
         ));
+        let dir = pinned_directory(&hex(&host.public_bundle().bundle.fingerprint().unwrap()));
         let mut rig = Rig {
+            dir,
             link,
             tun: 0,
             device,
@@ -309,6 +342,7 @@ impl Rig {
         let seed = self.device.export_secret_seed_blob().unwrap();
         let args = json!({
             "link": self.link,
+            "directory": self.dir,
             "deviceBundle": serde_json::to_value(self.device.public_bundle()).unwrap(),
             "hostBundle": serde_json::to_value(self.host.public_bundle()).unwrap(),
             "hostFingerprint": hex(&self.host.public_bundle().bundle.fingerprint().unwrap()),
@@ -805,4 +839,55 @@ fn resume_cursors_go_into_the_next_hello() {
         serde_json::from_slice::<SignedBundle>(&h.device_bundle.0).unwrap(),
         rig.device.public_bundle()
     );
+}
+
+#[test]
+fn tunnel_new_is_refused_on_a_host_key_change_or_without_a_pin() {
+    let rig = Rig::new(json!([]));
+    let fp = hex(&rig.host.public_bundle().bundle.fingerprint().unwrap());
+    let seed = rig.device.export_secret_seed_blob().unwrap();
+    let try_new = |dir: u32, fp: &str| {
+        let args = json!({
+            "link": rig.link, "directory": dir,
+            "deviceBundle": serde_json::to_value(rig.device.public_bundle()).unwrap(),
+            "hostBundle": serde_json::to_value(rig.host.public_bundle()).unwrap(),
+            "hostFingerprint": fp, "contractHash": HASH,
+            "accountId": hex(&ACCOUNT), "hostId": hex(&HOST_ID),
+            "hello": {"deviceName": "Phone", "deviceKind": "mobile", "authEpoch": 1,
+                "hostAccessEpoch": 1, "runtimeGeneration": 1, "resume": [], "sendDirectory": true},
+        });
+        bridge::call(0, "tunnel.new", &serde_json::to_vec(&args).unwrap(), &seed)
+    };
+    let code = |r: Vec<u8>| {
+        assert_eq!(r[0], 1);
+        serde_json::from_slice::<Value>(&r[1..]).unwrap()["code"].clone()
+    };
+    // Unpinned Host (empty directory).
+    let empty = handle(&call(
+        0,
+        "directory.new",
+        json!({"accountId": "acc", "deviceId": "dev"}),
+        &[],
+    ));
+    assert_eq!(code(try_new(empty, &fp)), "hostNotPinned");
+    // The platform passes something other than the pin.
+    assert_eq!(code(try_new(rig.dir, &"00".repeat(32))), "pinMismatch");
+    // The server now reports another key: refused, even with the old pin.
+    let r = apply_session(rig.dir, &"11".repeat(32));
+    assert_eq!(r, br#"{"effect":"changed"}"#);
+    assert_eq!(code(try_new(rig.dir, &fp)), "hostKeyChanged");
+    // After the user accepts it, the new pin is the one to pass.
+    let h = lomi_remote_core::tunnel::uuid_text(&HOST_ID);
+    call(
+        rig.dir,
+        "directory.acceptHostKey",
+        json!({"hostId": h}),
+        &[],
+    );
+    assert_eq!(code(try_new(rig.dir, &fp)), "pinMismatch");
+    // The gate passed (the tunnel itself would fail its handshake: the bundle is the old key).
+    let ok = try_new(rig.dir, &"11".repeat(32));
+    assert_eq!(ok[0], 0);
+    bridge::free(handle(&ok[1..]));
+    bridge::free(empty);
 }

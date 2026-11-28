@@ -4,7 +4,8 @@ const decoder = new TextDecoder();
 let initialized = false;
 let broken = false;
 // Payloads of these operations carry key bytes; the wrapper wipes them after the call.
-const SECRET_PAYLOAD_OPS = new Set(['directory.seal', 'directory.open', 'tunnel.new']);
+const SECRET_PAYLOAD_OPS = new Set(['directory.seal', 'directory.open', 'tunnel.new', 'device.bundle', 'device.signRegistration']);
+// `device.create` takes the seed bytes as hex in `args`; the wrapper wipes its encoded copy.
 
 export class CoreError extends Error {
   constructor(detail) { super(detail.code); this.name = 'CoreError'; this.detail = detail; }
@@ -28,12 +29,16 @@ export function _guard(fn) {
 }
 /** One bridge operation (see README). Returns the data bytes or throws CoreError / CORE_BROKEN. */
 export function coreCall(handle, op, args, payload = new Uint8Array(0)) {
+  const encoded = args === undefined ? new Uint8Array(0) : encoder.encode(JSON.stringify(args));
   try {
-    const out = _guard(() => call(handle, op, args === undefined ? new Uint8Array(0) : encoder.encode(JSON.stringify(args)), payload));
+    const out = _guard(() => call(handle, op, encoded, payload));
     const data = out.subarray(1);
     if (out[0] === 0) return data;
     throw new CoreError(JSON.parse(decoder.decode(data)));
-  } finally { if (SECRET_PAYLOAD_OPS.has(op)) payload.fill(0); }
+  } finally {
+    if (SECRET_PAYLOAD_OPS.has(op)) payload.fill(0);
+    if (op === 'device.create') encoded.fill(0);
+  }
 }
 export function coreFree(handle) { if (!broken) _guard(() => free(handle)); }
 export function coreJson(handle, op, args, payload) { return JSON.parse(decoder.decode(coreCall(handle, op, args, payload))); }

@@ -13,7 +13,8 @@ const OPS: &[&str] = &[
     "tunnel.cursors", "tunnel.start", "tunnel.tick", "tunnel.openStream", "tunnel.send",
     "tunnel.closeStream", "tunnel.close", "directory.applySession", "directory.applyReadyState",
     "directory.applyEvent", "directory.setHostName", "directory.setWorkspaceName",
-    "directory.snapshot", "directory.wipe", "directory.seal", "bogus", "tunnel.", "link.", "",
+    "directory.snapshot", "directory.wipe", "directory.seal", "directory.hostPin", "directory.acceptHostKey", "device.create",
+    "device.bundle", "device.signRegistration", "bogus", "tunnel.", "link.", "",
 ];
 
 fn take<'a>(d: &mut &'a [u8], n: usize) -> &'a [u8] {

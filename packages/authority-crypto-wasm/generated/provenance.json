@@ -14,7 +14,7 @@
     "wasmBindgen": "wasm-bindgen 0.2.126"
   },
   "sourceSha256": {
-    "Cargo.lock": "aebdb77394d82051308b086af5d3691b1a2d32f4947cc419092094cfbc14a5ac",
+    "Cargo.lock": "c87c9241d950e095ae12b58f3c75f59c65962212dfd616666d6482a704f13730",
     "Cargo.toml": "662b75edfd7947a6b1c1dbed2dba4c29b466f344d68a68561553a122fe0761d0",
     "crates/lomi-remote-crypto/.gitignore": "0013c9fb76b8728f13ada5de1d5c76b5734468f5bc2f5f905c0d7185ce9cdd76",
     "crates/lomi-remote-crypto/Cargo.toml": "bff415a89e632ed906d80177c9706b7892533310dfc960d579993d3efa243e7f",
@@ -33,7 +33,7 @@
     "crates/lomi-remote-crypto/src/grant_v3_wire.rs": "15124f260579ee903dc4c09b58125a659c2c0d36cc3fc5b00b26e71556342d66",
     "crates/lomi-remote-crypto/src/host_key_enrollment.rs": "494427eb106774bfb9c47225652ef872a6144cf68cff70160bd41e95c04df7e8",
     "crates/lomi-remote-crypto/src/host_refresh.rs": "e18117598a6f0244fcf0a019fa771c09b038712a53c1e347c87f9661862aece3",
-    "crates/lomi-remote-crypto/src/identity.rs": "5aa399009fe0073d9c15b7a1e6b14a542216d8aa1ec211379f837035fff6c315",
+    "crates/lomi-remote-crypto/src/identity.rs": "a1c402bc114934e4f6e4192309e207b101fd0134273806752300e12cbbbfd4da",
     "crates/lomi-remote-crypto/src/lib.rs": "2430fe62e6fa2c9b9d671b98ec3b5ffd5983f7a14080b04b9308135df5b821e7",
     "crates/lomi-remote-crypto/src/mailbox.rs": "968a8bea289eecae7b763786864f3cc6dedc850f1be4a67128cea4ecd12c8a69",
     "crates/lomi-remote-crypto/src/public_identity_wire.rs": "e71f5cb1641cfe93d879f05d82d4331c1d017ce538fd4255ec2fc7f79c2e4487",
@@ -111,11 +111,11 @@
     "packages/authority-crypto-wasm/src/index.mjs": "6895f78391207e3165b326ff1cb9acc4429afcc715f4301304658cc6829481b7",
     "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
   },
-  "inputWasmSha256": "9acb0db33e9161117ef4ab55ca7ba9f38a6a842b7e9c0bf0c7705010ec6bf75a",
+  "inputWasmSha256": "f69a14a29a88312eeae27e226fb18c4b70a9eb66bd0cc8695192a59eb0f76740",
   "generatedSha256": {
     "authority_crypto.d.ts": "4f7e9f75b09f38b574c091c737512c889fa77093f1b2f85be6921344d59ef165",
     "authority_crypto.js": "442c0b5c5c0b9d6d0045995b816ab3e4a857a75c6853a42baab1e71994c79819",
-    "authority_crypto_bg.wasm": "61270ec21af8b2a04ac5273606ee4e8b14975fe0bb474fbf3754132644c87122",
+    "authority_crypto_bg.wasm": "b6b67b04b7c34e7361bd4d6722d0bbf74422802ee650446f2e3933d007212b30",
     "authority_crypto_bg.wasm.d.ts": "6cedcb4db7a56fdc4651a7b1d55d4a5be03c5f413b7d4ec94ea85948f31cbf1a"
   },
   "scope": "Public canonical identity, enrollment, refresh, window-proof and v3 grant/channel verification; no class, approval, replay or transaction authority.",

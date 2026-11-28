@@ -84,6 +84,9 @@ pub struct HostEntry {
     pub access_epoch: String,
     pub runtime_generation: String,
     pub workspaces: Vec<Workspace>,
+    /// Host key fingerprint the server reports (`hostFingerprint`, or computed from a verified
+    /// `hostBundle`); absent on servers that do not send it. Input for pinning only.
+    pub fingerprint: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,9 +185,40 @@ fn token(o: &Object) -> R<RelayToken> {
     })
 }
 
+/// `hostFingerprint` (64 hex) and/or `hostBundle` (SignedBundle JSON, self-consistent); when both
+/// are present they must agree.
+fn host_fingerprint(h: &Object) -> R<Option<[u8; 32]>> {
+    let fp = match h.get("hostFingerprint") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(crate::tunnel::unhex::<32>)
+                .ok_or(SessionError::Malformed)?,
+        ),
+    };
+    let from_bundle = match h.get("hostBundle") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let b: lomi_remote_crypto::SignedBundle =
+                serde_json::from_value(v.clone()).map_err(|_| SessionError::Malformed)?;
+            let f = b
+                .bundle
+                .fingerprint()
+                .map_err(|_| SessionError::Malformed)?;
+            b.verify(&f).map_err(|_| SessionError::Malformed)?;
+            Some(f)
+        }
+    };
+    match (fp, from_bundle) {
+        (Some(a), Some(b)) if a != b => Err(SessionError::Malformed),
+        (a, b) => Ok(a.or(b)),
+    }
+}
+
 /// One Host entry, as in the startup response and in `inventory.changed` events.
 pub(crate) fn parse_host(h: &Object) -> R<HostEntry> {
     Ok(HostEntry {
+        fingerprint: host_fingerprint(h)?,
         id: string(h, "hostId")?,
         name: opt_string(h, "name")?,
         online: field(h, "online")?

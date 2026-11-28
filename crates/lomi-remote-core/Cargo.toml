@@ -24,3 +24,6 @@ lomi-remote-protocol = { path = "../lomi-remote-protocol" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.21.1"
+
+[dev-dependencies]
+ed25519-dalek = "=2.2.0"

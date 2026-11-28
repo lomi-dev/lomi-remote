@@ -485,3 +485,117 @@ fn v1_blob_is_refused_by_version() {
         Err(Error::Version(1))
     );
 }
+
+// ---- Host key pinning (trust on first use) ----
+
+fn fp_host(id: &str, fp: &str) -> String {
+    host(id, 1, 1, true, &[]).replacen('{', &format!(r#"{{"hostFingerprint":"{fp}","#), 1)
+}
+
+fn inventory(hosts: &[String]) -> lomi_remote_core::json::Object {
+    event(&format!(r#"{{"hosts":[{}]}}"#, hosts.join(",")))
+}
+
+const FP1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const FP2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+fn pin(d: &Directory, id: &str) -> (Option<String>, bool) {
+    let (fp, m) = d.host_pin(id);
+    (fp.map(|f| lomi_remote_core::tunnel::hex(&f)), m)
+}
+
+#[test]
+fn first_report_pins_equal_is_quiet_and_a_different_one_is_a_mismatch() {
+    let mut d = Directory::new(ACC, DEV);
+    // No fingerprint from the server: nothing pinned.
+    d.apply_session(&session(ACC, DEV, &[host("h1", 1, 1, true, &[])]))
+        .unwrap();
+    assert_eq!(pin(&d, "h1"), (None, false));
+    // First report pins.
+    let ev = |fp| {
+        d.clone()
+            .apply_event("inventory.changed", &inventory(&[fp_host("h1", fp)]))
+    };
+    assert_eq!(ev(FP1), Ok(Effect::Changed));
+    d.apply_event("inventory.changed", &inventory(&[fp_host("h1", FP1)]))
+        .unwrap();
+    assert_eq!(pin(&d, "h1"), (Some(FP1.into()), false));
+    // Equal again: nothing to store.
+    assert_eq!(
+        d.apply_event("inventory.changed", &inventory(&[fp_host("h1", FP1)])),
+        Ok(Effect::Unchanged)
+    );
+    // A report without the field does not touch the pin.
+    assert_eq!(
+        d.apply_event(
+            "inventory.changed",
+            &inventory(&[host("h1", 1, 1, true, &[])])
+        ),
+        Ok(Effect::Unchanged)
+    );
+    // Different: not overwritten, flagged, `changed` emitted once.
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP2)])),
+        Ok(Effect::Changed)
+    );
+    assert_eq!(pin(&d, "h1"), (Some(FP1.into()), true));
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP2)])),
+        Ok(Effect::Unchanged)
+    );
+    // The accept adopts the latest server value.
+    assert!(d.accept_host_key("h1"));
+    assert_eq!(pin(&d, "h1"), (Some(FP2.into()), false));
+    assert!(!d.accept_host_key("h1"));
+    // A pin survives the Host dropping out of a snapshot and coming back with another key.
+    d.apply_session(&session(ACC, DEV, &[])).unwrap();
+    d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP1)]))
+        .unwrap();
+    assert_eq!(pin(&d, "h1"), (Some(FP2.into()), true));
+    // Reporting the pinned value again clears the mismatch.
+    assert_eq!(
+        d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP2)])),
+        Ok(Effect::Changed)
+    );
+    assert_eq!(pin(&d, "h1"), (Some(FP2.into()), false));
+}
+
+#[test]
+fn pins_are_sealed_and_blobs_without_pins_open_unpinned() {
+    let mut d = loaded();
+    let old = d.seal(&key(1, 9), N).unwrap(); // no pins: the plaintext is the old shape
+    d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP1)]))
+        .unwrap();
+    d.apply_session(&session(ACC, DEV, &[fp_host("h1", FP2)]))
+        .unwrap();
+    let blob = d.seal(&key(1, 9), N).unwrap();
+    let back = Directory::open(&blob, ACC, DEV, &[key(1, 9)], 0).unwrap();
+    assert_eq!(back, d);
+    assert_eq!(pin(&back, "h1"), (Some(FP1.into()), true));
+    let back = Directory::open(&old, ACC, DEV, &[key(1, 9)], 0).unwrap();
+    assert_eq!(pin(&back, "h1"), (None, false));
+    // The next session pins.
+    let mut back = back;
+    back.apply_session(&session(ACC, DEV, &[fp_host("h1", FP2)]))
+        .unwrap();
+    assert_eq!(pin(&back, "h1"), (Some(FP2.into()), false));
+}
+
+#[test]
+fn host_bundle_pins_its_fingerprint_and_must_agree_with_hostfingerprint() {
+    use lomi_remote_crypto::{Identity, Role};
+    let id = Identity::generate([1; 16], [2; 16], Role::Host, 1).unwrap();
+    let b = id.public_bundle();
+    let fp = lomi_remote_core::tunnel::hex(&b.bundle.fingerprint().unwrap());
+    let with = |extra: String| host("h1", 1, 1, true, &[]).replacen('{', &format!("{{{extra},"), 1);
+    let bundle = format!(r#""hostBundle":{}"#, serde_json::to_string(&b).unwrap());
+    let mut d = Directory::new(ACC, DEV);
+    d.apply_session(&session(ACC, DEV, &[with(bundle.clone())]))
+        .unwrap();
+    assert_eq!(pin(&d, "h1"), (Some(fp.clone()), false));
+    let both = with(format!(r#""hostFingerprint":"{FP1}",{bundle}"#));
+    let body = format!(
+        r#"{{"account":{{"id":"{ACC}"}},"sessionExpiresAt":1795000000000,"relay":{{"token":"t","expiresAt":1795000000000}},"hosts":[{both}],"device":{{"state":"registered","deviceId":"{DEV}"}}}}"#
+    );
+    assert!(parse_session_response(200, body.as_bytes()).is_err());
+}
