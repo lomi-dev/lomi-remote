@@ -86,6 +86,7 @@ mod remote_terminal_lifecycle;
 mod remote_terminal_rename;
 mod rpc;
 mod tunnel_authz;
+mod tunnel_consent;
 mod tunnel_service;
 mod workspace_removal;
 // Root integrates every writer before activating this common owner graph.

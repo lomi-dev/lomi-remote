@@ -88,7 +88,7 @@ pub(super) struct AuthHistorySnapshot {
 
 pub(super) struct SharedOwner {
     domain: Arc<OwnerDomain>,
-    store: Mutex<HostStore>,
+    store: Arc<Mutex<HostStore>>,
 }
 
 impl SharedOwner {
@@ -101,7 +101,7 @@ impl SharedOwner {
         let generation = store.authorization_state()?.generation;
         Ok(Arc::new(Self {
             domain: Arc::new(OwnerDomain::new(generation)),
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
         }))
     }
 

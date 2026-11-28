@@ -73,6 +73,81 @@ pub enum Admission {
 /// epoch is turned into a close by the engine.
 pub trait Policy: Send {
     fn admit(&self, device: &AttestedDevice, hello: &Hello, code: &str) -> Admission;
+    /// What the engine calls: like `admit`, but for a policy that has to find the circuit again
+    /// (approvals, control requests).
+    fn admit_circuit(
+        &self,
+        _circuit: CircuitId,
+        device: &AttestedDevice,
+        hello: &Hello,
+        code: &str,
+    ) -> Admission {
+        self.admit(device, hello, code)
+    }
+    /// The tunnel left the table, for whatever reason; always called, also after a refusal.
+    fn closed(&self, _circuit: CircuitId) {}
+}
+
+/// One entry of the account's device list (READY `state.devices`, EVENT `devices.changed`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceEntry {
+    pub device_id: Id,
+    pub fingerprint: [u8; 32],
+    pub client_class: Option<String>,
+    pub auth_epoch: u64,
+    pub expires_at: u64,
+}
+impl DeviceEntry {
+    pub fn parse(o: &Object) -> Option<Self> {
+        let text = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_owned);
+        Some(Self {
+            device_id: uuid(&text("deviceId")?)?,
+            fingerprint: unhex(&text("fingerprint")?)?,
+            client_class: text("clientClass"),
+            auth_epoch: epoch(o.get("authEpoch")?)?,
+            expires_at: o.get("expiresAt").and_then(Value::as_u64)?,
+        })
+    }
+}
+/// What the relay says about the account's devices, as far as consent cares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeviceEvent {
+    /// A link was admitted: the runtime epochs it is bound to and the full device list
+    /// (`None`: the server did not send one, which is not "no devices").
+    Ready {
+        host_access_epoch: u64,
+        runtime_generation: u64,
+        devices: Option<Vec<DeviceEntry>>,
+    },
+    Changed(DeviceEntry),
+    Revoked {
+        device_id: Id,
+        fingerprint: Option<[u8; 32]>,
+    },
+    HostRevoked,
+}
+impl DeviceEvent {
+    /// `devices.changed` without a `deviceId` (the older `grant.changed` shape) is `None`, and so
+    /// is anything malformed.
+    pub fn from_event(name: &str, data: &Object) -> Option<Self> {
+        match name {
+            "devices.changed" => DeviceEntry::parse(data).map(Self::Changed),
+            "device.revoked" => Some(Self::Revoked {
+                device_id: uuid(data.get("deviceId")?.as_str()?)?,
+                fingerprint: match data.get("fingerprint") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(unhex(v.as_str()?)?),
+                },
+            }),
+            _ => None,
+        }
+    }
+}
+/// Which tunnels must go after a [`DeviceEvent`].
+pub type Closing = Box<dyn Fn(&AttestedDevice) -> bool>;
+/// Keeps the Host's consent in step with the account's device list.
+pub trait Roster: Send {
+    fn apply(&mut self, event: &DeviceEvent) -> Option<Closing>;
 }
 /// Welcomes every device with `Read`; stale only on the attested auth epoch.
 pub struct AutoRead {
@@ -184,6 +259,11 @@ pub enum Command {
         circuit: CircuitId,
         level: Level,
     },
+    /// Sets the level of every live tunnel of the device (control confirmed on the Host).
+    SetLevel {
+        fingerprint: [u8; 32],
+        level: Level,
+    },
     Deny {
         circuit: CircuitId,
     },
@@ -230,7 +310,9 @@ impl Handle {
             data,
         })
     }
-    fn take(&self) -> Vec<Command> {
+    /// What is queued, oldest first (the engine's own drain; tests read it too).
+    #[doc(hidden)]
+    pub fn take(&self) -> Vec<Command> {
         let mut q = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
         q.1 = 0;
         q.0.drain(..).collect()
@@ -405,6 +487,8 @@ pub struct Engine {
     inbox: Handle,
     tunnels: BTreeMap<CircuitId, Tunnel>,
     out: Vec<Out>,
+    /// False while the relay has not confirmed authority recently: nothing new, nothing live.
+    fresh: bool,
 }
 
 fn uuid(s: &str) -> Option<Id> {
@@ -452,6 +536,7 @@ impl Engine {
             inbox,
             tunnels: BTreeMap::new(),
             out: Vec::new(),
+            fresh: true,
         })
     }
 
@@ -485,6 +570,10 @@ impl Engine {
             return;
         };
         if self.tunnels.contains_key(&circuit) {
+            return;
+        }
+        if !self.fresh {
+            self.out.push(Out::Close { circuit });
             return;
         }
         let devices: BTreeSet<Id> = self.tunnels.values().map(|t| t.device.device_id).collect();
@@ -525,6 +614,53 @@ impl Engine {
                 );
             }
             _ => self.out.push(Out::Close { circuit }),
+        }
+    }
+
+    /// Closes (and tells the relay) every tunnel in any phase whose device `pick` selects.
+    pub fn close_where(&mut self, why: &'static str, pick: impl Fn(&AttestedDevice) -> bool) {
+        let hit: Vec<CircuitId> = self
+            .tunnels
+            .iter()
+            .filter(|(_, t)| pick(&t.device))
+            .map(|(c, _)| *c)
+            .collect();
+        for c in hit {
+            self.close_circuit_as(c, why);
+        }
+    }
+    /// Relay authority freshness (the Host decides; 8 s in the uplink). Going stale closes all.
+    pub fn set_fresh(&mut self, fresh: bool) {
+        if self.fresh && !fresh {
+            self.close_where("staleAuthority", |_| true);
+        }
+        self.fresh = fresh;
+    }
+    /// Closes tunnels whose attested device authorization ended (`wall` is Unix ms).
+    pub fn expire(&mut self, wall: u64) {
+        self.close_where("authorizationExpired", |d| d.expires_at <= wall);
+    }
+    /// Earliest attested expiry (Unix ms) over all tunnels.
+    pub fn next_expiry(&self) -> Option<u64> {
+        self.tunnels.values().map(|t| t.device.expires_at).min()
+    }
+    /// A new attestation for a device (`devices.changed`): its tunnels follow the new deadline.
+    pub fn refresh_device(&mut self, e: &DeviceEntry) {
+        for t in self
+            .tunnels
+            .values_mut()
+            .filter(|t| t.device.device_id == e.device_id && t.device.fingerprint == e.fingerprint)
+        {
+            t.device.auth_epoch = e.auth_epoch;
+            t.device.expires_at = e.expires_at;
+        }
+    }
+    /// Sets the level of the device's live tunnels.
+    pub fn set_level(&mut self, fingerprint: &[u8; 32], level: Level) {
+        for t in self.tunnels.values_mut() {
+            if let (Phase::Live(l), true) = (&mut t.phase, t.device.fingerprint == *fingerprint) {
+                l.level = level;
+            }
         }
     }
 
@@ -624,6 +760,7 @@ impl Engine {
             match c {
                 Command::Approve { circuit, level } => self.approve(circuit, level),
                 Command::Deny { circuit } => self.deny(circuit),
+                Command::SetLevel { fingerprint, level } => self.set_level(&fingerprint, level),
                 Command::CloseTunnel { circuit } => self.close_circuit(circuit),
                 Command::Send {
                     circuit,
@@ -676,6 +813,7 @@ impl Engine {
         }
     }
     fn finish(&mut self, circuit: CircuitId, t: Tunnel, why: &str, notify: bool) {
+        self.policy.closed(circuit);
         if matches!(t.phase, Phase::Live(_)) {
             self.service.on_tunnel_close(circuit, why);
         }
@@ -711,7 +849,7 @@ impl Engine {
                 hs.verify_device(&bundle).map_err(|_| HS)?;
                 let code = hs.confirmation_code().map_err(|_| HS)?;
                 let mut noise = hs.into_transport().map_err(|_| HS)?;
-                let verdict = self.policy.admit(&t.device, &hello, &code);
+                let verdict = self.policy.admit_circuit(circuit, &t.device, &hello, &code);
                 if hello.auth_epoch != t.device.auth_epoch
                     && matches!(verdict, Admission::Welcome { .. } | Admission::Pending)
                 {

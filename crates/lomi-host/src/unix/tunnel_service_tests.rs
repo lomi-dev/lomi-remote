@@ -2,7 +2,9 @@
 //! real device core. The test plays the uplink thread: it feeds the engine, applies what the
 //! service workers pushed through the `Handle`, and relays bytes to the device core.
 use super::*;
-use lomi_host_http::uplink::tunnels::{Engine, Out, testing::Scripted};
+use lomi_host_http::uplink::tunnels::{
+    DeviceEntry, DeviceEvent, Engine, Out, Policy, testing::Scripted,
+};
 use lomi_host_store::{DeviceGrant, HostStore, Limits, OperationBinding, ProjectRecord};
 use lomi_remote_core::{
     bridge,
@@ -134,6 +136,15 @@ fn at(mut v: Value) -> Value {
 }
 impl Rig {
     fn new(fx: &Fx, device: Identity, device_id: [u8; 16]) -> Self {
+        Self::with_consent(fx, device, device_id, None)
+    }
+    /// With a consent, it is the engine's policy and the service's source of control prompts.
+    fn with_consent(
+        fx: &Fx,
+        device: Identity,
+        device_id: [u8; 16],
+        consent: Option<DeviceConsent>,
+    ) -> Self {
         let host = Identity::import_secret_seed_blob(
             &fx.host.export_secret_seed_blob().unwrap(),
             &fx.host.public_bundle(),
@@ -159,14 +170,21 @@ impl Rig {
             &vector("ready-device"),
         );
         let inbox = Handle::new(|| {});
+        let policy: Box<dyn Policy> = match &consent {
+            Some(c) => {
+                c.set_handle(inbox.clone());
+                c.policy()
+            }
+            None => Box::new(Scripted::default()),
+        };
         let engine = Engine::new(
             Config {
                 identity: host,
                 host_id: HOST_ID,
                 contract_hash: unhex(HASH).unwrap(),
             },
-            Box::new(Scripted::default()),
-            service_for_test(Arc::downgrade(&fx.coordinator), inbox.clone()),
+            policy,
+            service_for_test(Arc::downgrade(&fx.coordinator), inbox.clone(), consent),
             inbox,
         )
         .unwrap();
@@ -250,7 +268,7 @@ impl Rig {
                         "clientClass": "native",
                         "attestation": {
                             "fingerprint": hex(&self.device.public_bundle().bundle.fingerprint().unwrap()),
-                            "authEpoch": "1", "expiresAt": WALL0,
+                            "authEpoch": "1", "expiresAt": now() + 3_600_000,
                         },
                     },
                 });
@@ -810,6 +828,61 @@ fn rpc_files_read_ok_and_unshared_workspace_refused() {
             "context": other, "parentEntryId": root, "cursor": null, "limit": 50}}),
     );
     assert_eq!(error_code(&mismatch), "WORKSPACE_UNSHARED", "{mismatch}");
+}
+
+#[test]
+fn control_is_refused_at_read_until_the_owner_approves_the_code() {
+    let mut fx = Fx::new(false);
+    let device = fx.devices[1].take().unwrap();
+    let key = device.public_bundle().bundle.fingerprint().unwrap();
+    // A device the Host has not seen: D5 variant 2 stores it at Read, control unconfirmed.
+    fx.store(|s| s.revoke(&key).unwrap());
+    let store = fx.coordinator.owner.store_handle();
+    let consent = DeviceConsent::new(store, ACCOUNT, Mode::Auto);
+    consent.roster().apply(&DeviceEvent::Ready {
+        host_access_epoch: 2,
+        runtime_generation: 3,
+        devices: Some(vec![DeviceEntry {
+            device_id: [0xc4; 16],
+            fingerprint: key,
+            client_class: None,
+            auth_epoch: 1,
+            expires_at: now() + 3_600_000,
+        }]),
+    });
+    let mut rig = Rig::with_consent(&fx, device, [0xc4; 16], Some(consent.clone()));
+    rig.start();
+    let ws = fx.ws();
+    let create = |id: &str| {
+        json!({"method": "chat.thread.create", "params": {
+            "operationId": uuid::Uuid::new_v4().to_string(), "providerId": "claude", "model": "m",
+            "effort": null, "permissions": "read-only", "workspaceMode": "project", "title": id}})
+    };
+    // Read already works.
+    let providers = rig.request(
+        0,
+        "providers",
+        Some(&ws),
+        json!({"method": "chat.providers", "params": {}}),
+    );
+    assert_eq!(providers["type"], "result", "{providers}");
+    // A mutation is refused and puts the code in front of the owner.
+    let refused = rig.request(0, "before", Some(&ws), create("a"));
+    assert_eq!(error_code(&refused), "SCOPE_DENIED", "{refused}");
+    let pending = consent.pending();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(consent.approve(pending[0].circuit));
+    rig.settle(Vec::new());
+    // The grant now records the confirmation, and the live tunnel is at Control.
+    assert!(fx.store(|s| {
+        s.get_grant(&key)
+            .unwrap()
+            .unwrap()
+            .control_confirmed_at
+            .is_some()
+    }));
+    let allowed = rig.request(0, "after", Some(&ws), create("b"));
+    assert_eq!(allowed["type"], "result", "{allowed}");
 }
 
 #[test]

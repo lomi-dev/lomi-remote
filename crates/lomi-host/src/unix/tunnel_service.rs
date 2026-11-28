@@ -28,14 +28,12 @@ use super::{
     remote_files,
     remote_files_watch::RemoteWatch,
     remote_terminal::{fault, lease_result, terminal as terminal_error},
-    tunnel_authz::{Denied, DeviceAccess, Target, authorize, call_workspace},
+    tunnel_authz::{Denied, DeviceAccess, Granted, Target, authorize, call_workspace},
+    tunnel_consent::{DeviceConsent, Mode},
 };
 use lomi_host_http::uplink::{
     self,
-    tunnels::{
-        AttestedDevice, AutoRead, CircuitId, Command, Config, Handle, Policy, Streams,
-        TunnelService,
-    },
+    tunnels::{AttestedDevice, CircuitId, Command, Config, Handle, Streams, TunnelService},
 };
 use lomi_host_store::ProjectRecord;
 use lomi_remote_crypto::Identity;
@@ -109,6 +107,7 @@ struct Ctx {
     circuit: CircuitId,
     device: AttestedDevice,
     principal: AuthenticatedConnection,
+    consent: Option<DeviceConsent>,
     view: Mutex<Option<Arc<View>>>,
 }
 struct View {
@@ -174,6 +173,24 @@ impl Ctx {
         });
         *cached = Some(v.clone());
         Ok(v)
+    }
+    /// `authorize`. When only the owner's code is missing, first re-read (it may just have been
+    /// confirmed; `view` is then replaced), and if it still is, ask for it. The client gets
+    /// SCOPE_DENIED either way (the error has no room for the code; the owner sees it on the Host).
+    fn check(&self, view: &mut Arc<View>, target: &Target<'_>) -> Result<Granted, Denied> {
+        let mut r = authorize(&view.access, target, now_ms());
+        if r == Err(Denied::ControlNotConfirmed) {
+            if let Ok(fresh) = self.view(true) {
+                *view = fresh;
+                r = authorize(&view.access, target, now_ms());
+            }
+            if r == Err(Denied::ControlNotConfirmed)
+                && let Some(consent) = &self.consent
+            {
+                let _ = consent.request_control(self.circuit);
+            }
+        }
+        r
     }
     fn chat_grant(&self, view: &View, workspace: &WorkspaceId) -> Result<Grant, RemoteError> {
         Ok(Grant {
@@ -262,7 +279,7 @@ fn rpc(ctx: &Ctx, envelope: &RpcEnvelope) -> Result<RpcResult, RemoteError> {
         .workspace_id
         .or_else(|| call_workspace(call).copied())
         .ok_or_else(|| fault(ErrorCode::InvalidArgument))?;
-    let view = ctx.view(false)?;
+    let mut view = ctx.view(false)?;
     let mut target = Target::rpc(&workspace, call).map_err(denied)?;
     let coordinator = ctx.coordinator()?;
     if let RpcCall::ChatSend(p) = call {
@@ -276,7 +293,7 @@ fn rpc(ctx: &Ctx, envelope: &RpcEnvelope) -> Result<RpcResult, RemoteError> {
             target = target.with_chat_mode(remote_chat::to_thread(&thread)?.permissions);
         }
     }
-    authorize(&view.access, &target, now_ms()).map_err(denied)?;
+    ctx.check(&mut view, &target).map_err(denied)?;
     let project = view
         .project(&workspace)
         .ok_or_else(|| fault(ErrorCode::WorkspaceUnshared))?;
@@ -719,9 +736,9 @@ impl Hub {
         }
         let ctx = self.ctx.clone();
         let result = (|| {
-            let view = ctx.view(false)?;
+            let mut view = ctx.view(false)?;
             let ws = term.terminal.workspace.workspace_id;
-            authorize(&view.access, &Target::message(&ws, call.method()), now_ms())
+            ctx.check(&mut view, &Target::message(&ws, call.method()))
                 .map_err(denied)?;
             term.control(&ctx, &call)
         })();
@@ -1309,6 +1326,7 @@ struct Tun {
 pub(super) struct HostService {
     coordinator: Weak<Coordinator>,
     handle: Arc<OnceLock<Handle>>,
+    consent: Option<DeviceConsent>,
     tunnels: HashMap<CircuitId, Tun>,
     /// The tunnel whose `directory()` call is next: the engine calls it right after opening.
     opening: Option<CircuitId>,
@@ -1335,6 +1353,7 @@ impl TunnelService for HostService {
             circuit: s.circuit(),
             device: device.clone(),
             principal: AuthenticatedConnection::new(actor),
+            consent: self.consent.clone(),
             view: Mutex::new(None),
         });
         let (rpc, rpc_rx) = sync_channel(JOBS);
@@ -1449,7 +1468,7 @@ impl TunnelService for HostService {
 /// Until P3a.10 supplies the real policy every device is welcomed with `Read`.
 pub(super) fn install(
     coordinator: &Weak<Coordinator>,
-    identity: impl FnOnce() -> Option<(Identity, [u8; 16])>,
+    identity: impl FnOnce() -> Option<(Identity, [u8; 16], [u8; 16])>,
 ) -> bool {
     if !uplink::enabled() {
         return true;
@@ -1457,26 +1476,31 @@ pub(super) fn install(
     let Some(contract_hash) = uplink::contract_hash() else {
         return true;
     };
-    let Some((identity, host_id)) = identity() else {
+    let Some((identity, host_id, account)) = identity() else {
         return false;
     };
+    let Some(owner) = coordinator.upgrade() else {
+        return false;
+    };
+    // D5 variant 2: read at once, control after the code is confirmed on the Host. No setting yet.
+    let consent = DeviceConsent::new(owner.owner.store_handle(), account, Mode::Auto);
     let cell = Arc::new(OnceLock::new());
     let service = HostService {
         coordinator: coordinator.clone(),
         handle: cell.clone(),
+        consent: Some(consent.clone()),
         tunnels: HashMap::new(),
         opening: None,
     };
-    let policy: Box<dyn Policy> = Box::new(AutoRead {
-        host_access_epoch: 0,
-        runtime_generation: 0,
-    });
+    let policy = consent.policy();
     let config = Config {
         identity,
         host_id,
         contract_hash,
     };
     if let Some(handle) = uplink::install_tunnels(config, policy, Box::new(service)) {
+        uplink::install_roster(consent.roster());
+        consent.set_handle(handle.clone());
         let _ = cell.set(handle);
     }
     true
@@ -1490,12 +1514,14 @@ mod tests;
 pub(super) fn service_for_test(
     coordinator: Weak<Coordinator>,
     handle: Handle,
+    consent: Option<DeviceConsent>,
 ) -> Box<dyn TunnelService> {
     let cell = Arc::new(OnceLock::new());
     let _ = cell.set(handle);
     Box::new(HostService {
         coordinator,
         handle: cell,
+        consent,
         tunnels: HashMap::new(),
         opening: None,
     })

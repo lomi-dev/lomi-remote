@@ -3996,7 +3996,9 @@ fn run_with_apis_inner(
             tunnels_ready = super::tunnel_service::install(&coordinator, || {
                 auth.tunnel_identity(now)
                     .ok()
-                    .map(|(identity, host)| (identity, host.to_bytes()))
+                    .map(|(identity, host, account)| {
+                        (identity, host.to_bytes(), account.to_bytes())
+                    })
             });
         }
         if ingress.has_active_git_writer()

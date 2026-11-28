@@ -10,6 +10,12 @@ pub(in super::super) struct TunnelView {
 }
 
 impl SharedOwner {
+    /// The same store the owner uses, for device consent (it writes grants itself).
+    pub(in super::super) fn store_handle(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<lomi_host_store::HostStore>> {
+        self.store.clone()
+    }
     pub(in super::super) fn tunnel_view(
         &self,
         operation: &Operation<'_>,
