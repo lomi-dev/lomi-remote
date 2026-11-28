@@ -274,6 +274,11 @@ pub enum Command {
     Deny {
         circuit: CircuitId,
     },
+    /// Tells the device the owner is asked to confirm control (`Control` frame on stream 0).
+    ControlPending {
+        circuit: CircuitId,
+        code: u32,
+    },
     /// Closes every tunnel of the device (the owner revoked it on the Host).
     CloseDevice {
         fingerprint: [u8; 32],
@@ -771,6 +776,14 @@ impl Engine {
             match c {
                 Command::Approve { circuit, level } => self.approve(circuit, level),
                 Command::Deny { circuit } => self.deny(circuit),
+                Command::ControlPending { circuit, code } => {
+                    if let Some(l) = self.live(circuit)
+                        && let Ok(f) = TunnelFrame::control_pending(code, APPROVAL_DEADLINE_MS)
+                    {
+                        l.urgent.push_back(f);
+                        touched.insert(circuit);
+                    }
+                }
                 Command::SetLevel { fingerprint, level } => self.set_level(&fingerprint, level),
                 Command::CloseTunnel { circuit } => self.close_circuit(circuit),
                 Command::CloseDevice { fingerprint } => {

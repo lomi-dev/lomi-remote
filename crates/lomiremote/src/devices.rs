@@ -2,15 +2,20 @@
 //! owner-local `devices.*` calls. The TUI screen reuses the helpers here.
 use clap::ArgMatches;
 use lomi_remote_protocol::ipc::{
-    LocalCall, LocalDeviceApproval, LocalDeviceGrant, LocalDeviceLevel, LocalDeviceMode,
-    LocalDeviceModeState, LocalDeviceReason, LocalDeviceRevoke, LocalDeviceTarget, LocalDevices,
-    LocalResult,
+    LocalCall, LocalDeviceApproval, LocalDeviceApprove, LocalDeviceGrant, LocalDeviceLevel,
+    LocalDeviceMode, LocalDeviceModeState, LocalDeviceReason, LocalDeviceRevoke, LocalDeviceTarget,
+    LocalDeviceText, LocalDevices, LocalResult,
 };
 use std::fmt::Write;
 
 /// How many leading fingerprint characters are shown (and the fewest that may select a device).
 pub const SHORT: usize = 12;
 const MIN_PREFIX: usize = 4;
+
+/// Exactly the six digits the device shows.
+pub fn valid_code(s: &str) -> bool {
+    s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit())
+}
 
 pub fn short(fingerprint: &str) -> &str {
     fingerprint.get(..SHORT).unwrap_or(fingerprint)
@@ -47,15 +52,12 @@ fn pick<T>(mut hits: Vec<&T>) -> Pick<'_, T> {
         _ => Pick::Many(hits),
     }
 }
-/// The 6-digit code the device shows, or the start (at least 4 characters) of the circuit id.
+/// The start (at least 4 characters) of the circuit id. Only used to deny: approving needs the
+/// code the device shows, which the Host keeps to itself.
 pub fn pick_approval<'a>(
     pending: &'a [LocalDeviceApproval],
     arg: &str,
 ) -> Pick<'a, LocalDeviceApproval> {
-    let by_code: Vec<_> = pending.iter().filter(|p| p.code.as_str() == arg).collect();
-    if !by_code.is_empty() {
-        return pick(by_code);
-    }
     let arg = arg.to_ascii_lowercase();
     pick(if arg.len() < MIN_PREFIX {
         Vec::new()
@@ -98,8 +100,8 @@ pub fn grant_line(g: &LocalDeviceGrant) -> String {
 }
 pub fn approval_line(a: &LocalDeviceApproval) -> String {
     format!(
-        "code {}  {}  {}  ({})",
-        a.code.as_str(),
+        "{}  {}  {}  ({})",
+        &a.circuit.as_str()[..a.circuit.as_str().len().min(8)],
         label(a.device_name.as_str()),
         short(a.fingerprint.as_str()),
         reason(a.reason)
@@ -164,8 +166,25 @@ pub fn run(
             Ok(_) => 6,
             Err(code) => code,
         },
-        Some((verb @ ("approve" | "deny"), sub)) => {
-            let arg = sub.get_one::<String>("code").cloned().unwrap_or_default();
+        Some(("approve", sub)) => {
+            let code = sub.get_one::<String>("code").cloned().unwrap_or_default();
+            if !valid_code(&code) {
+                eprintln!("The code is the 6 digits the device shows.");
+                return 2;
+            }
+            let Ok(code) = LocalDeviceText::try_from(code) else {
+                return 2;
+            };
+            match call(LocalCall::DevicesApprove(LocalDeviceApprove { code })) {
+                Ok(r) => finish(r, "Approved\n".to_owned()),
+                Err(code) => code,
+            }
+        }
+        Some(("deny", sub)) => {
+            let arg = sub
+                .get_one::<String>("circuit")
+                .cloned()
+                .unwrap_or_default();
             let d = match list(call) {
                 Ok(d) => d,
                 Err(code) => return code,
@@ -186,13 +205,8 @@ pub fn run(
             let target = LocalDeviceTarget {
                 circuit: a.circuit.clone(),
             };
-            let (request, done) = if verb == "approve" {
-                (LocalCall::DevicesApprove(target), "Approved")
-            } else {
-                (LocalCall::DevicesDeny(target), "Denied")
-            };
-            match call(request) {
-                Ok(r) => finish(r, format!("{done}: {}\n", label(a.device_name.as_str()))),
+            match call(LocalCall::DevicesDeny(target)) {
+                Ok(r) => finish(r, format!("Denied: {}\n", label(a.device_name.as_str()))),
                 Err(code) => code,
             }
         }
@@ -262,12 +276,11 @@ mod tests {
     fn text(s: &str) -> LocalDeviceText {
         LocalDeviceText::try_from(s.to_owned()).unwrap()
     }
-    fn approval(circuit: &str, code: &str) -> LocalDeviceApproval {
+    fn approval(circuit: &str) -> LocalDeviceApproval {
         LocalDeviceApproval {
             circuit: text(circuit),
             device_name: text("Phone"),
             fingerprint: text(&"ab".repeat(32)),
-            code: text(code),
             reason: LocalDeviceReason::NewDevice,
             at: DecimalU64(1),
         }
@@ -340,16 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn approvals_are_picked_by_code_or_circuit_prefix() {
-        let a = approval(&"11".repeat(16), "111111");
-        let b = approval(&"12".repeat(16), "222222");
-        let p = [a.clone(), b.clone()];
-        assert_eq!(pick_approval(&p, "222222"), Pick::One(&p[1]));
+    fn denials_are_picked_by_circuit_prefix_never_by_code() {
+        let p = [approval(&"11".repeat(16)), approval(&"12".repeat(16))];
         assert_eq!(pick_approval(&p, "1212"), Pick::One(&p[1]));
         assert!(matches!(pick_approval(&p, "1"), Pick::None), "too short");
-        assert!(matches!(pick_approval(&p, "333333"), Pick::None));
-        let twin = [a.clone(), approval(&"13".repeat(16), "111111")];
-        assert!(matches!(pick_approval(&twin, "111111"), Pick::Many(h) if h.len() == 2));
+        assert!(matches!(pick_approval(&p, "3333"), Pick::None));
     }
 
     #[test]
@@ -373,7 +381,7 @@ mod tests {
         let d = LocalDevices {
             mode: LocalDeviceMode::Confirm,
             grants: BoundedList(vec![grant(&"cd".repeat(32))]),
-            pending: BoundedList(vec![approval(&"11".repeat(16), "123456")]),
+            pending: BoundedList(vec![approval(&"11".repeat(16))]),
         };
         let mut calls = Vec::new();
         let mut host = |c: LocalCall| {
@@ -381,7 +389,10 @@ mod tests {
             Ok(LocalResult::Devices(d.clone()))
         };
         assert_eq!(run(&parse(&["approve", "123456"]), true, &mut host), 0);
-        assert_eq!(run(&parse(&["deny", "999999"]), true, &mut host), 7);
+        // a circuit prefix is not a code: nothing is sent
+        assert_eq!(run(&parse(&["approve", "1111"]), true, &mut host), 2);
+        assert_eq!(run(&parse(&["deny", "9999"]), true, &mut host), 7);
+        assert_eq!(run(&parse(&["deny", "1111"]), true, &mut host), 0);
         assert_eq!(
             run(&parse(&["revoke", "cdcd"]), true, &mut host),
             2,
@@ -391,12 +402,13 @@ mod tests {
             run(&parse(&["revoke", "cdcd", "--confirm"]), true, &mut host),
             0
         );
+        assert!(matches!(&calls[0], LocalCall::DevicesApprove(t) if t.code.as_str() == "123456"));
         assert!(
-            matches!(&calls[1], LocalCall::DevicesApprove(t) if t.circuit.as_str() == "11".repeat(16))
+            matches!(&calls[3], LocalCall::DevicesDeny(t) if t.circuit.as_str() == "11".repeat(16))
         );
         assert!(
             matches!(calls.last(), Some(LocalCall::DevicesRevoke(r)) if r.fingerprint.as_str() == "cd".repeat(32))
         );
-        assert_eq!(calls.len(), 5, "list+approve, list(deny), list+revoke");
+        assert_eq!(calls.len(), 6, "approve, 2x list(deny)+deny, list+revoke");
     }
 }

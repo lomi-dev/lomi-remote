@@ -1,11 +1,12 @@
 //! Devices screen (P3a.12): grants and approvals waiting for the owner, plus the banner that
 //! tells the owner a device connected or asks for control. Talks to the Host's `devices.*` calls.
 use super::{Backend, safe_label, shortcuts, theme};
-use crate::devices::{approval_line, grant_line, mode_name};
+use crate::devices::{approval_line, grant_line, mode_name, valid_code};
 use crossterm::event::{KeyCode, KeyEvent};
 use lomi_remote_protocol::ipc::{
-    LocalCall, LocalDeviceApproval, LocalDeviceGrant, LocalDeviceMode, LocalDeviceModeState,
-    LocalDeviceNoticeKind, LocalDeviceRevoke, LocalDeviceTarget, LocalDevices, LocalResult,
+    LocalCall, LocalDeviceApproval, LocalDeviceApprove, LocalDeviceGrant, LocalDeviceMode,
+    LocalDeviceModeState, LocalDeviceNoticeKind, LocalDeviceRevoke, LocalDeviceTarget,
+    LocalDeviceText, LocalDevices, LocalResult,
 };
 use ratatui::{
     Frame,
@@ -25,6 +26,8 @@ pub(super) struct Devices {
     selected: usize,
     /// A grant waiting for the owner's yes.
     confirm_revoke: Option<LocalDeviceGrant>,
+    /// Digits typed so far for an approval: the code the DEVICE shows (the Host never shows it).
+    code: Option<String>,
     notice: Option<String>,
     message: Option<&'static str>,
 }
@@ -55,20 +58,15 @@ impl Devices {
         {
             if let Some(n) = notices.0.last() {
                 let name = safe_label(n.device_name.as_str());
-                self.notice = Some(match (n.kind, &n.code) {
-                    (LocalDeviceNoticeKind::NewDevice, _) => {
-                        format!("New device connected: {name}")
+                self.notice = Some(match n.kind {
+                    LocalDeviceNoticeKind::NewDevice => format!("New device connected: {name}"),
+                    LocalDeviceNoticeKind::ControlRequested => {
+                        format!("{name} asks for control: type the code it shows")
                     }
-                    (LocalDeviceNoticeKind::ControlRequested, Some(code)) => {
-                        format!("{name} asks for control: code {}", code.as_str())
-                    }
-                    (LocalDeviceNoticeKind::ControlRequested, None) => {
-                        format!("{name} asks for control")
-                    }
-                    (LocalDeviceNoticeKind::GrantsFull, _) => {
+                    LocalDeviceNoticeKind::GrantsFull => {
                         format!("{name} was refused: all device slots are used")
                     }
-                    (LocalDeviceNoticeKind::RateLimited, _) => {
+                    LocalDeviceNoticeKind::RateLimited => {
                         format!("{name} was refused: too many requests")
                     }
                 });
@@ -112,6 +110,27 @@ impl Devices {
             }
             return;
         }
+        if let Some(typed) = &mut self.code {
+            match key.code {
+                KeyCode::Char(c) if c.is_ascii_digit() && typed.len() < 6 => typed.push(c),
+                KeyCode::Backspace => {
+                    typed.pop();
+                }
+                KeyCode::Enter if valid_code(typed) => {
+                    let code = LocalDeviceText::try_from(std::mem::take(typed));
+                    self.code = None;
+                    if let Ok(code) = code {
+                        self.call(
+                            LocalCall::DevicesApprove(LocalDeviceApprove { code }),
+                            backend,
+                        );
+                    }
+                }
+                KeyCode::Esc => self.code = None,
+                _ => {}
+            }
+            return;
+        }
         let rows = self.pending.len() + self.grants.len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q' | 'i') => {
@@ -121,18 +140,13 @@ impl Devices {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(rows.saturating_sub(1)),
             KeyCode::Char('r') => self.refresh(backend),
-            KeyCode::Char('a' | 'x') if self.selected < self.pending.len() => {
+            // Approving never acts on the selected row: the owner types the device's code.
+            KeyCode::Char('a') if !self.pending.is_empty() => self.code = Some(String::new()),
+            KeyCode::Char('x') if self.selected < self.pending.len() => {
                 let target = LocalDeviceTarget {
                     circuit: self.pending[self.selected].circuit.clone(),
                 };
-                self.call(
-                    if key.code == KeyCode::Char('a') {
-                        LocalCall::DevicesApprove(target)
-                    } else {
-                        LocalCall::DevicesDeny(target)
-                    },
-                    backend,
-                );
+                self.call(LocalCall::DevicesDeny(target), backend);
             }
             KeyCode::Char('v') | KeyCode::Delete if self.selected >= self.pending.len() => {
                 self.confirm_revoke = self.grants.get(self.selected - self.pending.len()).cloned();
@@ -213,6 +227,15 @@ impl Devices {
         for (i, g) in self.grants.iter().enumerate() {
             lines.push(row(grant_line(g), self.pending.len() + i));
         }
+        if let Some(typed) = &self.code {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!(" Code shown on the device: {typed:_<6}  (enter approves, esc cancels)"),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         frame.render_widget(Paragraph::new(lines), inner);
         let hints = Rect::new(
             inner.x,
@@ -222,7 +245,7 @@ impl Devices {
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
-                " a approve  x deny  v revoke  m mode  r refresh  esc close",
+                " a approve (type the device's code)  x deny  v revoke  m mode  r refresh  esc close",
                 Style::default().fg(theme::MUTED),
             )),
             hints,

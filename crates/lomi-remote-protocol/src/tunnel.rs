@@ -69,6 +69,9 @@ pub enum FrameType {
     Credit = 3,
     Close = 4,
     Reset = 5,
+    /// Host to device, stream 0 only: the body is a postcard `HostGreeting::ControlPending`
+    /// (the owner is asked to confirm control). Never sent by the device.
+    Control = 6,
 }
 impl FrameType {
     fn parse(v: u8) -> Result<Self, TunnelError> {
@@ -78,6 +81,7 @@ impl FrameType {
             3 => Self::Credit,
             4 => Self::Close,
             5 => Self::Reset,
+            6 => Self::Control,
             _ => return Err(TunnelError::UnknownType),
         })
     }
@@ -113,6 +117,7 @@ impl TunnelFrame {
             FrameType::Credit => self.credit_amount().is_some_and(|n| n > 0),
             FrameType::Close => self.data.is_empty(),
             FrameType::Reset => self.data.len() == 2,
+            FrameType::Control => self.stream_id == 0 && !self.data.is_empty(),
         };
         if ok {
             Ok(())
@@ -122,6 +127,20 @@ impl TunnelFrame {
     }
     fn credit_amount(&self) -> Option<u32> {
         Some(u32::from_be_bytes(self.data.as_slice().try_into().ok()?))
+    }
+    /// The Host's control-approval notice (frame type `Control`).
+    pub fn control_pending(code: u32, deadline_ms: u32) -> Result<Self, TunnelError> {
+        let g = HostGreeting::ControlPending(ControlPending { code, deadline_ms });
+        let f = Self::new(0, FrameType::Control, 0, g.encode()?);
+        f.validate()?;
+        Ok(f)
+    }
+    /// The notice inside a `Control` frame; `None` for any other frame or body.
+    pub fn as_control_pending(&self) -> Option<ControlPending> {
+        match (self.kind, HostGreeting::decode(&self.data)) {
+            (FrameType::Control, Ok(HostGreeting::ControlPending(p))) => Some(p),
+            _ => None,
+        }
     }
     pub fn reset_code(&self) -> Option<u16> {
         Some(u16::from_be_bytes(self.data.as_slice().try_into().ok()?))
@@ -511,6 +530,8 @@ impl StreamTable {
             FrameType::Open => self.on_open(id, &f.data),
             FrameType::Data => self.on_data(id, &f.data, f.flags & FLAG_FIN != 0),
             FrameType::Credit => self.on_credit(id, u64::from(f.credit_amount().unwrap_or(0))),
+            // Only the Host sends it and the device side handles it before the table.
+            FrameType::Control => Err(TunnelError::UnknownType),
             FrameType::Close | FrameType::Reset => {
                 if id == 0 {
                     return Err(TunnelError::StreamZero);
@@ -647,6 +668,14 @@ pub struct ApprovalPending {
     pub code: u32,
     pub deadline_ms: u32,
 }
+/// The owner is asked on the Host to confirm control for this tunnel. `code` is the tunnel's
+/// confirmation code; the device compares it with its own and shows its own copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlPending {
+    pub code: u32,
+    pub deadline_ms: u32,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StaleEpoch {
@@ -673,6 +702,8 @@ pub enum HostGreeting {
     ApprovalPending(ApprovalPending),
     StaleEpoch(StaleEpoch),
     UpdateRequired(UpdateRequired),
+    /// Only inside a `Control` frame once the tunnel is live (not a handshake greeting).
+    ControlPending(ControlPending),
 }
 fn encode_payload<T: Serialize>(v: &T) -> Result<Vec<u8>, TunnelError> {
     let out = postcard::to_allocvec(v).map_err(|_| TunnelError::BadPayload)?;
@@ -713,8 +744,9 @@ impl Hello {
 impl HostGreeting {
     fn validate(&self) -> Result<(), TunnelError> {
         match self {
-            Self::ApprovalPending(p)
-                if p.code > 999_999 || p.deadline_ms > APPROVAL_DEADLINE_MS =>
+            Self::ApprovalPending(ApprovalPending { code, deadline_ms })
+            | Self::ControlPending(ControlPending { code, deadline_ms })
+                if *code > 999_999 || *deadline_ms > APPROVAL_DEADLINE_MS =>
             {
                 Err(TunnelError::BadPayload)
             }

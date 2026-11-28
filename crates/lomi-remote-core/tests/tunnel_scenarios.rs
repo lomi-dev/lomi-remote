@@ -534,6 +534,22 @@ fn approval_pending_shows_the_same_code_then_welcome() {
 }
 
 #[test]
+fn control_pending_shows_the_own_code_and_a_wrong_one_closes() {
+    let mut rig = Rig::new(json!([]));
+    let mut host = rig.open(1);
+    rig.now = 5_000;
+    let code: u32 = host.code.parse().unwrap();
+    let frame = |c| TunnelFrame::control_pending(c, 120_000).unwrap();
+    let r = rig.relay(&host.send(&[frame(code)]));
+    let e = &ev_of(&r, "controlPending")[0];
+    assert_eq!(e["code"].as_str(), Some(host.code.as_str()));
+    assert_eq!(e["deadline"].as_u64(), Some(125_000));
+    let r = rig.relay(&host.send(&[frame((code + 1) % 1_000_000)]));
+    let closed = &ev_of(&r, "tunnelState")[0];
+    assert_eq!(closed["reason"].as_str(), Some("codeMismatch"));
+}
+
+#[test]
 fn approval_deadline_closes_and_releases_the_circuit() {
     let mut rig = Rig::new(json!([]));
     let mut host = rig.attempt(1);

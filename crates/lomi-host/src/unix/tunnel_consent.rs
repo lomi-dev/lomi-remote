@@ -99,7 +99,6 @@ pub(super) enum Notice {
     ControlRequested {
         device_name: String,
         fingerprint: Key,
-        code: String,
     },
     /// A new device was refused: all 16 grants are in use.
     GrantsFull { device_name: String },
@@ -452,7 +451,6 @@ impl DeviceConsent {
         g.notice(Notice::ControlRequested {
             device_name: grant.device_name.clone(),
             fingerprint: key,
-            code: code.clone(),
         });
         g.pending.push(Approval {
             circuit,
@@ -463,18 +461,23 @@ impl DeviceConsent {
         });
         Ok(code)
     }
-    /// The owner confirmed the code. False: nothing waits there any more, or it could not be
-    /// stored or delivered (then it stays open).
-    pub(super) fn approve(&self, circuit: CircuitId) -> bool {
+    /// The owner typed the code the device shows. It must equal the Host's own code of exactly one
+    /// waiting approval (the Host never displays it). False: nothing waits for that code, or it
+    /// could not be stored or delivered (then it stays open).
+    pub(super) fn approve(&self, typed: &str) -> bool {
         let mut g = self.inner();
         let now = (g.clock)();
-        let (Some(i), Some(handle)) = (
-            g.pending.iter().position(|p| p.circuit == circuit),
-            g.handle.clone(),
-        ) else {
+        let mut hits = g
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !typed.is_empty() && p.code == typed);
+        let (Some((i, _)), None, Some(handle)) = (hits.next(), hits.next(), g.handle.clone())
+        else {
             return false;
         };
         let a = g.pending[i].clone();
+        let circuit = a.circuit;
         let key = a.grant.device_key;
         let sent = match a.kind {
             Kind::NewDevice => {
@@ -755,7 +758,10 @@ mod tests {
             [Notice::ControlRequested { .. }]
         ));
         assert_eq!(r.c.pending().len(), 1);
-        assert!(r.c.approve([1; 16]));
+        // only the typed code approves: not the circuit, not a wrong or empty code
+        assert!(!r.c.approve("654321") && !r.c.approve(""));
+        assert_eq!(r.c.pending().len(), 1);
+        assert!(r.c.approve("123456"));
         assert!(r.c.pending().is_empty());
         assert_eq!(r.grants()[0].control_confirmed_at, Some(T0));
         assert!(matches!(
@@ -789,7 +795,7 @@ mod tests {
         assert_eq!(admit(&r, 1, 1), Admission::Pending);
         assert!(r.grants().is_empty(), "nothing is stored before approval");
         assert_eq!(r.c.pending()[0].code, "123456");
-        assert!(r.c.approve([1; 16]));
+        assert!(r.c.approve("123456"));
         assert_eq!(r.grants()[0].control_confirmed_at, Some(T0));
         assert!(matches!(
             r.commands()[..],
@@ -807,7 +813,7 @@ mod tests {
             [Command::Deny { circuit: [2, ..] }]
         ));
         assert!(r.c.pending().is_empty());
-        assert!(!r.c.approve([2; 16]));
+        assert!(!r.c.approve("123456"));
     }
 
     #[test]
@@ -989,7 +995,7 @@ mod tests {
         r.ready(Some(vec![entry(1)]));
         assert_eq!(admit(&r, 1, 1), Admission::Pending);
         r.c.closed([1; 16]);
-        assert!(r.c.pending().is_empty() && !r.c.approve([1; 16]));
+        assert!(r.c.pending().is_empty() && !r.c.approve("123456"));
     }
 
     /// The real engine and a real Noise handshake against `DeviceConsent`.
@@ -1144,7 +1150,7 @@ mod tests {
                 w.log.lock().unwrap().is_empty(),
                 "the service heard nothing"
             );
-            assert!(w.r.c.approve([1; 16]));
+            assert!(w.r.c.approve(&code));
             w.e.drain_commands();
             let outs = w.e.take_out();
             assert_eq!(

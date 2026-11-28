@@ -76,7 +76,11 @@ records. The tunnel's own call results are not shown as `callDone`; unclaimed `c
   it hands data to the platform (a message larger than one 64 KiB window could not finish otherwise).
 * Events (type, `tunnel` = handle): `tunnelState {state}` with `opening`, `handshake`, `awaitingGreeting`,
   `approvalPending` (+`code`, `deadline` = monotonic ms), `open` (+`directory`), `closed` (+`reason`);
-  `updateRequired {olderSide}`; `staleEpoch {authEpoch, hostAccessEpoch, runtimeGeneration}`; `outcomeUnknown
+  `controlPending {code, deadline}` (the owner is asked on the Host to confirm control: the Host sent a `Control`
+  frame (type 6, stream 0, postcard `HostGreeting::ControlPending`); `code` is this core's own confirmation code,
+  the Host's copy must equal it or the tunnel closes with `codeMismatch`; show it and let the owner type it on
+  the Host; `deadline` = monotonic ms);
+    `updateRequired {olderSide}`; `staleEpoch {authEpoch, hostAccessEpoch, runtimeGeneration}`; `outcomeUnknown
   {requestId}` (one per rpc request still unanswered when the tunnel closed; never resent); `streamOpened {stream,
   kind, requestId?}` (Host-opened: `directory`, `transfer`); `streamClosed`; `streamReset {stream, code}`. A complete
   logical message is record tag 5: `stream u32 BE | bytes` (stream 0 = rpc response JSON).

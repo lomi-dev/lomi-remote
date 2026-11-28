@@ -526,6 +526,9 @@ fn tunnel_event_json(th: u32, e: &tunnel::Event) -> Value {
         ApprovalPending { code, deadline } => {
             json!({ "type": "tunnelState", "state": "approvalPending", "code": code, "deadline": deadline })
         }
+        ControlPending { code, deadline } => {
+            json!({ "type": "controlPending", "code": code, "deadline": deadline })
+        }
         Open { directory } => {
             json!({ "type": "tunnelState", "state": "open", "directory": directory })
         }

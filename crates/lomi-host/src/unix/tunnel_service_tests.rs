@@ -891,7 +891,14 @@ fn control_is_refused_at_read_until_the_owner_approves_the_code() {
     assert_eq!(error_code(&refused), "SCOPE_DENIED", "{refused}");
     let pending = consent.pending();
     assert_eq!(pending.len(), 1, "{pending:?}");
-    assert!(consent.approve(pending[0].circuit));
+    // The device is told too, and shows its own copy of the code the owner has to type.
+    rig.wait("controlPending", |r| !r.events("controlPending").is_empty());
+    assert_eq!(
+        rig.events("controlPending")[0]["code"].as_str(),
+        Some(pending[0].code.as_str())
+    );
+    assert!(!consent.approve("not-it"));
+    assert!(consent.approve(&pending[0].code));
     rig.settle(Vec::new());
     // The grant now records the confirmation, and the live tunnel is at Control.
     assert!(fx.store(|s| {
@@ -983,8 +990,9 @@ fn a_stream_for_an_unshared_workspace_is_refused_for_every_kind() {
 // ---- owner-local devices.* calls (P3a.12) -----------------------------------------------------
 
 use lomi_remote_protocol::ipc::{
-    LocalCall, LocalDeviceMode, LocalDeviceModeState, LocalDeviceNoticeKind, LocalDeviceReason,
-    LocalDeviceRevoke, LocalDeviceTarget, LocalDeviceText, LocalDevices, LocalError, LocalResult,
+    LocalCall, LocalDeviceApprove, LocalDeviceMode, LocalDeviceModeState, LocalDeviceNoticeKind,
+    LocalDeviceReason, LocalDeviceRevoke, LocalDeviceTarget, LocalDeviceText, LocalDevices,
+    LocalError, LocalResult,
 };
 
 fn local(fx: &Fx, call: LocalCall) -> Result<LocalResult, LocalError> {
@@ -1045,7 +1053,7 @@ fn devices_calls_need_the_tunnel() {
 #[test]
 fn devices_list_approve_and_notices_follow_confirm_mode() {
     let mut fx = Fx::new(false);
-    let (_consent, mut rig, key) = connect(&mut fx, Mode::Confirm, true);
+    let (consent, mut rig, key) = connect(&mut fx, Mode::Confirm, true);
     assert_eq!(rig.engine.len(), 1, "the tunnel waits for the owner");
     let d = devices(&fx, LocalCall::DevicesList {});
     assert_eq!(d.mode, LocalDeviceMode::Confirm);
@@ -1056,7 +1064,8 @@ fn devices_list_approve_and_notices_follow_confirm_mode() {
     assert_eq!(a.reason, LocalDeviceReason::NewDevice);
     assert_eq!(a.device_name.as_str(), "Phone");
     assert_eq!(a.fingerprint.as_str(), hex(&key));
-    assert_eq!(a.code.as_str().len(), 6, "{}", a.code.as_str());
+    let code = consent.pending()[0].code.clone();
+    assert_eq!(code.len(), 6, "{code}");
 
     let Ok(LocalResult::DeviceNotices(notices)) = local(&fx, LocalCall::DevicesNotices {}) else {
         panic!("notices")
@@ -1068,27 +1077,20 @@ fn devices_list_approve_and_notices_follow_confirm_mode() {
     };
     assert!(again.0.is_empty(), "drained");
 
-    let target = LocalDeviceTarget {
-        circuit: a.circuit.clone(),
-    };
-    let d = devices(&fx, LocalCall::DevicesApprove(target.clone()));
+    let approve = |code: &str| LocalCall::DevicesApprove(LocalDeviceApprove { code: text(code) });
+    // the circuit is not a code, and a wrong code approves nothing
+    assert_eq!(
+        local(&fx, approve(a.circuit.as_str())),
+        Err(LocalError::Conflict)
+    );
+    assert_eq!(local(&fx, approve("000000")), Err(LocalError::Conflict));
+    assert_eq!(devices(&fx, LocalCall::DevicesList {}).pending.0.len(), 1);
+    let d = devices(&fx, approve(&code));
     assert!(d.pending.0.is_empty());
     assert_eq!(d.grants.0.len(), 1);
     rig.settle(Vec::new());
     assert_eq!(rig.engine.len(), 1, "approved, still connected");
-    assert_eq!(
-        local(&fx, LocalCall::DevicesApprove(target)),
-        Err(LocalError::Conflict)
-    );
-    assert_eq!(
-        local(
-            &fx,
-            LocalCall::DevicesApprove(LocalDeviceTarget {
-                circuit: text("zz")
-            })
-        ),
-        Err(LocalError::InvalidArgument)
-    );
+    assert_eq!(local(&fx, approve(&code)), Err(LocalError::Conflict));
 }
 
 #[test]

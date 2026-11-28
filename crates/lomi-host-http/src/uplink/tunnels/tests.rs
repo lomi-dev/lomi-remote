@@ -103,9 +103,12 @@ impl Dev {
             })
             .map(|b| {
                 let frames = decode_frames(&self.noise.decrypt(b).unwrap()).unwrap();
-                frames.iter().for_each(|f| {
-                    self.table.on_frame(f).unwrap();
-                });
+                frames
+                    .iter()
+                    .filter(|f| f.kind != FrameType::Control)
+                    .for_each(|f| {
+                        self.table.on_frame(f).unwrap();
+                    });
                 frames
             })
             .collect()
@@ -176,6 +179,29 @@ fn open_dev(w: &mut World, n: u8) -> Dev {
 }
 fn log(w: &World) -> Vec<String> {
     w.log.lock().unwrap().clone()
+}
+
+#[test]
+fn control_pending_frame_carries_the_tunnel_code_to_the_device() {
+    let mut w = world();
+    let mut dev = open_dev(&mut w, 1);
+    let code: u32 = dev.code.parse().unwrap();
+    w.handle
+        .push(Command::ControlPending {
+            circuit: dev.circuit,
+            code,
+        })
+        .unwrap();
+    w.e.drain_commands();
+    let frames = dev.recv(&w.e.take_out()).concat();
+    let [f] = &frames[..] else {
+        panic!("{frames:?}")
+    };
+    assert_eq!((f.stream_id, f.kind), (0, FrameType::Control));
+    assert_eq!(f.as_control_pending().map(|p| p.code), Some(code));
+    // the Host does not accept the frame from a device
+    let mut table = StreamTable::new(Side::Host);
+    assert!(table.on_frame(f).is_err());
 }
 
 #[test]

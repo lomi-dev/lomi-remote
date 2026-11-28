@@ -69,14 +69,13 @@ fn screen(dashboard: &Dashboard) -> String {
 }
 
 #[test]
-fn banner_shows_the_code_and_the_screen_approves_and_revokes() {
+fn the_owner_types_the_device_code_to_approve_and_the_screen_revokes() {
     let mut backend = Fake {
         calls: Vec::new(),
         pending: vec![LocalDeviceApproval {
             circuit: text(&"11".repeat(16)),
             device_name: text("Phone"),
             fingerprint: text(&"ab".repeat(32)),
-            code: text("123456"),
             reason: LocalDeviceReason::NewDevice,
             at: DecimalU64(1),
         }],
@@ -92,14 +91,13 @@ fn banner_shows_the_code_and_the_screen_approves_and_revokes() {
         notices: vec![LocalDeviceNotice {
             kind: LocalDeviceNoticeKind::NewDevice,
             device_name: text("Phone"),
-            code: None,
         }],
     };
     let mut dashboard = Dashboard::default();
     assert!(dashboard.poll_devices(&mut backend));
     let first_row = screen(&dashboard).lines().next().unwrap().to_owned();
     assert!(
-        first_row.contains("123456") && first_row.contains("Phone"),
+        !first_row.contains("123456") && first_row.contains("Phone"),
         "{first_row}"
     );
 
@@ -110,13 +108,28 @@ fn banner_shows_the_code_and_the_screen_approves_and_revokes() {
         "{open}"
     );
     assert!(
-        open.contains("code 123456") && open.contains("Laptop"),
+        !open.contains("123456") && open.contains("Laptop"),
         "{open}"
     );
 
+    // `a` on a selected row asks for the device's code; Enter alone approves nothing
     dashboard.dispatch_key(key(KeyCode::Char('a')), &mut backend);
+    dashboard.dispatch_key(key(KeyCode::Enter), &mut backend);
+    for c in "12345".chars() {
+        dashboard.dispatch_key(key(KeyCode::Char(c)), &mut backend);
+    }
+    dashboard.dispatch_key(key(KeyCode::Enter), &mut backend);
     assert!(
-        matches!(backend.calls.last(), Some(LocalCall::DevicesApprove(t)) if t.circuit.as_str() == "11".repeat(16))
+        !backend
+            .calls
+            .iter()
+            .any(|c| matches!(c, LocalCall::DevicesApprove(_))),
+        "five digits are not a code"
+    );
+    dashboard.dispatch_key(key(KeyCode::Char('6')), &mut backend);
+    dashboard.dispatch_key(key(KeyCode::Enter), &mut backend);
+    assert!(
+        matches!(backend.calls.last(), Some(LocalCall::DevicesApprove(t)) if t.code.as_str() == "123456")
     );
     assert!(
         dashboard.devices.banner().is_some(),

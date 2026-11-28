@@ -265,7 +265,8 @@ impl Ctx {
     }
     /// `authorize`. When only the owner's code is missing, first re-read (it may just have been
     /// confirmed; `view` is then replaced), and if it still is, ask for it. The client gets
-    /// SCOPE_DENIED either way (the error has no room for the code; the owner sees it on the Host).
+    /// SCOPE_DENIED either way; the device is told separately (`Control` frame) that the owner is
+    /// asked, and shows its own copy of the code. The owner types that code on the Host.
     fn check(&self, view: &mut Arc<View>, target: &Target<'_>) -> Result<Granted, Denied> {
         let mut r = authorize(&view.access, target, now_ms());
         if r == Err(Denied::ControlNotConfirmed) {
@@ -276,7 +277,14 @@ impl Ctx {
             if r == Err(Denied::ControlNotConfirmed)
                 && let Some(consent) = &self.consent
             {
-                let _ = consent.request_control(self.circuit);
+                if let Ok(code) = consent.request_control(self.circuit)
+                    && let Ok(code) = code.parse()
+                {
+                    let _ = self.handle.push(Command::ControlPending {
+                        circuit: self.circuit,
+                        code,
+                    });
+                }
             }
         }
         r

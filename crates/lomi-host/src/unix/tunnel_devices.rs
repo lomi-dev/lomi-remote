@@ -63,7 +63,6 @@ fn approval(a: &Approval) -> LocalDeviceApproval {
         circuit: text(&hex(&a.circuit)),
         device_name: text(&a.grant.device_name),
         fingerprint: text(&hex(&a.grant.device_key)),
-        code: text(&a.code),
         reason: match a.kind {
             Kind::NewDevice => LocalDeviceReason::NewDevice,
             Kind::Control => LocalDeviceReason::Control,
@@ -73,18 +72,15 @@ fn approval(a: &Approval) -> LocalDeviceApproval {
 }
 fn notice(n: Notice) -> LocalDeviceNotice {
     use LocalDeviceNoticeKind as K;
-    let (kind, name, code) = match n {
-        Notice::NewDevice { device_name, .. } => (K::NewDevice, device_name, None),
-        Notice::ControlRequested {
-            device_name, code, ..
-        } => (K::ControlRequested, device_name, Some(code)),
-        Notice::GrantsFull { device_name } => (K::GrantsFull, device_name, None),
-        Notice::RateLimited { device_name } => (K::RateLimited, device_name, None),
+    let (kind, name) = match n {
+        Notice::NewDevice { device_name, .. } => (K::NewDevice, device_name),
+        Notice::ControlRequested { device_name, .. } => (K::ControlRequested, device_name),
+        Notice::GrantsFull { device_name } => (K::GrantsFull, device_name),
+        Notice::RateLimited { device_name } => (K::RateLimited, device_name),
     };
     LocalDeviceNotice {
         kind,
         device_name: text(&name),
-        code: code.map(|c| text(&c)),
     }
 }
 
@@ -109,17 +105,18 @@ impl Coordinator {
     /// Only called for the `devices.*` variants.
     pub(super) fn devices_call(&self, call: LocalCall) -> Result<LocalResult, LocalError> {
         let consent = self.consent()?;
-        let approve = matches!(call, LocalCall::DevicesApprove(_));
         match call {
             LocalCall::DevicesList {} => {}
-            LocalCall::DevicesApprove(t) | LocalCall::DevicesDeny(t) => {
+            // Nothing waits there any more (answered, closed or never asked), or the code is
+            // wrong: Conflict.
+            LocalCall::DevicesApprove(t) => {
+                if !consent.approve(t.code.as_str()) {
+                    return Err(LocalError::Conflict);
+                }
+            }
+            LocalCall::DevicesDeny(t) => {
                 let circuit = unhex::<16>(t.circuit.as_str()).ok_or(LocalError::InvalidArgument)?;
-                // Nothing waits there any more (answered, closed or never asked): Conflict.
-                if !(if approve {
-                    consent.approve(circuit)
-                } else {
-                    consent.deny(circuit)
-                }) {
+                if !consent.deny(circuit) {
                     return Err(LocalError::Conflict);
                 }
             }

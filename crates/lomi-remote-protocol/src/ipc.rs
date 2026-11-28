@@ -1017,6 +1017,11 @@ dto!(LocalDeviceRevoke {
 dto!(LocalDeviceTarget {
     circuit: LocalDeviceText
 });
+// The 6-digit code the DEVICE shows, typed by the owner. The Host never displays its own copy, so
+// approving means reading the code off the device (a relay in the middle makes the two differ).
+dto!(LocalDeviceApprove {
+    code: LocalDeviceText
+});
 dto!(LocalDeviceGrant {
     name: LocalDeviceText,
     kind: LocalDeviceText,
@@ -1030,7 +1035,6 @@ dto!(LocalDeviceApproval {
     circuit: LocalDeviceText,
     device_name: LocalDeviceText,
     fingerprint: LocalDeviceText,
-    code: LocalDeviceText,
     reason: LocalDeviceReason,
     at: DecimalU64
 });
@@ -1041,8 +1045,7 @@ dto!(LocalDevices {
 });
 dto!(LocalDeviceNotice {
     kind: LocalDeviceNoticeKind,
-    device_name: LocalDeviceText,
-    code: Option<LocalDeviceText>
+    device_name: LocalDeviceText
 });
 dto!(LocalHostNameSet {
     expected_name: Option<LocalHostName>,
@@ -1431,7 +1434,7 @@ pub enum LocalCall {
     #[serde(rename = "devices.list")]
     DevicesList {},
     #[serde(rename = "devices.approve")]
-    DevicesApprove(LocalDeviceTarget),
+    DevicesApprove(LocalDeviceApprove),
     #[serde(rename = "devices.deny")]
     DevicesDeny(LocalDeviceTarget),
     #[serde(rename = "devices.revoke")]

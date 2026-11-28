@@ -86,6 +86,12 @@ pub enum Event {
         code: String,
         deadline: u64,
     },
+    /// The owner is asked on the Host to confirm control. `code` is this side's own confirmation
+    /// code (the Host's copy was checked against it); the owner must type it on the Host.
+    ControlPending {
+        code: String,
+        deadline: u64,
+    },
     Open {
         directory: bool,
     },
@@ -368,7 +374,7 @@ impl Tunnel {
                 Ok(g) => self.on_greeting(g, now, out),
                 Err(_) => self.finish("protocol", true, out),
             },
-            Phase::Open => self.on_frames(&plain, out),
+            Phase::Open => self.on_frames(&plain, now, out),
             _ => {}
         }
     }
@@ -449,12 +455,28 @@ impl Tunnel {
         }
     }
 
-    fn on_frames(&mut self, plain: &[u8], out: &mut Vec<Out>) {
+    fn on_frames(&mut self, plain: &[u8], now: u64, out: &mut Vec<Out>) {
         let Ok(frames) = decode_frames(plain) else {
             return self.finish("protocol", true, out);
         };
         let mut reply = Vec::new();
         for f in &frames {
+            if f.kind == FrameType::Control {
+                let own = self.code.clone().unwrap_or_default();
+                match f.as_control_pending() {
+                    Some(p) if format!("{:06}", p.code) == own => {
+                        let deadline =
+                            now + u64::from(p.deadline_ms).min(u64::from(APPROVAL_DEADLINE_MS));
+                        out.push(Out::Event(Event::ControlPending {
+                            code: own,
+                            deadline,
+                        }));
+                        continue;
+                    }
+                    Some(_) => return self.finish("codeMismatch", true, out),
+                    None => return self.finish("protocol", true, out),
+                }
+            }
             let Ok(ev) = self.table.on_frame(f) else {
                 return self.finish("protocol", true, out);
             };
