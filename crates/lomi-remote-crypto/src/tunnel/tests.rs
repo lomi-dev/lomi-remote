@@ -57,6 +57,7 @@ fn run(f: &Fixture, fixed: bool) -> (TunnelHandshake, TunnelHandshake, [Vec<u8>;
     d.read_message(&m2).unwrap();
     let m3 = d.write_message(HELLO).unwrap();
     assert_eq!(&**h.read_message(&m3).unwrap(), HELLO);
+    h.verify_device(&f.device.signed).unwrap();
     (d, h, [m1, m2, m3])
 }
 
@@ -321,4 +322,26 @@ fn tunnel_vectors() {
         return;
     }
     assert_eq!(text, VECTORS, "tunnel vectors drifted");
+}
+
+#[test]
+fn host_needs_verified_device_bundle() {
+    let f = fixture();
+    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut h = TunnelHandshake::host(&f.host, &f.prologue).unwrap();
+    assert!(completes(&mut d, &mut h));
+    let other = seeded(Role::Device, DEVICE_ID, 0x50);
+    assert!(h.verify_device(&other.signed).is_err());
+    assert!(h.into_transport().is_err());
+}
+
+#[test]
+fn payload_only_in_message_three() {
+    let f = fixture();
+    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    assert!(d.write_message(b"leak").is_err());
+    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut h = TunnelHandshake::host(&f.host, &f.prologue).unwrap();
+    h.read_message(&d.write_message(&[]).unwrap()).unwrap();
+    assert!(h.write_message(b"early").is_err());
 }

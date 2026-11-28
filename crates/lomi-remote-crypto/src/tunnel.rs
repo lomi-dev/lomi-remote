@@ -67,6 +67,11 @@ pub struct TunnelHandshake {
     /// Device side: the pinned Host static key. Host side: unknown until `verify_device`.
     expected_remote: Option<[u8; 32]>,
     hash: Option<[u8; 32]>,
+    /// Host side: the relay-attested device fingerprint and account the bundle must match.
+    attested: Option<([u8; 32], Id)>,
+    device_verified: bool,
+    /// Handshake messages written or read so far.
+    messages: u8,
 }
 
 fn build(
@@ -102,6 +107,9 @@ fn build(
         state: Some(state),
         expected_remote,
         hash: None,
+        attested: (!initiator).then_some((prologue.device_fingerprint, prologue.account_id)),
+        device_verified: false,
+        messages: 0,
     })
 }
 
@@ -164,16 +172,18 @@ impl TunnelHandshake {
     }
 
     fn settle(&mut self, state: snow::HandshakeState) {
+        self.messages += 1;
         if state.is_handshake_finished() {
             self.hash = state.get_handshake_hash().try_into().ok();
         }
         self.state = Some(state);
     }
 
-    /// Any failure closes the handshake.
+    /// Any failure closes the handshake. Only message 3 may carry a payload: message 1 is
+    /// cleartext and message 2 goes to a not yet authenticated device.
     pub fn write_message(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         let mut state = self.state.take().ok_or("handshake closed")?;
-        if payload.len() > MAX_HELLO_PAYLOAD {
+        if payload.len() > MAX_HELLO_PAYLOAD || (self.messages < 2 && !payload.is_empty()) {
             return Err("handshake payload limit".into());
         }
         let mut out = vec![0u8; MAX_HANDSHAKE_MESSAGE];
@@ -195,6 +205,9 @@ impl TunnelHandshake {
             .read_message(message, &mut out)
             .map_err(|_| "handshake authentication failed")?;
         out.truncate(n);
+        if self.messages < 2 && n != 0 {
+            return Err("unexpected handshake payload".into());
+        }
         if let (Some(expected), Some(remote)) = (self.expected_remote, state.get_remote_static()) {
             if remote != expected {
                 return Err("Noise static pin mismatch".into());
@@ -224,7 +237,21 @@ impl TunnelHandshake {
         Ok(format!("{:06}", n % 1_000_000))
     }
 
+    /// Host side, after message 3: checks the device bundle from `hello` against the
+    /// relay-attested fingerprint, the account and the Noise static key. Required before
+    /// `into_transport`.
+    pub fn verify_device(&mut self, bundle: &SignedBundle) -> Result<()> {
+        let (fingerprint, account) = self.attested.ok_or("not a Host handshake")?;
+        let remote = self.remote_static().ok_or("device static not received")?;
+        verify_device(bundle, &fingerprint, &account, &remote)?;
+        self.device_verified = true;
+        Ok(())
+    }
+
     pub fn into_transport(mut self) -> Result<Tunnel> {
+        if self.attested.is_some() && !self.device_verified {
+            return Err("device bundle not verified".into());
+        }
         let state = self.state.take().ok_or("handshake closed")?;
         let hash = self.hash.ok_or("handshake not finished")?;
         let remote = state.get_remote_static().ok_or("missing remote static")?;
@@ -246,8 +273,7 @@ impl TunnelHandshake {
     }
 }
 
-/// Host-side check of the device bundle carried in `hello`.
-pub fn verify_device(
+fn verify_device(
     bundle: &SignedBundle,
     attested_fingerprint: &[u8; 32],
     account_id: &Id,

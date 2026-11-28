@@ -40,8 +40,8 @@ pub use host_key_enrollment::{
 mod mailbox;
 mod tunnel;
 pub use tunnel::{
-    verify_device, Tunnel, TunnelHandshake, TunnelPath, TunnelPrologue, MAX_HELLO_PAYLOAD,
-    MAX_TUNNEL_CIPHERTEXT, MAX_TUNNEL_PLAINTEXT, REKEY_INTERVAL,
+    Tunnel, TunnelHandshake, TunnelPath, TunnelPrologue, MAX_HELLO_PAYLOAD, MAX_TUNNEL_CIPHERTEXT,
+    MAX_TUNNEL_PLAINTEXT, REKEY_INTERVAL,
 };
 mod wire;
 pub use approval::{pairing_fingerprint, PeerApproval, Permissions, SignedPeerApproval};
