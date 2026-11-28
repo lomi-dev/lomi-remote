@@ -359,14 +359,16 @@ fn vectors() -> Value {
 /// Regenerate with: LOMI_REGEN_VECTORS=1 cargo test -p lomi-remote-crypto tunnel_vectors
 #[test]
 fn tunnel_vectors() {
-    let text = serde_json::to_string_pretty(&vectors()).unwrap() + "\n";
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::var_os("LOMI_REGEN_VECTORS").is_some() {
+        let text = serde_json::to_string_pretty(&vectors()).unwrap() + "\n";
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/test-vectors/tunnel.v1.json");
         std::fs::write(path, &text).unwrap();
         return;
     }
-    assert_eq!(text, VECTORS, "tunnel vectors drifted");
+    // Compared as values: serde_json key order depends on workspace feature unification.
+    let stored: Value = serde_json::from_str(VECTORS).unwrap();
+    assert_eq!(vectors(), stored, "tunnel vectors drifted");
 }
 
 #[test]

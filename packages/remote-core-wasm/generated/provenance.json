@@ -13,7 +13,7 @@
   },
   "sourceInputMode": "live workspace guarded by equal pre-build and post-bindgen source digests",
   "sourceSha256": {
-    "Cargo.lock": "d577c7825b53576517f912f5f65f54a5e008223de9b4184476a624ec1ee244cd",
+    "Cargo.lock": "058dfa17cf46188f4af94bbb12d9f7bf3a14225f07d8bb54363e9ad8cb209b6d",
     "Cargo.toml": "662b75edfd7947a6b1c1dbed2dba4c29b466f344d68a68561553a122fe0761d0",
     "crates/lomi-remote-core/Cargo.toml": "de9f85e096286d277f7c52551d01942c5c68d24b3a1fc1861ef0cc87a58ac385",
     "crates/lomi-remote-core/src/bridge.rs": "7e4f488913d54d295fcdab16710f2776d861047ffdab065c67879e27a5cc44f9",
