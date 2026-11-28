@@ -20,6 +20,26 @@
       ],
       "type": "object"
     },
+    "ControlPending": {
+      "description": "The owner is asked on the Host to confirm control for this tunnel. `code` is the tunnel's\nconfirmation code; the device compares it with its own and shows its own copy.",
+      "properties": {
+        "code": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deadlineMs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "deadlineMs"
+      ],
+      "type": "object"
+    },
     "OlderSide": {
       "enum": [
         "host",
@@ -124,6 +144,19 @@
       },
       "required": [
         "updateRequired"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Only inside a `Control` frame once the tunnel is live (not a handshake greeting).",
+      "properties": {
+        "controlPending": {
+          "$ref": "#/$defs/ControlPending"
+        }
+      },
+      "required": [
+        "controlPending"
       ],
       "type": "object"
     }

@@ -15,6 +15,9 @@ export type HostGreeting =
     }
   | {
       updateRequired: UpdateRequired;
+    }
+  | {
+      controlPending: ControlPending;
     };
 export type OlderSide = "host" | "client";
 
@@ -38,4 +41,12 @@ export interface StaleEpoch {
 }
 export interface UpdateRequired {
   olderSide: OlderSide;
+}
+/**
+ * The owner is asked on the Host to confirm control for this tunnel. `code` is the tunnel's
+ * confirmation code; the device compares it with its own and shows its own copy.
+ */
+export interface ControlPending {
+  code: number;
+  deadlineMs: number;
 }

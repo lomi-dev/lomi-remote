@@ -1656,9 +1656,6 @@
         "circuit": {
           "$ref": "#/$defs/LocalDeviceText"
         },
-        "code": {
-          "$ref": "#/$defs/LocalDeviceText"
-        },
         "deviceName": {
           "$ref": "#/$defs/LocalDeviceText"
         },
@@ -1673,7 +1670,6 @@
         "circuit",
         "deviceName",
         "fingerprint",
-        "code",
         "reason",
         "at"
       ],
@@ -1751,16 +1747,6 @@
     "LocalDeviceNotice": {
       "additionalProperties": false,
       "properties": {
-        "code": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LocalDeviceText"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "deviceName": {
           "$ref": "#/$defs/LocalDeviceText"
         },

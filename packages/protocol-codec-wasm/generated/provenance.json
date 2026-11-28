@@ -23,7 +23,7 @@
     "crates/lomi-remote-protocol/src/chat.rs": "efab2e4f66f3a08adbaefff10bdf97c331108d88f63e4502b204a122c4878033",
     "crates/lomi-remote-protocol/src/errors.rs": "fad6947d8a44a5d77484afbe4e83cccc512d93fcb9dac59a4ecaa703055a0075",
     "crates/lomi-remote-protocol/src/http.rs": "3a6c3560bc7384cfcfc809c2293e768bbc4b00e33c54ff074a6479d5a26b7a88",
-    "crates/lomi-remote-protocol/src/ipc.rs": "d2ecfff39f2253e7ace19506bc1883b0753246c9664f321c1c8935e81d16d368",
+    "crates/lomi-remote-protocol/src/ipc.rs": "ac16fa9e3b425a16a12c941b41f51887eef2444171163300f4af275cf05e44e8",
     "crates/lomi-remote-protocol/src/json_wire.rs": "27aa02cd33ac1533ea38ba7b1ada3eaea9734ee7060f5b1feb1d60e376499e9f",
     "crates/lomi-remote-protocol/src/lib.rs": "6895c2d638cc9633bf9e7c8757792de8eb73dc476e4f2849e1f5515cd4f2f463",
     "crates/lomi-remote-protocol/src/limits.rs": "96cbb1442d784ca0e22c48562282384253f039b130db3710599d0ce976c6809f",
@@ -32,7 +32,7 @@
     "crates/lomi-remote-protocol/src/primitives.rs": "3c96780a156b6294847a40717a3761a73fd48c6faf1c73d7fcfb62bc522df390",
     "crates/lomi-remote-protocol/src/rpc.rs": "f149b984eab96c03f4f6fe949bc3b4a5cae9b3243fa28f7c284d0553fde40b56",
     "crates/lomi-remote-protocol/src/streams.rs": "6cbc855f64d6a3e61fee9ee890db69119c9a5c9a3fe473622befabdf08f43650",
-    "crates/lomi-remote-protocol/src/tunnel.rs": "a9184289092ef6a356e6e45639863b24ec911ef62c8bad15591fffaccd6fb48c",
+    "crates/lomi-remote-protocol/src/tunnel.rs": "5cde41b69bcf9dd67997fdffdbb5ba63f5fcaa1440d64dfdfb47457555cbf709",
     "packages/protocol-codec-wasm/README.md": "b38d6e782773d1a47e2d770e8317961c1c1c45fda12b94eeef1a89db7740826c",
     "packages/protocol-codec-wasm/package.json": "08b0abf8ca30dcfea29ca3573f515082f821186092f62fdb87b94486a6113765",
     "packages/protocol-codec-wasm/scripts/build.mjs": "66e1a5a8b4f6b7782dbe2fbf224e41b9fd8068db202f6f00b0ecd6973dfcc0fa",
@@ -40,11 +40,11 @@
     "packages/protocol-codec-wasm/src/index.mjs": "995017c04d4a221ee5645f32f5c494c50f36017342205e8b7b260af62f637ccb",
     "rust-toolchain.toml": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0"
   },
-  "inputWasmSha256": "c81869b7dd4ce2a935c4d8353373f01e7707af5d2718b6cd73957ff1ea2835ca",
+  "inputWasmSha256": "ecd485f11535b65a800b110ec20f15d9b7ac856dd6debc7f2d5720e0e46415f2",
   "generatedSha256": {
     "protocol_codec.d.ts": "73b24bf673c4dccf91d016a431698af6fb6a44c2714dba3e5edc3ecabab5b3b7",
     "protocol_codec.js": "7e466fbe6c40eb933cb86cecbc91e68c0c347360f45ce09bc4b4eb8a2e080474",
-    "protocol_codec_bg.wasm": "2099aaa2d7d83e89bbf4c6e8177d3ba60e9af71f93f3f8e84a1d42258abeae90",
+    "protocol_codec_bg.wasm": "e4aa0dfe14347892320f447f4bdc95a43b48ee4ade27ce7135504e290af7e307",
     "protocol_codec_bg.wasm.d.ts": "9e6944ae4cfd772a476245fb7e5d221e5a656f7ce5e0981eb5466ddd1247a9f7"
   },
   "scope": "Pure wire validation and generic logical-message framing; no authentication, cryptography, database state, authority, freshness or semantic domain stream application.",

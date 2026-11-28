@@ -2,7 +2,9 @@
 /* eslint-disable */
 
 /**
- * See [`crate::bridge::call`]; `args` is a JSON object, `payload` raw bytes.
+ * See [`crate::bridge::call`]; `args` is a JSON object, `payload` raw bytes. The payload is
+ * taken by value so that the copy the glue made in linear memory (it can hold a seed or
+ * directory keys) is wiped before it is freed.
  */
 export function call(handle: number, op: string, args: Uint8Array, payload: Uint8Array): Uint8Array;
 

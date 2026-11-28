@@ -203,7 +203,7 @@ export type LocalCall =
     }
   | {
       method: "devices.approve";
-      params: LocalDeviceTarget;
+      params: LocalDeviceApprove;
     }
   | {
       method: "devices.deny";
@@ -784,6 +784,9 @@ export interface LocalChatThreadDelete {
 }
 export interface LocalChatAuditRead {
   limit: PageLimit;
+}
+export interface LocalDeviceApprove {
+  code: LocalDeviceText;
 }
 export interface LocalDeviceTarget {
   circuit: LocalDeviceText;

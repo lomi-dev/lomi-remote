@@ -5815,6 +5815,26 @@
             ],
             "type": "object"
           },
+          "ControlPending": {
+            "description": "The owner is asked on the Host to confirm control for this tunnel. `code` is the tunnel's\nconfirmation code; the device compares it with its own and shows its own copy.",
+            "properties": {
+              "code": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "deadlineMs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "code",
+              "deadlineMs"
+            ],
+            "type": "object"
+          },
           "OlderSide": {
             "enum": [
               "host",
@@ -5919,6 +5939,19 @@
             },
             "required": [
               "updateRequired"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Only inside a `Control` frame once the tunnel is live (not a handshake greeting).",
+            "properties": {
+              "controlPending": {
+                "$ref": "#/components/schemas/HostGreeting/$defs/ControlPending"
+              }
+            },
+            "required": [
+              "controlPending"
             ],
             "type": "object"
           }
@@ -9129,7 +9162,7 @@
                     "type": "string"
                   },
                   "params": {
-                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceTarget"
+                    "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceApprove"
                   }
                 },
                 "required": [
@@ -9437,6 +9470,18 @@
             },
             "required": [
               "threadId"
+            ],
+            "type": "object"
+          },
+          "LocalDeviceApprove": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/LocalRequest/$defs/LocalDeviceText"
+              }
+            },
+            "required": [
+              "code"
             ],
             "type": "object"
           },
@@ -13616,9 +13661,6 @@
               "circuit": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
               },
-              "code": {
-                "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
-              },
               "deviceName": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
               },
@@ -13633,7 +13675,6 @@
               "circuit",
               "deviceName",
               "fingerprint",
-              "code",
               "reason",
               "at"
             ],
@@ -13711,16 +13752,6 @@
           "LocalDeviceNotice": {
             "additionalProperties": false,
             "properties": {
-              "code": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "deviceName": {
                 "$ref": "#/components/schemas/LocalResponse/$defs/LocalDeviceText"
               },

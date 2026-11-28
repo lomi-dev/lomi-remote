@@ -1032,7 +1032,6 @@ export interface LocalDeviceGrant {
 export interface LocalDeviceApproval {
   at: DecimalU64;
   circuit: LocalDeviceText;
-  code: LocalDeviceText;
   deviceName: LocalDeviceText;
   fingerprint: LocalDeviceText;
   reason: LocalDeviceReason;
@@ -1041,7 +1040,6 @@ export interface LocalDeviceModeState {
   mode: LocalDeviceMode;
 }
 export interface LocalDeviceNotice {
-  code?: LocalDeviceText | null;
   deviceName: LocalDeviceText;
   kind: LocalDeviceNoticeKind;
 }

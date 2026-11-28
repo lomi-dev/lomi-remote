@@ -2177,7 +2177,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/$defs/LocalDeviceTarget"
+              "$ref": "#/$defs/LocalDeviceApprove"
             }
           },
           "required": [
@@ -2485,6 +2485,18 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "LocalDeviceApprove": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/LocalDeviceText"
+        }
+      },
+      "required": [
+        "code"
       ],
       "type": "object"
     },
