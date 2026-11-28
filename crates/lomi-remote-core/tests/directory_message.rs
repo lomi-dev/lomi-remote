@@ -30,3 +30,19 @@ fn decodes_a_change_and_refuses_garbage() {
     assert_eq!(status, 1);
     assert_eq!(error["code"], "malformed");
 }
+
+#[test]
+fn a_workspace_carries_the_context_for_rpc_calls() {
+    let context = json!({"runtimeId": WS, "runtimeGeneration": "2", "hostAccessEpoch": "3",
+        "grantRevision": "4"});
+    let workspace = json!({"id": WS, "epoch": WS, "context": context, "name": "app",
+        "capabilities": lomi_remote_protocol::CapabilitySet::control_with_workspace_tools(),
+        "tabs": [], "terminals": [], "chats": []});
+    let message = DirectoryMessage::Change(DirectoryUpdate {
+        seq: 1,
+        change: DirectoryChange::Workspace(serde_json::from_value(workspace).unwrap()),
+    });
+    let (status, value) = decode(&message.encode().unwrap());
+    assert_eq!(status, 0);
+    assert_eq!(value["change"]["change"]["workspace"]["context"], context);
+}

@@ -147,6 +147,8 @@ pub(super) enum Denied {
     /// The device is read-only until the code is confirmed (P3a.10 asks for it).
     ControlNotConfirmed,
     NeedsLocalConsent(Consent),
+    /// The control prompt could not be raised (rate limit, open prompts, one per device).
+    ControlLimited,
 }
 
 impl Denied {
@@ -154,6 +156,7 @@ impl Denied {
         match self {
             Self::Revoked => ErrorCode::AuthRequired,
             Self::WorkspaceUnshared => ErrorCode::WorkspaceUnshared,
+            Self::ControlLimited => ErrorCode::ResourceExhausted,
             Self::NeedsLocalConsent(Consent::GitExecute) => ErrorCode::RepositoryExecutionRequired,
             Self::Scope | Self::ControlNotConfirmed | Self::NeedsLocalConsent(_) => {
                 ErrorCode::ScopeDenied
@@ -590,6 +593,7 @@ mod tests {
             ErrorCode::WorkspaceUnshared
         );
         assert_eq!(Denied::ControlNotConfirmed.code(), ErrorCode::ScopeDenied);
+        assert_eq!(Denied::ControlLimited.code(), ErrorCode::ResourceExhausted);
         assert_eq!(
             Denied::NeedsLocalConsent(Consent::GitExecute).code(),
             ErrorCode::RepositoryExecutionRequired

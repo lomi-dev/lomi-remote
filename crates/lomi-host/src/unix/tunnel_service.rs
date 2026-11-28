@@ -29,6 +29,13 @@
 //! the request id), answers with an `RpcTransferResponse` and sends the payload there in
 //! `TRANSFER_CHUNK` messages followed by CLOSE.
 //!
+//! `files.watch`. The stream's first message is a `FileWatchFrame::Ack` at `throughSeq` 0 with the
+//! stream's `context`, `subscriptionId` and start `cursor` (the same values as `FilesWatchResult`),
+//! so the device learns the id the later `Invalidated` frames and its own acks use.
+//!
+//! Control prompts. When the prompt budget is used up (10 per hour and account, 3 open, one per
+//! device) a claim gets `RESOURCE_EXHAUSTED` with `retryable: true` instead of `SCOPE_DENIED`.
+//!
 //! Flow control. The engine enforces the 64 KiB stream windows. This service keeps at most
 //! `FLIGHT` bytes per stream between itself and the engine (`on_writable` reopens it); when the
 //! device is slow the terminal's own attachment queue overflows and the existing overflow ->
@@ -49,7 +56,7 @@ use super::{
     remote_terminal::{fault, lease_result, terminal as terminal_error},
     rpc::{ConnectionState, dispatch},
     tunnel_authz::{Denied, DeviceAccess, Granted, Target, authorize, call_workspace},
-    tunnel_consent::{DeviceConsent, Mode},
+    tunnel_consent::{ControlError, DeviceConsent, Mode},
 };
 use lomi_host_http::uplink::{
     self,
@@ -61,11 +68,11 @@ use lomi_remote_protocol::{
     rpc::*,
     streams::*,
     tunnel::{
-        ChatOpen, DirectoryChange, DirectoryChat, DirectoryChatState, DirectoryHost,
-        DirectoryLayout, DirectoryMessage, DirectorySnapshot, DirectoryTab, DirectoryTerminal,
-        DirectoryUpdate, DirectoryWorkspace, FilesWatchOpen, MAX_LOGICAL_MESSAGE, OpenParams,
-        RpcEnvelope, RpcTransferResponse, TRANSFER_CHUNK, TRANSFER_INLINE_MAX, TRANSFER_MAX,
-        TerminalOpen, TransferOpen, TransferTag,
+        ChatOpen, DirectoryChange, DirectoryChat, DirectoryChatState, DirectoryContext,
+        DirectoryHost, DirectoryLayout, DirectoryMessage, DirectorySnapshot, DirectoryTab,
+        DirectoryTerminal, DirectoryUpdate, DirectoryWorkspace, FilesWatchOpen,
+        MAX_LOGICAL_MESSAGE, OpenParams, RpcEnvelope, RpcTransferResponse, TRANSFER_CHUNK,
+        TRANSFER_INLINE_MAX, TRANSFER_MAX, TerminalOpen, TransferOpen, TransferTag,
     },
     *,
 };
@@ -132,10 +139,16 @@ fn reset_code(denied: Denied) -> u16 {
     match denied {
         Denied::Revoked => RESET_REVOKED,
         Denied::WorkspaceUnshared => RESET_UNSHARED,
+        Denied::ControlLimited => RESET_BUSY,
         _ => RESET_SCOPE,
     }
 }
 fn denied(d: Denied) -> RemoteError {
+    if d == Denied::ControlLimited {
+        // The prompt budget refills within the hour; the client may ask again later.
+        return RemoteError::new(d.code(), true, Effect::None, ErrorDetails::empty(), None)
+            .expect("static safe error");
+    }
     fault(d.code())
 }
 
@@ -313,7 +326,8 @@ impl Ctx {
     }
     /// `authorize`. When only the owner's code is missing, first re-read (it may just have been
     /// confirmed; `view` is then replaced), and if it still is, ask for it. The client gets
-    /// SCOPE_DENIED either way; the device is told separately (`Control` frame) that the owner is
+    /// SCOPE_DENIED either way (RESOURCE_EXHAUSTED, retryable, when the prompt budget is used up);
+    /// the device is told separately (`Control` frame) that the owner is
     /// asked, and shows its own copy of the code. The owner types that code on the Host.
     fn check(&self, view: &mut Arc<View>, target: &Target<'_>) -> Result<Granted, Denied> {
         let mut r = authorize(&view.access, target, now_ms());
@@ -324,13 +338,19 @@ impl Ctx {
             }
             if r == Err(Denied::ControlNotConfirmed)
                 && let Some(consent) = &self.consent
-                && let Ok(code) = consent.request_control(self.circuit)
-                && let Ok(code) = code.parse()
             {
-                let _ = self.handle.push(Command::ControlPending {
-                    circuit: self.circuit,
-                    code,
-                });
+                match consent.request_control(self.circuit) {
+                    Ok(code) => {
+                        if let Ok(code) = code.parse() {
+                            let _ = self.handle.push(Command::ControlPending {
+                                circuit: self.circuit,
+                                code,
+                            });
+                        }
+                    }
+                    Err(ControlError::Limited) => r = Err(Denied::ControlLimited),
+                    Err(_) => {}
+                }
             }
         }
         r
@@ -872,6 +892,8 @@ struct Chat {
 struct Watch {
     open: OpenParams,
     watch: RemoteWatch,
+    /// The first message: an `Ack` at seq 0 that names the subscription (and the start cursor).
+    first: Option<FileWatchFrame>,
 }
 
 /// A payload on its way over a transfer stream.
@@ -1264,11 +1286,18 @@ impl Hub {
             cursor: None,
         };
         self.watches += 1;
-        let (watch, _) = RemoteWatch::open(files, &params, self.watches, Instant::now())
+        let (watch, started) = RemoteWatch::open(files, &params, self.watches, Instant::now())
             .map_err(|e| reset_for(e.code()))?;
+        let first = FileWatchFrame::Ack(FileWatchAck {
+            context: params.context,
+            subscription_id: started.subscription_id,
+            through_seq: started.through_seq,
+            cursor: started.cursor,
+        });
         Ok(Sub::Watch(Watch {
             open: open.clone(),
             watch,
+            first: Some(first),
         }))
     }
 
@@ -1401,7 +1430,7 @@ impl Hub {
                 };
                 (json(serde_json::to_vec(&frame))?, false)
             }
-            Sub::Watch(w) => match w.watch.poll(Instant::now()) {
+            Sub::Watch(w) => match w.first.take().or_else(|| w.watch.poll(Instant::now())) {
                 Some(frame) => {
                     let end = matches!(frame, FileWatchFrame::ResyncRequired(_));
                     (json(serde_json::to_vec(&frame))?, end)
@@ -2007,6 +2036,12 @@ fn build_directory(ctx: &Ctx, view: &View) -> Vec<DirectoryWorkspace> {
         out.push(DirectoryWorkspace {
             id,
             epoch: state.context.workspace_epoch,
+            context: DirectoryContext {
+                runtime_id: state.context.runtime_id,
+                runtime_generation: state.context.runtime_generation,
+                host_access_epoch: state.context.host_access_epoch,
+                grant_revision: state.context.grant_revision,
+            },
             name: state.name.clone(),
             capabilities,
             tabs,

@@ -6,8 +6,8 @@
 use crate::rpc::{DisplayText, EncodedPathId, PaneState, SplitAxis, TerminalDimension, text_type};
 use crate::{
     ApplicationMajor, CapabilitySet, ChatMessageId, ChatModelId, ChatPermissions, ChatProviderId,
-    ChatThreadId, ChatTitle, DecimalU64, PaneId, RequestId, SessionEpoch, TabId, TimeoutMs,
-    WorkspaceEpoch, WorkspaceId,
+    ChatThreadId, ChatTitle, DecimalU64, PaneId, RequestId, RuntimeId, SessionEpoch, TabId,
+    TimeoutMs, WorkspaceEpoch, WorkspaceId,
     message_framing::{MAX_MESSAGE_LEN, MAX_PLAINTEXT_FRAME_LEN},
     rpc::{BoundedList, RpcCall, RpcResult, dto},
 };
@@ -932,11 +932,24 @@ pub struct DirectoryChat {
     /// Unix milliseconds.
     pub last_activity_at: u64,
 }
+/// `WorkspaceContext` without the workspace id and epoch. A plain struct: `WorkspaceContext` is
+/// decoded as a map and cannot travel in postcard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryContext {
+    pub runtime_id: RuntimeId,
+    pub runtime_generation: DecimalU64,
+    pub host_access_epoch: DecimalU64,
+    pub grant_revision: DecimalU64,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryWorkspace {
     pub id: WorkspaceId,
     pub epoch: WorkspaceEpoch,
+    /// The rest of the `WorkspaceContext` that rpc calls on this workspace carry (`id` and `epoch`
+    /// above are its `workspaceId` and `workspaceEpoch`). A change is sent as an update.
+    pub context: DirectoryContext,
     pub name: DisplayText,
     /// What this device may do there (ceiling of the workspace, limited by the device grant).
     pub capabilities: CapabilitySet,
@@ -1276,19 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn credit_overflow() {
-        let (mut d, mut h, id) = open_pair();
-        let credit =
-            |id, n: u32| TunnelFrame::new(id, FrameType::Credit, 0, n.to_be_bytes().to_vec());
-        // Window is full already: any credit exceeds the initial window.
-        assert_eq!(d.on_frame(&credit(id, 1)), Err(TunnelError::CreditOverflow));
-        assert_eq!(d.on_frame(&credit(0, 1)), Err(TunnelError::CreditOverflow));
-        assert_eq!(
-            d.on_frame(&credit(id, u32::MAX)),
-            Err(TunnelError::CreditOverflow)
-        );
-        // Sum of two u32::MAX credits cannot wrap either.
-    #[test]
     fn frames_that_cross_the_peers_close_are_tolerated() {
         let (mut d, mut h, id) = open_pair();
         let credit = h.grant(id, 10).unwrap_err(); // window already full: no credit to give
@@ -1310,6 +1310,19 @@ mod tests {
         assert_eq!(h.on_frame(&unknown), Err(TunnelError::UnknownStream));
     }
 
+    #[test]
+    fn credit_overflow() {
+        let (mut d, mut h, id) = open_pair();
+        let credit =
+            |id, n: u32| TunnelFrame::new(id, FrameType::Credit, 0, n.to_be_bytes().to_vec());
+        // Window is full already: any credit exceeds the initial window.
+        assert_eq!(d.on_frame(&credit(id, 1)), Err(TunnelError::CreditOverflow));
+        assert_eq!(d.on_frame(&credit(0, 1)), Err(TunnelError::CreditOverflow));
+        assert_eq!(
+            d.on_frame(&credit(id, u32::MAX)),
+            Err(TunnelError::CreditOverflow)
+        );
+        // Sum of two u32::MAX credits cannot wrap either.
         d.send_data(id, &[0; 10], false).unwrap();
         assert_eq!(
             d.on_frame(&credit(id, 11)),
@@ -1649,6 +1662,12 @@ mod tests {
         let ws = DirectoryWorkspace {
             id: WorkspaceId::try_from(id(U)).unwrap(),
             epoch: WorkspaceEpoch::try_from(id(U)).unwrap(),
+            context: DirectoryContext {
+                runtime_id: RuntimeId::try_from(id(U)).unwrap(),
+                runtime_generation: DecimalU64(1),
+                host_access_epoch: DecimalU64(1),
+                grant_revision: DecimalU64(1),
+            },
             name: text("app"),
             capabilities: crate::CapabilitySet::control_with_workspace_tools(),
             tabs: vec![DirectoryTab {

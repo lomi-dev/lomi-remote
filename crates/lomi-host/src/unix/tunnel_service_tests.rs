@@ -78,8 +78,8 @@ fn recs(mut b: &[u8]) -> Vec<Rec> {
             2 => out.push(Rec::Send(body)),
             4 => out.push(Rec::Ev(serde_json::from_slice(&body).unwrap())),
             5 => out.push(Rec::Msg(
-                u32::from_be_bytes(body[..4].try_into().unwrap()),
-                body[4..].to_vec(),
+                u32::from_be_bytes(body[4..8].try_into().unwrap()),
+                body[8..].to_vec(),
             )),
             _ => {}
         }
@@ -201,8 +201,31 @@ impl Rig {
             inbox,
         )
         .unwrap();
+        // The directory pins the Host's key on its first session (`tunnel.new` checks it).
+        let directory = handle_of(&call(
+            0,
+            "directory.new",
+            json!({"accountId": "acc", "deviceId": "dev"}),
+            &[],
+        ));
+        let fingerprint = hex(&fx.host.public_bundle().bundle.fingerprint().unwrap());
+        let session = json!({
+            "account": {"id": "acc"}, "sessionExpiresAt": WALL0 + 1,
+            "relay": {"token": "t", "expiresAt": WALL0 + 1},
+            "hosts": [{"hostId": uuid::Uuid::from_bytes(HOST_ID).to_string(), "online": true,
+                "accessEpoch": "1", "runtimeGeneration": "1", "workspaces": [],
+                "hostFingerprint": fingerprint}],
+            "device": {"state": "registered", "deviceId": "dev"},
+        });
+        call(
+            directory,
+            "directory.applySession",
+            json!({}),
+            session.to_string().as_bytes(),
+        );
         let args = json!({
             "link": link,
+            "directory": directory,
             "deviceBundle": serde_json::to_value(device.public_bundle()).unwrap(),
             "hostBundle": serde_json::to_value(fx.host.public_bundle()).unwrap(),
             "hostFingerprint": hex(&fx.host.public_bundle().bundle.fingerprint().unwrap()),
@@ -680,6 +703,11 @@ fn directory_is_the_first_message_lists_only_shared_workspaces_and_follows_chang
     let ws = &snapshot.workspaces[0];
     assert_eq!(ws.id, fx.ws());
     assert_eq!(ws.name.as_str(), "app");
+    assert_eq!(
+        ws.context.runtime_generation,
+        fx.a.state.context.runtime_generation
+    );
+    assert_eq!(ws.context.grant_revision, fx.a.state.context.grant_revision);
     // an observe-only device does not get the control capabilities
     assert!(ws.capabilities.contains(Capability::TerminalObserve));
     assert!(!ws.capabilities.contains(Capability::TerminalControl));
@@ -721,6 +749,62 @@ fn directory_is_the_first_message_lists_only_shared_workspaces_and_follows_chang
             .iter()
             .any(|c| c.change == DirectoryChange::Removed(fx.ws()))
     );
+}
+
+/// A viewer that only reads the metadata and closes the stream (the mobile app does) must not
+/// take the tunnel down, whether it closes at once or after the whole snapshot, and also when the
+/// snapshot is far larger than the stream window.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+fn closing_a_terminal_stream_early_keeps_the_tunnel() {
+    let mut fx = Fx::new(true);
+    let open = fx.terminal_open();
+    let terminal = serde_json::to_value(fx.terminal()).unwrap();
+    let ws = fx.ws();
+    // fill the scrollback so the snapshot spans many chunks
+    let mut ctl = fx.controller();
+    let s = ctl.open("terminal", open.clone());
+    let claim = json!({"method": "terminal.claim", "params": {
+        "terminal": terminal, "subscriptionId": "x", "renderedThroughSeq": "0"}});
+    let granted = ctl.request(s, "claim", None, claim);
+    let lease = granted["result"]["params"]["lease"].clone();
+    let input = json!({"method": "terminal.input", "params": {
+        "terminal": terminal, "lease": lease, "inputId": "1", "inputSeq": "1",
+        "bytes": b"seq 1 30000\n".to_vec()}});
+    ctl.request(s, "fill", None, input);
+    std::thread::sleep(Duration::from_secs(2));
+    ctl.op("tunnel.closeStream", json!({"stream": s}), &[]);
+    let mut observer = fx.observer();
+    for (n, full) in [false, true].into_iter().enumerate() {
+        let rig = if full { &mut ctl } else { &mut observer };
+        let s = rig.open("terminal", open.clone());
+        let want = if full {
+            "snapshotComplete"
+        } else {
+            "snapshotMetadata"
+        };
+        rig.wait(want, |r| kinds(r, s).contains(&want.to_owned()));
+        rig.op("tunnel.closeStream", json!({"stream": s}), &[]);
+        // the report saw the tunnel close within 2.2 s of the stream
+        let start = Instant::now();
+        rig.wait("quiet", |_| start.elapsed() > Duration::from_millis(2500));
+        let closed = rig
+            .events("tunnelState")
+            .iter()
+            .any(|e| e["state"] == "closed");
+        assert!(
+            !closed,
+            "case {n}: the tunnel closed: {:?}",
+            rig.events("tunnelState")
+        );
+        let reply = rig.request(
+            0,
+            "after-close",
+            Some(&ws),
+            json!({"method": "chat.providers", "params": {}}),
+        );
+        assert!(reply["requestId"] == "after-close", "case {n}: {reply}");
+    }
 }
 
 #[test]
@@ -928,6 +1012,10 @@ fn files_watch_stream_reports_an_invalidation() {
     fs::write(fx.root.join("new.txt"), b"x").unwrap();
     ctl.wait("invalidation", |r| !r.json_of(s, "invalidated").is_empty());
     assert_eq!(ctl.reset_code(s), None);
+    // the first message names the subscription
+    let ack = ctl.json_of(s, "ack");
+    assert_eq!(ack[0]["data"]["throughSeq"], "0", "{ack:?}");
+    assert!(ack[0]["data"]["subscriptionId"].is_string(), "{ack:?}");
 
     // unsharing the workspace resets the live stream (same recheck as for terminals)
     fx.store(|st| st.unshare(fx.ws()).unwrap());
