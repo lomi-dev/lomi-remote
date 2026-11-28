@@ -322,15 +322,13 @@ impl Ctx {
             }
             if r == Err(Denied::ControlNotConfirmed)
                 && let Some(consent) = &self.consent
+                && let Ok(code) = consent.request_control(self.circuit)
+                && let Ok(code) = code.parse()
             {
-                if let Ok(code) = consent.request_control(self.circuit)
-                    && let Ok(code) = code.parse()
-                {
-                    let _ = self.handle.push(Command::ControlPending {
-                        circuit: self.circuit,
-                        code,
-                    });
-                }
+                let _ = self.handle.push(Command::ControlPending {
+                    circuit: self.circuit,
+                    code,
+                });
             }
         }
         r
