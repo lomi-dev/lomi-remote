@@ -48,6 +48,13 @@ this connection, `null` when not connected). Data is a record list: `tag u8 | le
 connect/send/close and re-arms its timer from `link.nextDeadline`, which also covers the link's tunnels
 (`link.tick` ticks them too).
 
+**Record order is part of the protocol.** Send records carry Noise ciphertexts whose nonces follow the
+order the core produced them, so the platform must put them on the socket in exactly that order. If an
+event or stream-message handler calls the core again while a record list is being executed (for example
+`tunnel.openStream` on a directory message, or `tunnel.close` when a sink is gone), queue the records
+of that nested call behind the remaining records of the current list; never execute them in the middle.
+Otherwise the Host fails to decrypt and closes the tunnel (`closed: decrypt`).
+
 Tunnel (client side of `03-protokol.md` sections 3-6, `src/tunnel.rs`). A tunnel runs on a Ready link and the
 bridge wires them together: every link operation (`onMessage`, `onClose`, `tick`, `stop`, ...) also feeds the
 link's circuit traffic (`0x10 DATA` frames, `circuit.closed` events, the results of the tunnel's own
