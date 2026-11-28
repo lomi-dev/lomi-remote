@@ -567,6 +567,12 @@ impl Fx {
             .upsert_grant(&grant(&control, [0xc4; 16], Permissions::Control))
             .unwrap();
         let a = store.workspace(a.state.context.workspace_id).unwrap();
+        // Sharing and the chat level moved the workspace epoch after the session was seeded; a
+        // client's context must be the current one or the Host (rightly) calls it stale.
+        let terminal = terminal.map(|mut t| {
+            t.workspace = a.state.context.clone();
+            t
+        });
 
         let bin = dir.0.join("bin");
         fs::create_dir(&bin).unwrap();
