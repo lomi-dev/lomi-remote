@@ -358,22 +358,30 @@ struct SubShared {
     workspace: String,
     thread: Option<String>,
     queue: Mutex<Queue>,
+    /// Called after a frame or an overflow was queued (never under the queue lock).
+    waker: Mutex<Option<Waker>>,
 }
+pub(super) type Waker = Arc<dyn Fn() + Send + Sync>;
 impl SubShared {
     fn push(&self, frame: ChatStreamFrame, size: usize) {
-        let Ok(mut q) = self.queue.lock() else { return };
-        if q.dead || q.resync {
-            return;
+        {
+            let Ok(mut q) = self.queue.lock() else { return };
+            if q.dead || q.resync {
+                return;
+            }
+            if q.frames.len() >= QUEUE_FRAMES || q.bytes + size > QUEUE_BYTES {
+                q.frames.clear();
+                q.snapshot = None;
+                q.bytes = 0;
+                q.resync = true;
+            } else {
+                q.bytes += size;
+                q.frames.push_back((frame, size));
+            }
         }
-        if q.frames.len() >= QUEUE_FRAMES || q.bytes + size > QUEUE_BYTES {
-            q.frames.clear();
-            q.snapshot = None;
-            q.bytes = 0;
-            q.resync = true;
-            return;
+        if let Some(wake) = self.waker.lock().ok().and_then(|w| w.clone()) {
+            wake();
         }
-        q.bytes += size;
-        q.frames.push_back((frame, size));
     }
 }
 
@@ -382,6 +390,12 @@ pub(super) struct ChatSub {
     shared: Arc<SubShared>,
 }
 impl ChatSub {
+    /// Registers the wake-up for new frames; poll once after setting it.
+    pub(super) fn set_waker(&self, waker: Waker) {
+        if let Ok(mut w) = self.shared.waker.lock() {
+            *w = Some(waker);
+        }
+    }
     /// Next frame in order: pending snapshot parts, then queued frames, then
     /// `resync` once after an overflow. None while idle.
     pub(super) fn poll(&self) -> Option<ChatStreamFrame> {
@@ -580,6 +594,7 @@ impl Router {
                 snapshot,
                 ..Queue::default()
             }),
+            waker: Mutex::new(None),
         });
         s.subs.retain(|w| w.strong_count() > 0);
         s.subs.push(Arc::downgrade(&shared));

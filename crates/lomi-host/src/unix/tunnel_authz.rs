@@ -177,9 +177,12 @@ pub(super) fn authorize(
         .sharing
         .get(workspace)
         .ok_or(Denied::WorkspaceUnshared)?;
-    // Stored-operation methods have no static rights; like today they are never allowed here.
-    let MethodRights::Static(rights) = method.rights() else {
-        return Err(Denied::Scope);
+    // A stored operation carries the rights it was admitted with and the owner checks them (and
+    // that the same device made it) when it looks the operation up; here the workspace and
+    // the control level (`operation.cancel`) are what count.
+    let rights: &[Capability] = match method.rights() {
+        MethodRights::Static(rights) => rights,
+        MethodRights::StoredOperationRights => &[Capability::WorkspaceRead],
     };
     if rights.iter().any(|c| !ceiling.contains(*c)) {
         return Err(Denied::Scope);
@@ -257,7 +260,7 @@ pub(super) fn needs_control(method: Method) -> bool {
     }
 }
 
-/// Workspace embedded in the call; `None` for chat and operation calls.
+/// Workspace embedded in the call; `None` for chat calls.
 pub(super) fn call_workspace(call: &RpcCall) -> Option<&WorkspaceId> {
     use RpcCall::*;
     Some(match call {
@@ -292,9 +295,11 @@ pub(super) fn call_workspace(call: &RpcCall) -> Option<&WorkspaceId> {
         TerminalRenew(p) | TerminalRelease(p) => &p.terminal.workspace.workspace_id,
         TerminalInput(p) => &p.terminal.workspace.workspace_id,
         TerminalResize(p) => &p.terminal.workspace.workspace_id,
+        OperationStatus(p) => &p.context.workspace_id,
+        OperationCancel(p) => &p.context.workspace_id,
         ChatProviders(_) | ChatThreadsList(_) | ChatThreadGet(_) | ChatSubscribe(_)
         | ChatThreadCreate(_) | ChatThreadUpdate(_) | ChatThreadDelete(_) | ChatSend(_)
-        | ChatStop(_) | OperationStatus(_) | OperationCancel(_) => return None,
+        | ChatStop(_) => return None,
     })
 }
 
@@ -473,12 +478,27 @@ mod tests {
     }
 
     #[test]
-    fn operation_methods_have_no_static_rights() {
+    fn operation_methods_need_the_workspace_and_cancel_needs_control() {
         let a = ws(A);
-        for m in [Method::OperationStatus, Method::OperationCancel] {
-            let t = Target::message(&a, m);
-            assert_eq!(at(&access(control(), full()), &t), Err(Denied::Scope));
-        }
+        let status = Target::message(&a, Method::OperationStatus);
+        let cancel = Target::message(&a, Method::OperationCancel);
+        assert_eq!(
+            at(&access(grant(Permissions::Observe, false), full()), &status),
+            Ok(Granted)
+        );
+        assert_eq!(
+            at(&access(grant(Permissions::Observe, false), full()), &cancel),
+            Err(Denied::ControlNotConfirmed)
+        );
+        assert_eq!(at(&access(control(), full()), &cancel), Ok(Granted));
+        let b = ws(B);
+        assert_eq!(
+            at(
+                &access(control(), full()),
+                &Target::message(&b, Method::OperationStatus)
+            ),
+            Err(Denied::WorkspaceUnshared)
+        );
     }
 
     #[test]

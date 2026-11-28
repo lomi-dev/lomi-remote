@@ -247,6 +247,13 @@ pub enum Command {
         circuit: CircuitId,
         stream: u32,
     },
+    /// Opens a Host-owned stream (a `transfer`) and answers with its id. Dropping the command
+    /// unanswered (the tunnel is gone) makes the receiver fail.
+    OpenStream {
+        circuit: CircuitId,
+        params: OpenParams,
+        reply: std::sync::mpsc::SyncSender<Result<u32, &'static str>>,
+    },
     ResetStream {
         circuit: CircuitId,
         stream: u32,
@@ -782,6 +789,16 @@ impl Engine {
                 Command::CloseStream { circuit, stream } => {
                     if let Some(l) = self.live(circuit) {
                         let _ = l.close(stream);
+                        touched.insert(circuit);
+                    }
+                }
+                Command::OpenStream {
+                    circuit,
+                    params,
+                    reply,
+                } => {
+                    if let Some(l) = self.live(circuit) {
+                        let _ = reply.send(l.open(&params));
                         touched.insert(circuit);
                     }
                 }

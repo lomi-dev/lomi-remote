@@ -150,12 +150,16 @@ pub struct TerminalEventEnvelope {
     pub event: Arc<TerminalEvent>,
     pub working_directory: Option<WorkingDirectory>,
 }
+/// Called (under the queue lock, so it must not block or take any terminal lock) whenever an
+/// event or an overflow is queued for an attachment.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 #[derive(Default)]
 struct Queue {
     events: VecDeque<(usize, Arc<TerminalEvent>, Option<WorkingDirectory>)>,
     bytes: usize,
     overflow: bool,
     notified: bool,
+    waker: Option<Waker>,
 }
 struct Subscriber {
     connection: AuthenticatedConnection,
@@ -173,6 +177,13 @@ pub struct Attachment {
     queue: Arc<Mutex<Queue>>,
 }
 impl Attachment {
+    /// Registers the wake-up for this attachment's queue; events already queued do not call it,
+    /// so poll once after setting it.
+    pub fn set_waker(&self, waker: Waker) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.waker = Some(waker);
+        }
+    }
     pub fn try_next(&self) -> Option<Arc<TerminalEvent>> {
         self.try_next_with_metadata().map(|queued| queued.event)
     }
@@ -318,12 +329,18 @@ impl Core {
                 queue.bytes = 0;
                 queue.overflow = true;
                 self.stats.subscriber_overflows = self.stats.subscriber_overflows.saturating_add(1);
+                if let Some(wake) = &queue.waker {
+                    wake();
+                }
                 false
             } else {
                 queue
                     .events
                     .push_back((bytes, event.clone(), working_directory.clone()));
                 queue.bytes += bytes;
+                if let Some(wake) = &queue.waker {
+                    wake();
+                }
                 true
             }
         });

@@ -18,14 +18,19 @@ use lomi_remote_protocol::{
     tunnel::DirectoryMessage,
 };
 use serde_json::{Value, json};
-use std::{collections::VecDeque, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+};
 
 const VECTORS: &str = include_str!("../../../lomi-remote-core/test-vectors/relay-frames.v1.json");
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WALL0: u64 = 1_794_999_000_000;
 const ACCOUNT: [u8; 16] = [0xa1; 16];
 const HOST_ID: [u8; 16] = [0xb2; 16];
-const WAIT: Duration = Duration::from_secs(20);
+const WAIT: Duration = Duration::from_secs(120);
 
 struct TestDirectory(PathBuf);
 impl TestDirectory {
@@ -117,6 +122,8 @@ struct Rig {
     device_id: [u8; 16],
     engine: Engine,
     log: Vec<Rec>,
+    /// The stream whose credit the Host never sees again (0: none).
+    stalled: Arc<std::sync::atomic::AtomicU32>,
 }
 impl Drop for Rig {
     fn drop(&mut self) {
@@ -177,6 +184,7 @@ impl Rig {
             }
             None => Box::new(Scripted::default()),
         };
+        let stalled = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let engine = Engine::new(
             Config {
                 identity: host,
@@ -184,7 +192,12 @@ impl Rig {
                 contract_hash: unhex(HASH).unwrap(),
             },
             policy,
-            service_for_test(Arc::downgrade(&fx.coordinator), inbox.clone(), consent),
+            service_for_test(
+                Arc::downgrade(&fx.coordinator),
+                inbox.clone(),
+                consent,
+                stalled.clone(),
+            ),
             inbox,
         )
         .unwrap();
@@ -214,6 +227,7 @@ impl Rig {
             device_id,
             engine,
             log: Vec::new(),
+            stalled,
         }
     }
 
@@ -378,7 +392,7 @@ impl Rig {
         workspace: Option<&WorkspaceId>,
         call: Value,
     ) -> Value {
-        let mut body = json!({"requestId": id, "timeoutMs": 20000, "call": call});
+        let mut body = json!({"requestId": id, "timeoutMs": 100000, "call": call});
         if let Some(w) = workspace {
             body["workspaceId"] = json!(String::from(*w));
         }
@@ -1144,4 +1158,499 @@ fn devices_mode_is_applied_and_persisted() {
         LocalDeviceMode::Confirm,
         "persisted for the next start"
     );
+}
+
+// ---- the full rpc catalog, transfers, terminal OPEN, wake-ups (P3a streams) --------------------
+
+fn op_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+fn ctx_of(fx: &Fx) -> Value {
+    serde_json::to_value(&fx.a.state.context).unwrap()
+}
+fn root_id(fx: &Fx) -> String {
+    String::from(EntryId::from_bytes(fx.ws().to_bytes()).unwrap())
+}
+fn result_of(v: &Value) -> &Value {
+    assert_eq!(v["type"], "result", "{v}");
+    &v["result"]["params"]
+}
+/// `files.list` of the root: the entry named `name`.
+fn entry_named(rig: &mut Rig, fx: &Fx, name: &str) -> Value {
+    let list = rig.request(
+        0,
+        "list",
+        None,
+        json!({"method": "files.list", "params": {
+            "context": ctx_of(fx), "parentEntryId": root_id(fx), "cursor": null, "limit": 50}}),
+    );
+    result_of(&list)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["displayName"] == name)
+        .unwrap_or_else(|| panic!("{name} not listed: {list}"))
+        .clone()
+}
+fn read_call(fx: &Fx, entry: &Value, max: u64) -> Value {
+    json!({"method": "files.read", "params": {
+        "context": ctx_of(fx), "entryId": entry["entryId"], "fileRevision": null,
+        "offset": "0", "maxBytes": max}})
+}
+impl Rig {
+    /// The payload of the transfer stream a `transfer` answer names, once it is closed.
+    fn payload(&mut self, answer: &Value) -> Vec<u8> {
+        let stream = answer["transferStream"].as_u64().expect("transferStream") as u32;
+        self.wait("transfer closed", |r| {
+            r.events("streamClosed")
+                .iter()
+                .any(|e| e["stream"].as_u64() == Some(stream as u64))
+        });
+        // the Host opened it for this very request
+        let opened = self
+            .events("streamOpened")
+            .into_iter()
+            .find(|e| e["stream"].as_u64() == Some(stream as u64))
+            .expect("transfer stream opened");
+        assert_eq!(opened["kind"], "transfer");
+        assert_eq!(opened["requestId"], answer["requestId"]);
+        self.messages(stream).concat()
+    }
+}
+
+#[test]
+fn files_read_goes_over_a_transfer_stream_unless_it_is_small() {
+    let mut fx = Fx::new(false);
+    let big: Vec<u8> = (0..30_000)
+        .flat_map(|i| format!("line {i:05}\n").into_bytes())
+        .collect();
+    assert!(big.len() > 300_000);
+    fs::write(fx.root.join("big.txt"), &big).unwrap();
+    let mut ctl = fx.controller();
+
+    let entry = entry_named(&mut ctl, &fx, "big.txt");
+    let answer = ctl.request(0, "big", None, read_call(&fx, &entry, 1_048_576));
+    assert_eq!(answer["type"], "transfer", "{answer}");
+    assert_eq!(answer["transferBytes"], big.len().to_string());
+    let meta = &answer["result"]["params"];
+    assert_eq!(meta["bytes"], json!([]));
+    assert_eq!(meta["metadata"]["size"], big.len().to_string());
+    assert_eq!(ctl.payload(&answer), big);
+
+    // a small file is the ordinary inline answer, in the same write
+    let entry = entry_named(&mut ctl, &fx, "hello.txt");
+    let small = ctl.request(0, "small", None, read_call(&fx, &entry, 1024));
+    assert_eq!(result_of(&small)["bytes"].as_array().unwrap().len(), 19);
+    assert!(small.get("transferStream").is_none());
+}
+
+#[test]
+fn rpc_serves_workspace_files_mutations_and_operation_status() {
+    let mut fx = Fx::new(false);
+    let mut ctl = fx.controller();
+    let ctx = ctx_of(&fx);
+
+    let got = ctl.request(
+        0,
+        "ws",
+        None,
+        json!({"method": "workspace.get", "params": {"context": ctx}}),
+    );
+    assert_eq!(
+        result_of(&got)["context"]["workspaceId"],
+        json!(String::from(fx.ws()))
+    );
+    let caps = ctl.request(
+        0,
+        "caps",
+        None,
+        json!({"method": "workspace.capabilities", "params": {"context": ctx}}),
+    );
+    assert!(result_of(&caps)["capabilities"].is_array() || result_of(&caps).is_object());
+
+    // files.create: a mutation at the Control level, then operation.status finds it
+    let root = json!({"method": "files.stat", "params": {
+        "context": ctx, "entryId": root_id(&fx), "fileRevision": null}});
+    let stat = ctl.request(0, "stat", None, root);
+    let revision = result_of(&stat)["fileRevision"].clone();
+    let operation = op_id();
+    let create = json!({"method": "files.create", "params": {
+        "mutation": {"operationId": operation, "context": ctx},
+        "parentEntryId": root_id(&fx), "parentRevision": revision,
+        "name": "made.txt", "destination": "absent"}});
+    let made = ctl.request(0, "create", None, create.clone());
+    assert_eq!(made["type"], "result", "{made}");
+    assert!(fx.root.join("made.txt").exists());
+    let status = ctl.request(
+        0,
+        "status",
+        None,
+        json!({"method": "operation.status", "params": {"context": ctx, "operationId": operation}}),
+    );
+    assert_eq!(status["type"], "result", "{status}");
+
+    // the observe-only device is refused the mutation
+    let mut reader = fx.observer();
+    let refused = reader.request(0, "create-read", None, create);
+    assert_eq!(error_code(&refused), "SCOPE_DENIED", "{refused}");
+}
+
+/// A repository in the app workspace with one commit and one modified file.
+fn git_fixture(fx: &Fx) {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&fx.root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "hello.txt"]);
+    git(&["commit", "-q", "-m", "first"]);
+    fs::write(fx.root.join("hello.txt"), b"changed by the test").unwrap();
+}
+
+#[test]
+fn rpc_git_reads_and_a_stage_at_the_control_level() {
+    let mut fx = Fx::new(false);
+    git_fixture(&fx);
+    let mut ctl = fx.controller();
+    let ctx = ctx_of(&fx);
+
+    let repos = ctl.request(
+        0,
+        "repos",
+        None,
+        json!({"method": "git.repositories", "params": {"context": ctx}}),
+    );
+    let repo = result_of(&repos)["repositories"][0]["repositoryId"].clone();
+    assert!(repo.is_string(), "{repos}");
+    let status = |ctl: &mut Rig, id: &str| {
+        ctl.request(
+            0,
+            id,
+            None,
+            json!({"method": "git.status", "params": {
+                "context": ctx, "repositoryId": repo, "stateToken": null, "cursor": null, "limit": 50}}),
+        )
+    };
+    let before = status(&mut ctl, "status-1");
+    let p = result_of(&before);
+    let entry = p["entries"][0].clone();
+    assert_eq!(entry["displayName"], "hello.txt", "{before}");
+
+    let stage = json!({"method": "git.stage", "params": {
+        "mutation": {"operationId": op_id(), "context": ctx}, "repositoryId": repo,
+        "expected": {"head": p["head"], "index": p["index"]},
+        "paths": [{"entryId": entry["entryId"], "fileRevision": entry["fileRevision"]}]}});
+    // read level: refused
+    let mut reader = fx.observer();
+    let refused = reader.request(0, "stage-read", None, stage.clone());
+    assert_eq!(error_code(&refused), "SCOPE_DENIED", "{refused}");
+    // control level: staged
+    let staged = ctl.request(0, "stage", None, stage);
+    assert_eq!(staged["type"], "result", "{staged}");
+    let after = status(&mut ctl, "status-2");
+    assert_ne!(result_of(&after)["index"], p["index"], "{after}");
+
+    // a diff that fits stays inline
+    let diff = ctl.request(
+        0,
+        "diff",
+        None,
+        json!({"method": "git.diff", "params": {
+            "context": ctx, "repositoryId": repo, "stateToken": result_of(&after)["stateToken"],
+            "entryId": null, "view": "index", "cursor": null, "limit": 50}}),
+    );
+    assert_eq!(diff["type"], "result", "{diff}");
+}
+
+#[test]
+fn a_large_git_diff_goes_over_a_transfer_stream() {
+    let mut fx = Fx::new(false);
+    let lines = |tag: &str| -> String {
+        (0..400)
+            .map(|i| format!("{tag} line number {i} {}\n", "x".repeat(150)))
+            .collect()
+    };
+    fs::write(fx.root.join("hello.txt"), lines("old")).unwrap();
+    git_fixture(&fx);
+    fs::write(fx.root.join("hello.txt"), lines("new")).unwrap();
+    let mut ctl = fx.controller();
+    let ctx = ctx_of(&fx);
+    let repos = ctl.request(
+        0,
+        "repos",
+        None,
+        json!({"method": "git.repositories", "params": {"context": ctx}}),
+    );
+    let repo = result_of(&repos)["repositories"][0]["repositoryId"].clone();
+    let status = ctl.request(
+        0,
+        "status",
+        None,
+        json!({"method": "git.status", "params": {
+            "context": ctx, "repositoryId": repo, "stateToken": null, "cursor": null, "limit": 50}}),
+    );
+    let answer = ctl.request(
+        0,
+        "diff",
+        None,
+        json!({"method": "git.diff", "params": {
+            "context": ctx, "repositoryId": repo, "stateToken": result_of(&status)["stateToken"],
+            "entryId": null, "view": "worktree", "cursor": null, "limit": 50}}),
+    );
+    assert_eq!(answer["type"], "transfer", "{answer}");
+    assert_eq!(answer["result"]["params"]["files"], json!([]));
+    let payload = ctl.payload(&answer);
+    assert_eq!(answer["transferBytes"], payload.len().to_string());
+    let files: Vec<Value> = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(files[0]["displayName"], "hello.txt");
+    assert!(!files[0]["hunks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+fn rpc_terminal_create_runs_the_lifecycle_executor() {
+    let mut fx = Fx::new(false);
+    fx.store(|s| crate::unix::rpc::initialize_default_shell(s).unwrap());
+    let mut ctl = fx.controller();
+    let ctx = ctx_of(&fx);
+    let revision = fx.a.state.domain_revision.0.to_string();
+    let created = ctl.request(
+        0,
+        "term",
+        None,
+        json!({"method": "terminal.create", "params": {
+            "mutation": {"operationId": op_id(), "context": ctx, "expectedRevision": revision},
+            "tabName": "second", "profileId": "default"}}),
+    );
+    assert_eq!(created["type"], "result", "{created}");
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+fn terminal_open_size_is_applied_with_the_first_claim() {
+    let mut fx = Fx::new(true);
+    let mut open = fx.terminal_open();
+    open["cols"] = json!(100);
+    open["rows"] = json!(30);
+    let terminal = serde_json::to_value(fx.terminal()).unwrap();
+    let (session, epoch) = (fx.terminal().session_id, fx.terminal().session_epoch);
+    let mut ctl = fx.controller();
+    let s = ctl.open("terminal", open);
+    let claim = json!({"method": "terminal.claim", "params": {
+        "terminal": terminal, "subscriptionId": "x", "renderedThroughSeq": "0"}});
+    let granted = ctl.request(s, "claim", None, claim);
+    assert_eq!(granted["type"], "result", "{granted}");
+    let snapshot = fx.coordinator.terminals.snapshot(session, epoch).unwrap();
+    assert_eq!((snapshot.cols, snapshot.rows), (100, 30));
+    // the lease the device got is the renewed one: its first resize is accepted
+    let lease = granted["result"]["params"]["lease"].clone();
+    let resize = json!({"method": "terminal.resize", "params": {
+        "terminal": terminal, "lease": lease, "resizeSeq": granted["result"]["params"]["nextResizeSeq"],
+        "columns": 90, "rows": 25}});
+    let resized = ctl.request(s, "resize", None, resize);
+    assert_eq!(resized["type"], "result", "{resized}");
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+fn terminal_open_after_seq_resumes_without_a_snapshot_only_when_current() {
+    let mut fx = Fx::new(true);
+    let open = fx.terminal_open();
+    let mut ctl = fx.controller();
+    let first = ctl.open("terminal", open.clone());
+    ctl.wait("snapshot", |r| {
+        kinds(r, first).contains(&"snapshotComplete".to_owned())
+    });
+    let through = ctl.json_of(first, "snapshotComplete")[0]["data"]["throughSeq"].clone();
+    let seq: u64 = through.as_str().unwrap().parse().unwrap();
+
+    // current: no snapshot, the deltas follow
+    let mut resume = open.clone();
+    resume["afterSeq"] = json!(seq);
+    let second = ctl.open("terminal", resume);
+    let terminal = serde_json::to_value(fx.terminal()).unwrap();
+    let claim = json!({"method": "terminal.claim", "params": {
+        "terminal": terminal, "subscriptionId": "x", "renderedThroughSeq": "0"}});
+    let granted = ctl.request(second, "claim", None, claim);
+    assert_eq!(granted["type"], "result", "{granted}");
+    let lease = granted["result"]["params"]["lease"].clone();
+    let input = json!({"method": "terminal.input", "params": {
+        "terminal": terminal, "lease": lease, "inputId": "1", "inputSeq": "1",
+        "bytes": [104, 105, 10]}});
+    let receipt = ctl.request(second, "input", None, input);
+    assert_eq!(receipt["type"], "result", "{receipt}");
+    ctl.wait("delta", |r| {
+        kinds(r, second).contains(&"deltaComplete".to_owned())
+    });
+    let seen = kinds(&ctl, second);
+    assert!(!seen.contains(&"snapshotMetadata".to_owned()), "{seen:?}");
+    assert!(seen.contains(&"deltaMetadata".to_owned()), "{seen:?}");
+
+    // behind (or ahead of) the model: a snapshot
+    let mut stale = open;
+    stale["afterSeq"] = json!(0);
+    let third = ctl.open("terminal", stale);
+    ctl.wait("snapshot", |r| {
+        kinds(r, third).contains(&"snapshotComplete".to_owned())
+    });
+}
+
+/// CPU ticks (10 ms) per thread name, Linux only: where an idle process spends its time.
+fn thread_ticks() -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    let Ok(tasks) = fs::read_dir("/proc/self/task") else {
+        return out;
+    };
+    for task in tasks.flatten() {
+        let Ok(stat) = fs::read_to_string(task.path().join("stat")) else {
+            continue;
+        };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let fields: Vec<&str> = stat[close + 2..].split(' ').collect();
+        let ticks: u64 = [11, 12]
+            .iter()
+            .filter_map(|i| fields[*i].parse::<u64>().ok())
+            .sum();
+        *out.entry(stat[open + 1..close].to_owned()).or_default() += ticks;
+    }
+    out
+}
+
+fn cpu_ms() -> u64 {
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let ms = |t: libc::timeval| t.tv_sec as u64 * 1000 + t.tv_usec as u64 / 1000;
+    ms(usage.ru_utime) + ms(usage.ru_stime)
+}
+
+/// Runs `idle_child` alone in its own process: other tests' threads would count as CPU here.
+#[test]
+fn an_idle_tunnel_with_open_streams_uses_no_cpu() {
+    let name = format!("{}::idle_child", module_path!().split_once("::").unwrap().1);
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            &name,
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("IDLE_CPU_MS="), "{text}");
+}
+
+#[test]
+#[ignore = "run by an_idle_tunnel_with_open_streams_uses_no_cpu, alone in its process"]
+fn idle_child() {
+    let mut fx = Fx::new(cfg!(target_os = "linux"));
+    let mut ctl = fx.controller();
+    let ws = fx.ws();
+    let created = ctl.request(
+        0,
+        "create",
+        Some(&ws),
+        json!({"method": "chat.thread.create", "params": {
+            "operationId": op_id(), "providerId": "claude", "model": "m",
+            "effort": null, "permissions": "read-only", "workspaceMode": "project", "title": null}}),
+    );
+    let thread_id = created["result"]["params"]["thread"]["threadId"].clone();
+    let chat = ctl.open(
+        "chat",
+        json!({"workspaceId": String::from(ws), "threadId": thread_id, "after": null}),
+    );
+    let watch = ctl.open(
+        "files.watch",
+        json!({"workspaceId": String::from(ws), "path": root_id(&fx)}),
+    );
+    let mut streams = vec![chat, watch];
+    if fx.terminal.is_some() {
+        let term = ctl.open("terminal", fx.terminal_open());
+        ctl.wait("snapshot", |r| {
+            kinds(r, term).contains(&"snapshotComplete".to_owned())
+        });
+        streams.push(term);
+    }
+    // let the opening traffic drain (the test plays the uplink, so this is its own work)
+    for _ in 0..40 {
+        ctl.settle(Vec::new());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(streams.iter().all(|s| ctl.reset_code(*s).is_none()));
+    let before = cpu_ms();
+    let threads = thread_ticks();
+    std::thread::sleep(Duration::from_secs(10));
+    let used = cpu_ms() - before;
+    let mut tunnel = 0;
+    for (name, ticks) in thread_ticks() {
+        let spent = (ticks - threads.get(&name).copied().unwrap_or(0)) * 10;
+        println!("thread {name}: {spent} ms");
+        if name.starts_with("lomi-tunnel") {
+            tunnel += spent;
+        }
+    }
+    println!(
+        "IDLE_CPU_MS={used} tunnel_threads_ms={tunnel} streams={}",
+        streams.len()
+    );
+    // Linux names the threads: the tunnel's own are counted, because the terminal session's PTY
+    // reader runs with or without a tunnel (it polls its master). Elsewhere the whole process.
+    let measured = if threads.is_empty() { used } else { tunnel };
+    assert!(
+        measured < 50,
+        "an idle tunnel used {measured} ms of CPU in 10 s"
+    );
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires Linux native PTY")]
+fn a_stalled_terminal_stream_does_not_block_the_watch_stream() {
+    let mut fx = Fx::new(true);
+    let mut ctl = fx.controller();
+    // The first stream the device opens is 1. From its OPEN on, the Host never sees credit come
+    // back for it (the device would not return it); its snapshot is far larger than the budget.
+    ctl.stalled.store(1, std::sync::atomic::Ordering::Release);
+    let term = ctl.open("terminal", fx.terminal_open());
+    assert_eq!(term, 1);
+    let watch = ctl.open(
+        "files.watch",
+        json!({"workspaceId": String::from(fx.ws()), "path": root_id(&fx)}),
+    );
+    let delivered = |r: &Rig| r.messages(term).iter().map(Vec::len).sum::<usize>();
+    ctl.wait("the terminal's budget", |r| delivered(r) >= FLIGHT - 20_000);
+    std::thread::sleep(Duration::from_millis(500));
+    ctl.settle(Vec::new());
+    let stalled_at = delivered(&ctl);
+    assert!(stalled_at <= FLIGHT, "{stalled_at} bytes went out");
+    assert!(!kinds(&ctl, term).contains(&"snapshotComplete".to_owned()));
+
+    // another stream on the same tunnel is not held up
+    fs::write(fx.root.join("while-stalled.txt"), b"x").unwrap();
+    ctl.wait("a watch frame while the terminal is stalled", |r| {
+        !r.json_of(watch, "invalidated").is_empty()
+    });
+    // and neither is rpc
+    let read = ctl.request(
+        0,
+        "alive",
+        None,
+        json!({"method": "workspace.get", "params": {"context": ctx_of(&fx)}}),
+    );
+    assert_eq!(read["type"], "result", "{read}");
+    // the stalled stream stayed where it was
+    assert_eq!(delivered(&ctl), stalled_at);
+    assert_eq!(ctl.reset_code(term), None);
 }

@@ -254,6 +254,22 @@ impl ConnectionState {
             schedule: VecDeque::new(),
         })
     }
+    /// State for one device tunnel request (`tunnel_service`): the device is the actor, the
+    /// connection is fresh, so dropping it detaches nothing the tunnel's streams hold.
+    pub(super) fn for_device(
+        coordinator: Arc<Coordinator>,
+        actor: ConsumerAuthorizationId,
+    ) -> Self {
+        Self {
+            coordinator,
+            connection: AuthenticatedConnection::new(actor),
+            streams: super::local_streams::Streams::default(),
+            stream_turn: false,
+            subscriptions: HashMap::new(),
+            leases: HashMap::new(),
+            schedule: VecDeque::new(),
+        }
+    }
     fn prune_leases(&mut self) {
         self.leases.retain(|_, (context, lease)| {
             self.coordinator.terminals.lease_is_current(
