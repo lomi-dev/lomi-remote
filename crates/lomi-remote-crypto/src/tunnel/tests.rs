@@ -96,7 +96,13 @@ fn happy_path_and_matching_codes() {
 #[test]
 fn code_unavailable_before_finish() {
     let f = fixture();
-    let d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     assert!(d.confirmation_code().is_err() && !d.is_finished());
 }
 
@@ -119,7 +125,13 @@ fn relay_swapping_device_fingerprint_fails() {
     let f = fixture();
     let mut p = f.prologue.clone();
     p.device_fingerprint = [9; 32];
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     let mut h = TunnelHandshake::host(&f.host, &p).unwrap();
     assert!(!completes(&mut d, &mut h));
 }
@@ -129,7 +141,13 @@ fn replayed_message_one_with_other_circuit_fails() {
     let f = fixture();
     let mut p = f.prologue.clone();
     p.circuit_id = [0x99; 16];
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     let mut h = TunnelHandshake::host(&f.host, &p).unwrap();
     assert!(!completes(&mut d, &mut h));
 }
@@ -140,7 +158,13 @@ fn wrong_host_static_fails_after_message_two() {
     // Same prologue, impostor key: built by hand to bypass the Host's own fingerprint check.
     let impostor = seeded(Role::Host, HOST_ID, 0x40);
     assert!(TunnelHandshake::host(&impostor, &f.prologue).is_err());
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     let mut h = build(false, &impostor, &f.prologue, None, None).unwrap();
     let m1 = d.write_message(&[]).unwrap();
     h.read_message(&m1).unwrap();
@@ -185,12 +209,27 @@ fn device_bundle_with_other_channel_key_fails() {
 #[test]
 fn constructor_checks() {
     let f = fixture();
-    assert!(TunnelHandshake::device(&f.host, &f.prologue, &f.host.signed).is_err());
-    assert!(TunnelHandshake::device(&f.device, &f.prologue, &f.device.signed).is_err());
+    assert!(TunnelHandshake::device(
+        &f.host,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint
+    )
+    .is_err());
+    assert!(TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.device.signed,
+        &f.prologue.host_fingerprint
+    )
+    .is_err());
     assert!(TunnelHandshake::host(&f.device, &f.prologue).is_err());
     let mut p = f.prologue.clone();
     p.account_id = [0; 16];
-    assert!(TunnelHandshake::device(&f.device, &p, &f.host.signed).is_err());
+    assert!(
+        TunnelHandshake::device(&f.device, &p, &f.host.signed, &f.prologue.host_fingerprint)
+            .is_err()
+    );
 }
 
 #[test]
@@ -215,7 +254,13 @@ fn size_limits() {
     assert_eq!(c.len(), MAX_TUNNEL_CIPHERTEXT);
     assert_eq!(&**h.decrypt(&c).unwrap(), &max[..]);
     assert!(h.decrypt(&vec![0; MAX_TUNNEL_CIPHERTEXT + 1]).is_err());
-    let mut hs = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut hs = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     assert!(hs.write_message(&vec![0; MAX_HELLO_PAYLOAD + 1]).is_err());
 }
 
@@ -327,7 +372,13 @@ fn tunnel_vectors() {
 #[test]
 fn host_needs_verified_device_bundle() {
     let f = fixture();
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     let mut h = TunnelHandshake::host(&f.host, &f.prologue).unwrap();
     assert!(completes(&mut d, &mut h));
     let other = seeded(Role::Device, DEVICE_ID, 0x50);
@@ -338,10 +389,86 @@ fn host_needs_verified_device_bundle() {
 #[test]
 fn payload_only_in_message_three() {
     let f = fixture();
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     assert!(d.write_message(b"leak").is_err());
-    let mut d = TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed).unwrap();
+    let mut d = TunnelHandshake::device(
+        &f.device,
+        &f.prologue,
+        &f.host.signed,
+        &f.prologue.host_fingerprint,
+    )
+    .unwrap();
     let mut h = TunnelHandshake::host(&f.host, &f.prologue).unwrap();
     h.read_message(&d.write_message(&[]).unwrap()).unwrap();
     assert!(h.write_message(b"early").is_err());
+}
+
+#[test]
+fn reverify_with_wrong_bundle_clears_approval() {
+    let f = fixture();
+    let (_, mut h, _) = run(&f, false);
+    let other = seeded(Role::Device, DEVICE_ID, 0x50);
+    assert!(h.verify_device(&other.signed).is_err());
+    assert!(h.into_transport().is_err());
+}
+
+#[test]
+fn device_rejects_unpinned_host() {
+    let f = fixture();
+    assert!(TunnelHandshake::device(&f.device, &f.prologue, &f.host.signed, &[7; 32]).is_err());
+}
+
+/// Every prologue field the relay could alter on the Host side breaks the handshake by message 2 on the device side.
+#[test]
+fn any_prologue_field_mismatch_fails_the_handshake() {
+    let f = fixture();
+    let edits: [fn(&mut TunnelPrologue); 6] = [
+        |p| p.contract_hash[0] ^= 1,
+        |p| p.path = TunnelPath::Direct,
+        |p| p.circuit_id[0] ^= 1,
+        |p| p.nonce[0] ^= 1,
+        |p| p.device_fingerprint[0] ^= 1,
+        |p| p.account_id[0] ^= 1,
+    ];
+    for edit in edits {
+        let mut p = f.prologue.clone();
+        edit(&mut p);
+        let mut d = TunnelHandshake::device(
+            &f.device,
+            &f.prologue,
+            &f.host.signed,
+            &f.prologue.host_fingerprint,
+        )
+        .unwrap();
+        // The Host's own fields (host id, fingerprint) are checked against its identity at construction.
+        let mut h = match TunnelHandshake::host(&f.host, &p) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        h.read_message(&d.write_message(&[]).unwrap()).unwrap();
+        let m2 = h.write_message(&[]).unwrap();
+        assert!(d.read_message(&m2).is_err(), "device must reject message 2");
+    }
+}
+
+#[test]
+fn reader_rejects_early_payload() {
+    let f = fixture();
+    let mut h = TunnelHandshake::host(&f.host, &f.prologue).unwrap();
+    let mut raw = snow::Builder::new(NOISE.parse().unwrap())
+        .local_private_key(&[0x44; 32])
+        .unwrap()
+        .prologue(&f.prologue.encode())
+        .unwrap()
+        .build_initiator()
+        .unwrap();
+    let mut m1 = vec![0u8; 256];
+    let n = raw.write_message(b"cleartext", &mut m1).unwrap();
+    assert!(h.read_message(&m1[..n]).is_err());
 }

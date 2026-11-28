@@ -14,6 +14,7 @@ const CONFIRM_DOMAIN: &str = "lomi-remote/tunnel-confirm";
 pub const MAX_HELLO_PAYLOAD: usize = 4096;
 /// Payload plus the largest Noise overhead (ephemeral + static + tags, < 128 bytes).
 const MAX_HANDSHAKE_MESSAGE: usize = MAX_HELLO_PAYLOAD + 128;
+const _: () = assert!(REKEY_INTERVAL == 1 << 20);
 /// A relay DATA frame is type byte + 16-byte circuitId + bytes and must fit in 65535.
 pub const MAX_TUNNEL_CIPHERTEXT: usize = 65535 - 17;
 pub const MAX_TUNNEL_PLAINTEXT: usize = MAX_TUNNEL_CIPHERTEXT - 16;
@@ -127,11 +128,17 @@ fn check_local(
 }
 
 impl TunnelHandshake {
+    /// `pinned_host_fingerprint` must come from the device's own stored pairing or inventory,
+    /// never from the relay; `host` may come from anywhere since it is checked against the pin.
     pub fn device(
         identity: &Identity,
         prologue: &TunnelPrologue,
         host: &SignedBundle,
+        pinned_host_fingerprint: &[u8; 32],
     ) -> Result<Self> {
+        if prologue.host_fingerprint != *pinned_host_fingerprint {
+            return Err("tunnel host pin mismatch".into());
+        }
         Self::device_inner(identity, prologue, host, None)
     }
     pub fn host(identity: &Identity, prologue: &TunnelPrologue) -> Result<Self> {
@@ -205,7 +212,7 @@ impl TunnelHandshake {
             .read_message(message, &mut out)
             .map_err(|_| "handshake authentication failed")?;
         out.truncate(n);
-        if self.messages < 2 && n != 0 {
+        if (self.messages < 2 && n != 0) || n > MAX_HELLO_PAYLOAD {
             return Err("unexpected handshake payload".into());
         }
         if let (Some(expected), Some(remote)) = (self.expected_remote, state.get_remote_static()) {
@@ -241,6 +248,7 @@ impl TunnelHandshake {
     /// relay-attested fingerprint, the account and the Noise static key. Required before
     /// `into_transport`.
     pub fn verify_device(&mut self, bundle: &SignedBundle) -> Result<()> {
+        self.device_verified = false;
         let (fingerprint, account) = self.attested.ok_or("not a Host handshake")?;
         let remote = self.remote_static().ok_or("device static not received")?;
         verify_device(bundle, &fingerprint, &account, &remote)?;
