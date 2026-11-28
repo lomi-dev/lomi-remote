@@ -32,7 +32,11 @@ pub use public_configuration::*;
 mod terminal_move;
 pub use terminal_move::{TerminalMoveError, TerminalMoveLayout, plan_terminal_move};
 
+#[cfg(any(unix, windows))]
+mod device_grants;
 mod host_metadata;
+#[cfg(any(unix, windows))]
+pub use device_grants::*;
 
 mod cloud_publication;
 pub use cloud_publication::*;
@@ -464,12 +468,17 @@ fn read_cloud_history(db: &Connection) -> Result<Option<bool>> {
     .transpose()
 }
 #[cfg(target_os = "linux")]
-const VERSION: i64 = 17;
+const VERSION: i64 = 18;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const VERSION: i64 = 15;
+const VERSION: i64 = 16;
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-const VERSION: i64 = 15;
-/// Schema that introduced `projects.chat_level` (the last migration of each platform).
+const VERSION: i64 = 16;
+/// Schema that introduced `device_grants` (the last migration of each platform).
+#[cfg(target_os = "linux")]
+const DEVICE_GRANTS_SCHEMA: i64 = 18;
+#[cfg(all(any(unix, windows), not(target_os = "linux")))]
+const DEVICE_GRANTS_SCHEMA: i64 = 16;
+/// Schema that introduced `projects.chat_level`.
 #[cfg(target_os = "linux")]
 const CHAT_LEVEL_SCHEMA: i64 = 17;
 #[cfg(all(any(unix, windows), not(target_os = "linux")))]
@@ -499,6 +508,8 @@ pub enum StoreError {
     SchemaVersion,
     Backup,
     PurgeInProgress,
+    /// The Host already stores the maximum number of device grants.
+    DeviceGrantsFull,
 }
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -1601,6 +1612,21 @@ PRAGMA user_version=6;",
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             ensure_chat_level_column(&tx)?;
             tx.execute_batch(&format!("PRAGMA user_version={CHAT_LEVEL_SCHEMA};"))?;
+            tx.commit()?;
+        }
+        #[cfg(any(unix, windows))]
+        if version < DEVICE_GRANTS_SCHEMA {
+            if version != 0 {
+                // Adds the device-grant table; no existing table changes.
+                migration_backup(
+                    &db,
+                    &path.with_extension(format!("before-v{DEVICE_GRANTS_SCHEMA}.sqlite")),
+                    DEVICE_GRANTS_SCHEMA - 1,
+                )?;
+            }
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(device_grants::SCHEMA)?;
+            tx.execute_batch(&format!("PRAGMA user_version={DEVICE_GRANTS_SCHEMA};"))?;
             tx.commit()?;
         }
         #[cfg(any(unix, windows))]
@@ -7018,9 +7044,9 @@ mod schema_16_migration_tests {
 
     #[test]
     fn schema_15_to_16_preserves_all_tables_rows_and_identity() {
-        // Schema 17 only adds projects.chat_level; this fixture rewinds to 15 and
-        // therefore removes that column again before migrating.
-        assert_eq!(PROFILE_SCHEMA_VERSION, 17);
+        // Schemas 17 and 18 only add projects.chat_level and device_grants; this
+        // fixture rewinds to 15 and removes the column again before migrating.
+        assert_eq!(PROFILE_SCHEMA_VERSION, 18);
         let profile = private_test_profile();
         let lock =
             lomi_platform::unix::OwnerLock::acquire(&profile.0).expect("acquire test owner lock");
@@ -7092,11 +7118,13 @@ mod schema_16_migration_tests {
                 |row| row.get(0),
             )
             .expect("read preservation marker");
-        assert_eq!(after_version, 17);
-        // `projects` gained the schema-17 column; everything else is untouched.
+        assert_eq!(after_version, 18);
+        // `projects` gained the schema-17 column and `device_grants` is new.
         let others = |rows: Vec<Vec<rusqlite::types::Value>>| {
             rows.into_iter()
-                .filter(|row| row.get(2) != Some(&rusqlite::types::Value::Text("projects".into())))
+                .filter(|row| {
+                    !matches!(row.get(2), Some(rusqlite::types::Value::Text(t)) if t == "projects" || t == "device_grants")
+                })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -7106,7 +7134,7 @@ mod schema_16_migration_tests {
         );
         let others_rows = |rows: Vec<(String, Vec<Vec<rusqlite::types::Value>>)>| {
             rows.into_iter()
-                .filter(|(name, _)| name != "projects")
+                .filter(|(name, _)| name != "projects" && name != "device_grants")
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -7120,7 +7148,7 @@ mod schema_16_migration_tests {
         assert_eq!(&main_header[..16], b"SQLite format 3\0");
         assert_eq!(
             u32::from_be_bytes(main_header[60..64].try_into().unwrap()),
-            17
+            18
         );
         let backup = Connection::open_with_flags(
             database.with_extension("before-v16.sqlite"),

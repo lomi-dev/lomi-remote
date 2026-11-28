@@ -2248,6 +2248,7 @@ name = "lomi-host-store"
 version = "0.1.10"
 dependencies = [
  "lomi-platform",
+ "lomi-remote-crypto",
  "lomi-remote-protocol",
  "rusqlite",
  "serde",

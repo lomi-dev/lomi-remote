@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 lomi-remote-protocol = { path = "../lomi-remote-protocol" }
+lomi-remote-crypto = { path = "../lomi-remote-crypto" }
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "hooks"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
